@@ -14,11 +14,14 @@ Off-box service that lets studio agents ask for narrow, short-lived access, appr
 - `src/index.ts` -- Worker entry (named by `main` in `wrangler.jsonc`); forwards every request to the one Durable Object `FrontDesk`.
 - `src/agent.ts` -- recognises the c-box agent from its verified Access service-token ticket.
 - `src/routes.ts` -- HTTP routes. `src/desk.ts` -- grant, approval, collect and log rules. `src/jobs.ts` -- the fixed job list. `src/page.ts` -- phone pages.
+- `vault/` -- the second Worker `front-desk-vault`: sealed master key and the jobs that use it. No libraries allowed (enforced by `test/vault.test.ts`). The front desk reaches it only through the service binding `VAULT` declared in `wrangler.jsonc`; the RPC methods live in `vault/src/index.ts`, the rules in `vault/src/vault.ts`, the sealing in `vault/src/seal.ts`, its one-time setup page in `vault/src/setup.ts`.
+- Deploys: Workers Builds runs `npx wrangler deploy`; wrangler first runs `build.command` from `wrangler.jsonc`, i.e. `scripts/deploy-vault.sh`, which deploys the vault (only in Workers Builds on main).
 
 ## Release Checklist
 
 1. [command] `npm test` passes
 2. [command] `npx tsc --noEmit` passes
 3. [command] `npx wrangler deploy --dry-run --outdir /tmp/fd-dist` succeeds (run inside sandbox-run)
+3a. [command] `npx wrangler deploy --dry-run -c vault/wrangler.jsonc --outdir /tmp/fd-vault` succeeds (run inside sandbox-run)
 4. [inspect] No secret, live hostname or account ID added to the repo.
 5. [inspect] Every new refusal has a test shown failing with the safeguard removed.

@@ -227,3 +227,99 @@ test("PRF check: owner only", async () => {
     assert.equal((await call(store, "/prf-check", { method: "POST", body: "{}" }, caller)).status, 403);
   }
 });
+
+// Vault jobs and master key setup (PR3b-2b step 2). A fake vault records what it is asked.
+function fakeVault(stored = false) {
+  const calls: { op: string; args: unknown[] }[] = [];
+  return {
+    calls,
+    async status() {
+      return stored ? { stored: true, pending: false, token_id: "t1" } : { stored: false, pending: false };
+    },
+    async run(job: string, params: Record<string, string>, prf: string) {
+      calls.push({ op: "run", args: [job, params, prf] });
+      return { ok: true, zone: "example.com", after: 0 } as any;
+    },
+  };
+}
+const callV = (store: MemoryStore, vault: ReturnType<typeof fakeVault>, path: string, init?: RequestInit, caller = callerFor(path, init)) =>
+  route(new Request(base + path, init), store, { caller, requester: caller === "agent" ? AGENT : undefined }, Date.now(), vault);
+const ZONE = "benculbert.com";
+const optsIn = async (res: Response) => JSON.parse((await res.text()).match(/const opts=(\{.*?\});\n/)![1]);
+
+async function askProbe(store: MemoryStore, vault: ReturnType<typeof fakeVault>) {
+  const asked = await callV(store, vault, "/request", { method: "POST", body: JSON.stringify({ job: "cf.dns.txt.probe", params: { zone: ZONE }, reason: "prove the vault" }) });
+  assert.equal(asked.status, 201);
+  return ((await asked.json()) as { id: string }).id;
+}
+
+test("vault job: approval page asks for the master-key secret; the job runs once at approval", async () => {
+  const { store, key } = await enrolled();
+  const vault = fakeVault(true);
+  const id = await askProbe(store, vault);
+  const opts = await optsIn(await callV(store, vault, `/approve/${id}`));
+  const salt = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("front-desk master-key v1"))).toString("base64url");
+  assert.equal(opts.prfSalt, salt);
+  const answer = { ...(await key.assert(opts.challenge, "desk.example", base)), prf: prfOut(5) };
+  const ok = await callV(store, vault, `/approve/${id}`, { method: "POST", body: JSON.stringify(answer) });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(((await ok.json()) as any).result, { ok: true, zone: "example.com", after: 0 });
+  assert.deepEqual(vault.calls, [{ op: "run", args: ["cf.dns.txt.probe", { zone: ZONE }, prfOut(5)] }]);
+  // Replaying the same answer runs nothing more.
+  assert.equal((await callV(store, vault, `/approve/${id}`, { method: "POST", body: JSON.stringify(answer) })).status, 409);
+  assert.equal(vault.calls.length, 1);
+  const c = await callV(store, vault, `/collect/${id}`, { method: "POST" });
+  assert.deepEqual(((await c.json()) as any).result, { ok: true, zone: "example.com", after: 0 });
+  const events = (await new Desk(store, { origin: base, rpID: "desk.example" }).readLog()).map((e) => e.event);
+  assert.deepEqual(events.slice(-5), ["requested", "approved", "job_done", "refused", "collected"]);
+});
+
+test("vault job: no passkey secret means not approved and the vault is never called", async () => {
+  const { store, key } = await enrolled();
+  const vault = fakeVault(true);
+  const id = await askProbe(store, vault);
+  const opts = await optsIn(await callV(store, vault, `/approve/${id}`));
+  const res = await callV(store, vault, `/approve/${id}`, { method: "POST", body: JSON.stringify(await key.assert(opts.challenge, "desk.example", base)) });
+  assert.deepEqual(await res.json(), { error: "prf_missing" });
+  assert.equal(vault.calls.length, 0);
+  assert.equal((await new Desk(store, { origin: base, rpID: "desk.example" }).grant(id)).status, "pending");
+});
+
+test("vault job: a zone not on the studio list is refused at the request", async () => {
+  const { store } = await enrolled();
+  for (const zone of ["example.com", "evil.benculbert.com", ""]) {
+    const res = await callV(store, fakeVault(), "/request", { method: "POST", body: JSON.stringify({ job: "cf.dns.txt.probe", params: { zone }, reason: "r" }) });
+    assert.deepEqual(await res.json(), { error: "bad_params" });
+  }
+});
+
+test("vault job: a result that is not ok is logged as job_failed with the full evidence", async () => {
+  const { store, key } = await enrolled();
+  const vault = fakeVault(true);
+  vault.run = async () => ({ ok: false, error: "token delete failed: x", minted: [{ id: "m1", deleted: false }] }) as any;
+  const id = await askProbe(store, vault);
+  const opts = await optsIn(await callV(store, vault, `/approve/${id}`));
+  await callV(store, vault, `/approve/${id}`, { method: "POST", body: JSON.stringify({ ...(await key.assert(opts.challenge, "desk.example", base)), prf: prfOut(5) }) });
+  const row = (await new Desk(store, { origin: base, rpID: "desk.example" }).readLog()).at(-1)!;
+  assert.equal(row.event, "job_failed");
+  assert.match(row.detail!, /"deleted":false/);
+});
+
+test("vault job: a collect while the vault is still working is refused, and the grant is collected once", async () => {
+  const { store, key } = await enrolled();
+  const vault = fakeVault(true);
+  const id = await askProbe(store, vault);
+  let during: Response | undefined;
+  const run = vault.run.bind(vault);
+  vault.run = async (...args) => {
+    during = await callV(store, vault, `/collect/${id}`, { method: "POST" });
+    return run(...args);
+  };
+  const opts = await optsIn(await callV(store, vault, `/approve/${id}`));
+  const answer = { ...(await key.assert(opts.challenge, "desk.example", base)), prf: prfOut(5) };
+  assert.equal((await callV(store, vault, `/approve/${id}`, { method: "POST", body: JSON.stringify(answer) })).status, 200);
+  assert.deepEqual(await during!.json(), { error: "not_ready" });
+  const first = await callV(store, vault, `/collect/${id}`, { method: "POST" });
+  assert.equal(((await first.json()) as any).result.zone, "example.com");
+  assert.deepEqual(await (await callV(store, vault, `/collect/${id}`, { method: "POST" })).json(), { error: "already_collected" });
+});

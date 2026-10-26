@@ -10,7 +10,8 @@ import {
   type AuthenticationResponseJSON,
   type RegistrationResponseJSON,
 } from "@simplewebauthn/server";
-import { JOBS, type JobName } from "./jobs.ts";
+import { JOBS, type Job, type JobName } from "./jobs.ts";
+import type { VaultApi } from "../vault/src/api.ts";
 
 export const APPROVE_WINDOW_MS = 10 * 60_000; // ask -> approve
 export const COLLECT_WINDOW_MS = 5 * 60_000; // approve -> collect
@@ -18,6 +19,8 @@ export const CHALLENGE_TTL_MS = 5 * 60_000;
 export const ROUTE_REFUSALS_PER_DAY = 20;
 // PRF check only. The master key will use a different label, so a check never reveals key material.
 export const PRF_CHECK_LABEL = "front-desk prf-check v1";
+// Salt for the secret that unlocks the master key (setup and vault jobs).
+export const PRF_MASTER_LABEL = "front-desk master-key v1";
 
 // The subset of Durable Object storage the desk uses; MemoryStore implements it for tests.
 export interface Store {
@@ -40,6 +43,8 @@ export interface Grant {
   status: GrantStatus;
   approved_at?: number;
   collected_at?: number;
+  // What a vault job reported when it ran at approval (never a secret).
+  result?: unknown;
 }
 
 export interface Passkey {
@@ -50,7 +55,7 @@ export interface Passkey {
 }
 
 interface Challenge {
-  purpose: "approve" | "enroll" | "check";
+  purpose: "approve" | "enroll" | "check" | "setup";
   grant_id?: string;
   expires_at: number;
   used: boolean;
@@ -122,7 +127,21 @@ export async function grantHash(g: Pick<Grant, "id" | "job" | "params" | "reques
 // Test seam: lets a test pause an approval between verification and commit.
 export interface DeskHooks {
   afterVerify?: (grantId: string) => Promise<void>;
+  // The vault Worker (service binding VAULT); absent in tests that do not need it.
+  vault?: VaultApi;
 }
+
+// The passkey secret a browser sent with its answer, if it is 32 bytes.
+function prfOf(input: unknown): string | null {
+  const prf = (input as { prf?: unknown } | null)?.prf;
+  try {
+    return typeof prf === "string" && fromB64url(prf).length === 32 ? prf : null;
+  } catch {
+    return null;
+  }
+}
+
+const isVault = (job: JobName) => (JOBS[job] as Job).vault === true;
 
 export class Desk {
   private store: Store;
@@ -205,7 +224,7 @@ export class Desk {
       expires_at: now + CHALLENGE_TTL_MS,
       used: false,
     });
-    return options;
+    return isVault(g.job) ? { ...options, prfSalt: await saltFor(PRF_MASTER_LABEL) } : options;
   }
 
   // A refusal Ben should be able to see, for something not tied to one grant.
@@ -264,6 +283,12 @@ export class Desk {
     }
     const fail = (detail: string) => this.log({ event: "refused", ...this.grantFacts(g), detail }, now);
     const { key, newCounter } = await this.verifyPasskey(response, challenge, fail);
+    // A vault job needs the passkey's secret; without it nothing is approved.
+    const prf = isVault(g.job) ? prfOf(response) : null;
+    if (isVault(g.job) && !prf) {
+      await fail("no passkey secret sent");
+      throw new DeskError("prf_missing", 422);
+    }
     await this.hooks.afterVerify?.(g.id);
     // Verification awaited crypto, so another request may have run meanwhile.
     // Re-read and commit with storage calls only, which the Durable Object does not interleave.
@@ -272,7 +297,22 @@ export class Desk {
     const approved: Grant = { ...current, status: "approved", approved_at: now };
     await this.store.put(`grant:${g.id}`, approved);
     await this.log({ event: "approved", ...this.grantFacts(g) }, now);
-    return approved;
+    if (!prf) return approved;
+    // Committed as approved first, so a replay finds it not pending while the vault works.
+    let result: unknown;
+    try {
+      if (!this.hooks.vault) throw new Error("vault not connected");
+      result = await this.hooks.vault.run(g.job, g.params, prf);
+      const ok = (result as { ok?: unknown } | null)?.ok === true;
+      await this.log({ event: ok ? "job_done" : "job_failed", ...this.grantFacts(g), detail: logDetail(result) }, now);
+    } catch (e) {
+      result = { error: (e as Error).message.slice(0, 120) };
+      await this.log({ event: "job_failed", ...this.grantFacts(g), detail: (e as Error).message.slice(0, 120) }, now);
+    }
+    // Re-read: other requests ran while the vault worked; only the result is added.
+    const done: Grant = { ...(await this.grant(id)), result };
+    await this.store.put(`grant:${g.id}`, done);
+    return done;
   }
 
   // Checks Ben's passkey answer against a challenge already taken. Every failure is logged through `fail`.
@@ -321,7 +361,7 @@ export class Desk {
       allowCredentials: keys.map((k) => ({ id: k.id })),
     });
     await this.store.put<Challenge>(`challenge:${options.challenge}`, { purpose: "check", expires_at: now + CHALLENGE_TTL_MS, used: false });
-    return { ...options, prfSalt: b64url(await sha256(enc.encode(PRF_CHECK_LABEL))) };
+    return { ...options, prfSalt: await saltFor(PRF_CHECK_LABEL) };
   }
 
   async prfCheck(input: unknown, now: number): Promise<{ fingerprint: string }> {
@@ -353,9 +393,12 @@ export class Desk {
     if (g.status === "pending") throw new DeskError("not_approved", 403);
     if (g.status === "collected") throw new DeskError("already_collected", 409);
     if (now > (g.approved_at ?? 0) + COLLECT_WINDOW_MS) throw new DeskError("collect_window_closed", 410);
+    // A vault job is approved before the vault finishes; until its result is in, there is nothing to collect.
+    if ((JOBS[g.job] as Job).vault && g.result === undefined) throw new DeskError("not_ready", 409);
     const collected: Grant = { ...g, status: "collected", collected_at: now };
     await this.store.put(`grant:${g.id}`, collected);
-    const result = await JOBS[g.job].run(g.params);
+    const job = JOBS[g.job] as Job;
+    const result = job.vault ? g.result : await job.run!(g.params);
     await this.log({ event: "collected", ...this.grantFacts(g) }, now);
     return { grant: collected, result };
   }
@@ -412,6 +455,28 @@ export class Desk {
     await this.log({ event: "passkey_enrolled", detail: `passkey ${key.id.slice(0, 8)}…` }, now);
     return key;
   }
+}
+
+export const LOG_DETAIL_MAX = 1200;
+
+// The job's evidence for the log, always valid JSON. If it is too long, the token-id lists are
+// shortened to their first 10 with their full counts and "truncated": true (Codex r2 #5); the
+// complete result stays on the grant record.
+export function logDetail(result: unknown): string {
+  const full = JSON.stringify(result);
+  if (full.length <= LOG_DETAIL_MAX) return full;
+  const r = result as { audit?: { new_since_setup?: string[]; minted_still_listed?: string[] } };
+  const cut = (ids: string[] = []) => ({ first: ids.slice(0, 10), total: ids.length });
+  const short = JSON.stringify({
+    ...r,
+    audit: { ...r.audit, new_since_setup: cut(r.audit?.new_since_setup), minted_still_listed: cut(r.audit?.minted_still_listed) },
+    truncated: true,
+  });
+  return short.length <= LOG_DETAIL_MAX ? short : JSON.stringify({ truncated: true, ok: (result as { ok?: unknown }).ok === true, note: "see grant record" });
+}
+
+async function saltFor(label: string): Promise<string> {
+  return b64url(await sha256(enc.encode(label)));
 }
 
 function hexToBytes(h: string): Uint8Array {

@@ -2,9 +2,10 @@
 // so tests can drive them with an in-memory store.
 
 import { Desk, DeskError, type Store } from "./desk.ts";
+import type { VaultApi } from "../vault/src/api.ts";
 import { approvePage, enrollPage, logPage, prfCheckPage } from "./page.ts";
 
-export const VERSION = "0.5.0-prf-check";
+export const VERSION = "0.6.0-vault";
 
 // Who is calling, worked out by the Worker from Cloudflare Access (index.ts):
 // owner from Ben's email (callerOf), agent from the service-token ticket (agent.ts).
@@ -64,10 +65,10 @@ async function body<T>(request: Request, desk: Desk, what: string, now: number):
 }
 
 // The routes, kept apart from the Durable Object so tests can drive them.
-export async function route(request: Request, store: Store, who: Who, now = Date.now()): Promise<Response> {
+export async function route(request: Request, store: Store, who: Who, now = Date.now(), vault?: VaultApi): Promise<Response> {
   const { caller, requester = "" } = who;
   const url = new URL(request.url);
-  const desk = new Desk(store, { origin: url.origin, rpID: url.hostname });
+  const desk = new Desk(store, { origin: url.origin, rpID: url.hostname }, { vault });
   const nonce = crypto.randomUUID().replace(/-/g, "");
   const parts = url.pathname.split("/").filter(Boolean);
   const m = request.method;
@@ -89,7 +90,7 @@ export async function route(request: Request, store: Store, who: Who, now = Date
       }
       if (m === "POST") {
         const g = await desk.approve(parts[1], await body(request, desk, "approve", now), now);
-        return json({ ok: true, status: g.status });
+        return json({ ok: true, status: g.status, ...(g.result === undefined ? {} : { result: g.result }) });
       }
     }
     if (m === "POST" && parts[0] === "collect" && parts.length === 2) {

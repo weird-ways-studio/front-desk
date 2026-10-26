@@ -49,12 +49,16 @@ export function approvePage(g: Grant, options: unknown, nonce: string): string {
 <p><strong>${esc(describe)}</strong></p>
 <p class="muted">Job <code>${esc(g.job)}</code> · asked by ${esc(g.requester)} · expires ${new Date(g.expires_at).toISOString().slice(11, 16)} UTC</p>
 <p class="muted">The agent's words:</p><blockquote>${esc(g.reason)}</blockquote>
-<button id="go">Next: approve with Face ID</button>`,
+<button id="go">Next: approve with Face ID</button><pre id="after" class="muted" style="white-space:pre-wrap"></pre>`,
     `const opts=${JSON.stringify(options)};
 document.getElementById('go').onclick=async e=>{e.target.disabled=true;
  let c;try{c=await navigator.credentials.get({publicKey:{challenge:u2b(opts.challenge),rpId:opts.rpId,timeout:opts.timeout,userVerification:'required',
-  allowCredentials:(opts.allowCredentials||[]).map(a=>({type:'public-key',id:u2b(a.id)}))}})}catch(err){show(false,'FAIL: '+err.name);e.target.disabled=false;return}
- await finish(location.pathname,c)};`,
+  allowCredentials:(opts.allowCredentials||[]).map(a=>({type:'public-key',id:u2b(a.id)})),...(opts.prfSalt?{extensions:{prf:{eval:{first:u2b(opts.prfSalt)}}}}:{})}})}
+ catch(err){show(false,'FAIL: '+err.name);e.target.disabled=false;return}
+ const x=(c.getClientExtensionResults&&c.getClientExtensionResults().prf)||{};const first=x.results&&x.results.first;
+ const res=await fetch(location.pathname,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...cred(c),prf:first?b2u(first):null})});
+ const j=await res.json().catch(()=>({}));const bad=j.result&&j.result.ok!==true;show(res.ok&&!bad,res.ok?(bad?'FAIL: '+(j.result.error||'a check did not pass, see below'):'PASS'):'FAIL: '+(j.error||res.status));
+ if(j.result)document.getElementById('after').textContent=JSON.stringify(j.result,null,1)};`,
   );
 }
 

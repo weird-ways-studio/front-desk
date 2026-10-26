@@ -240,3 +240,16 @@ test("approvals for missing, used or expired grants and a second enrollment are 
   const details = (await desk.readLog()).filter((e) => e.event === "refused").map((e) => e.detail);
   assert.deepEqual(details, ["approve: no_such_grant", "approve: not_pending", "approve: grant_expired", "enroll: already_enrolled"]);
 });
+
+test("log detail stays valid JSON and says when it shortened a long token list", async () => {
+  const { logDetail, LOG_DETAIL_MAX } = await import("../src/desk.ts");
+  const small = { ok: true, audit: { new_since_setup: [], minted_still_listed: [] } };
+  assert.equal(logDetail(small), JSON.stringify(small));
+  const ids = Array.from({ length: 300 }, (_, i) => `token${i}`);
+  const big = logDetail({ ok: false, zone: "benculbert.com", audit: { tokens: 300, new_since_setup: ids, minted_still_listed: [] } });
+  assert.ok(big.length <= LOG_DETAIL_MAX);
+  const parsed = JSON.parse(big);
+  assert.equal(parsed.truncated, true);
+  assert.deepEqual(parsed.audit.new_since_setup, { first: ids.slice(0, 10), total: 300 });
+  assert.equal(parsed.ok, false);
+});

@@ -13,16 +13,19 @@
 import { DurableObject } from "cloudflare:workers";
 import { agentOf, type AgentConfig } from "./agent.ts";
 import { callerOf, route, type Who } from "./routes.ts";
+import type { VaultApi } from "../vault/src/api.ts";
 
 interface Env extends AgentConfig {
   DESK: DurableObjectNamespace<FrontDesk>;
   // Set by Ben in the dashboard (kept across deploys by keep_vars). Unset = nobody is the owner.
   OWNER_EMAIL?: string;
+  // The vault Worker (vault/), reached only through this service binding (wrangler.jsonc "services").
+  VAULT: Service & VaultApi;
 }
 
-export class FrontDesk extends DurableObject {
+export class FrontDesk extends DurableObject<Env> {
   async handle(request: Request, who: Who): Promise<Response> {
-    return route(request, this.ctx.storage, who);
+    return route(request, this.ctx.storage, who, Date.now(), this.env.VAULT);
   }
 }
 
