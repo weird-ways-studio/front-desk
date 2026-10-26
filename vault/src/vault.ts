@@ -61,8 +61,12 @@ export class VaultLogic {
 
   private async master(): Promise<Master | undefined> {
     const m = await this.store.get<Master | null>("master");
-    // A setup nobody confirmed with Face ID in time counts as no key at all.
-    if (!m || (!m.by_passkey && (!m.pending || this.now() > m.pending.until))) return undefined;
+    if (!m) return undefined;
+    if (!m.by_passkey && (!m.pending || this.now() > m.pending.until)) {
+      // A setup nobody confirmed with Face ID in time is erased, one-time key and all (Codex r3 #1).
+      await this.store.put("master", null);
+      return undefined;
+    }
     return m;
   }
 
@@ -112,6 +116,10 @@ export class VaultLogic {
     const token = await open(fromB64url(m.pending!.key), PENDING_LABEL, m.pending!.box);
     const locked: Master = { ...m, by_passkey: await seal(secret, MASTER_LABEL, token) };
     delete locked.pending;
+    // Re-read after the awaited crypto: only the first tap may lock it (Codex r3 #2). Storage
+    // calls only from here on, which the Durable Object does not interleave.
+    const now = await this.store.get<Master | null>("master");
+    if (!now?.pending || now.pending.key !== m.pending!.key) throw new VaultError("already_locked");
     await this.store.put("master", locked);
     return { token, lockedNow: true };
   }

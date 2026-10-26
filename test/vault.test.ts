@@ -128,10 +128,24 @@ test("first Face ID tap locks the key to the passkey and forgets the one-time ke
   await assert.rejects(vault.run("cf.dns.txt.probe", { zone: ZONE }, prf(8)), /wrong_secret/);
 });
 
-test("a setup nobody confirms within 30 minutes lapses and can be done again", async () => {
-  const { vault, clock } = await stored();
+test("two first taps at once: only one locks the key, and the other cannot replace it", async () => {
+  const { store, vault } = await stored();
+  const results = await Promise.allSettled([vault.run("cf.dns.txt.probe", { zone: ZONE }, prf(1)), vault.run("cf.dns.txt.probe", { zone: ZONE }, prf(2))]);
+  const won = results.filter((r) => r.status === "fulfilled" && r.value.master.locked_to_passkey_now);
+  const lost = results.filter((r) => r.status === "rejected" && /already_locked/.test(String(r.reason)));
+  assert.equal(won.length, 1);
+  assert.equal(lost.length, 1);
+  const winner = results[0].status === "fulfilled" ? 1 : 2;
+  const master = (await store.get<any>("master"))!;
+  assert.equal(await open(fromB64url(prf(winner)), MASTER_LABEL, master.by_passkey), PARENT);
+  await assert.rejects(open(fromB64url(prf(3 - winner)), MASTER_LABEL, master.by_passkey), /wrong_secret/);
+});
+
+test("a setup nobody confirms within 30 minutes lapses, is erased from storage, and can be done again", async () => {
+  const { store, vault, clock } = await stored();
   clock.now += PENDING_MS + 1;
   assert.deepEqual(await vault.status(), { stored: false, pending: false });
+  assert.equal(await store.get("master"), null, "the one-time key and sealed token are gone, not just ignored");
   await assert.rejects(probe(vault), /no_master_key/);
   assert.equal((await vault.setup(PARENT)).token_id, "t0");
 });
