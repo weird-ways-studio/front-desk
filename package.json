@@ -1,0 +1,11 @@
+{
+  "name": "front-desk",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test 'test/*.test.ts'"
+  },
+  "devDependencies": {
+    "wrangler": "4.152.0"
+  }
+}
