@@ -11,6 +11,8 @@
   // OWNER_EMAIL is set by Ben in the dashboard, not here (public repo); keep it across deploys.
   "keep_vars": true,
   // One Durable Object holds every grant, passkey and log entry (src/index.ts).
+  // The vault Worker (vault/wrangler.jsonc) holds the sealed master key; this is its only door.
+  "services": [{ "binding": "VAULT", "service": "front-desk-vault" }],
   "durable_objects": { "bindings": [{ "name": "DESK", "class_name": "FrontDesk" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["FrontDesk"] }]
 }

@@ -227,3 +227,107 @@ test("PRF check: owner only", async () => {
     assert.equal((await call(store, "/prf-check", { method: "POST", body: "{}" }, caller)).status, 403);
   }
 });
+
+// Vault jobs and master key setup (PR3b-2b step 2). A fake vault records what it is asked.
+function fakeVault(stored = false) {
+  const calls: { op: string; args: unknown[] }[] = [];
+  return {
+    calls,
+    async status() {
+      return stored ? { stored: true, token_id: "t1" } : { stored: false };
+    },
+    async setup(prf: string, parent: string) {
+      calls.push({ op: "setup", args: [prf, parent] });
+      if (parent === "bad") throw new Error("not_a_token");
+      stored = true;
+      return { token_id: "t1", recovery_key: "aaaa-bbbb" };
+    },
+    async run(job: string, params: Record<string, string>, prf: string) {
+      calls.push({ op: "run", args: [job, params, prf] });
+      return { zone: "example.com", after: 0, minted_token_deleted: true } as any;
+    },
+  };
+}
+const callV = (store: MemoryStore, vault: ReturnType<typeof fakeVault>, path: string, init?: RequestInit, caller = callerFor(path, init)) =>
+  route(new Request(base + path, init), store, { caller, requester: caller === "agent" ? AGENT : undefined }, Date.now(), vault);
+const ZONE_ID = "b".repeat(32);
+const optsIn = async (res: Response) => JSON.parse((await res.text()).match(/const opts=(\{.*?\});\n/)![1]);
+
+async function askProbe(store: MemoryStore, vault: ReturnType<typeof fakeVault>) {
+  const asked = await callV(store, vault, "/request", { method: "POST", body: JSON.stringify({ job: "cf.dns.txt.probe", params: { zone_id: ZONE_ID }, reason: "prove the vault" }) });
+  assert.equal(asked.status, 201);
+  return ((await asked.json()) as { id: string }).id;
+}
+
+test("vault job: approval page asks for the master-key secret; the job runs once at approval", async () => {
+  const { store, key } = await enrolled();
+  const vault = fakeVault(true);
+  const id = await askProbe(store, vault);
+  const opts = await optsIn(await callV(store, vault, `/approve/${id}`));
+  const salt = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("front-desk master-key v1"))).toString("base64url");
+  assert.equal(opts.prfSalt, salt);
+  const answer = { ...(await key.assert(opts.challenge, "desk.example", base)), prf: prfOut(5) };
+  const ok = await callV(store, vault, `/approve/${id}`, { method: "POST", body: JSON.stringify(answer) });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(((await ok.json()) as any).result, { zone: "example.com", after: 0, minted_token_deleted: true });
+  assert.deepEqual(vault.calls, [{ op: "run", args: ["cf.dns.txt.probe", { zone_id: ZONE_ID }, prfOut(5)] }]);
+  // Replaying the same answer runs nothing more.
+  assert.equal((await callV(store, vault, `/approve/${id}`, { method: "POST", body: JSON.stringify(answer) })).status, 409);
+  assert.equal(vault.calls.length, 1);
+  const c = await callV(store, vault, `/collect/${id}`, { method: "POST" });
+  assert.deepEqual(((await c.json()) as any).result, { zone: "example.com", after: 0, minted_token_deleted: true });
+  const events = (await new Desk(store, { origin: base, rpID: "desk.example" }).readLog()).map((e) => e.event);
+  assert.deepEqual(events.slice(-5), ["requested", "approved", "job_done", "refused", "collected"]);
+});
+
+test("vault job: no passkey secret means not approved and the vault is never called", async () => {
+  const { store, key } = await enrolled();
+  const vault = fakeVault(true);
+  const id = await askProbe(store, vault);
+  const opts = await optsIn(await callV(store, vault, `/approve/${id}`));
+  const res = await callV(store, vault, `/approve/${id}`, { method: "POST", body: JSON.stringify(await key.assert(opts.challenge, "desk.example", base)) });
+  assert.deepEqual(await res.json(), { error: "prf_missing" });
+  assert.equal(vault.calls.length, 0);
+  assert.equal((await new Desk(store, { origin: base, rpID: "desk.example" }).grant(id)).status, "pending");
+});
+
+test("vault job: a bad zone id is refused at the request", async () => {
+  const { store } = await enrolled();
+  const res = await callV(store, fakeVault(), "/request", { method: "POST", body: JSON.stringify({ job: "cf.dns.txt.probe", params: { zone_id: "x" }, reason: "r" }) });
+  assert.deepEqual(await res.json(), { error: "bad_params" });
+});
+
+test("master key setup: owner and passkey with secret; token goes to the vault; paper key returned once", async () => {
+  const { store, key } = await enrolled();
+  const vault = fakeVault();
+  assert.equal((await callV(store, vault, "/setup-master", undefined, "agent")).status, 403);
+  const opts = await optsIn(await callV(store, vault, "/setup-master"));
+  const salt = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("front-desk master-key v1"))).toString("base64url");
+  assert.equal(opts.prfSalt, salt);
+  const res = await callV(store, vault, "/setup-master", {
+    method: "POST",
+    body: JSON.stringify({ ...(await key.assert(opts.challenge, "desk.example", base)), prf: prfOut(5), parent: "tok" }),
+  });
+  assert.deepEqual(await res.json(), { ok: true, token_id: "t1", recovery_key: "aaaa-bbbb" });
+  assert.deepEqual(vault.calls, [{ op: "setup", args: [prfOut(5), "tok"] }]);
+  const log = await new Desk(store, { origin: base, rpID: "desk.example" }).readLog();
+  assert.equal(log.at(-1)!.event, "master_key_stored");
+  assert.ok(!JSON.stringify(log).includes("aaaa-bbbb"), "the paper key is never logged");
+  assert.deepEqual(await (await callV(store, vault, "/setup-master")).json(), { error: "already_stored" });
+});
+
+test("master key setup refuses: no secret, a stranger's passkey, a vault refusal (logged)", async () => {
+  const { store, key } = await enrolled();
+  const vault = fakeVault();
+  const post = async (body: (challenge: string) => Promise<unknown>) => {
+    const opts = await optsIn(await callV(store, vault, "/setup-master"));
+    return callV(store, vault, "/setup-master", { method: "POST", body: JSON.stringify(await body(opts.challenge)) });
+  };
+  assert.deepEqual(await (await post(async (ch) => key.assert(ch, "desk.example", base))).json(), { error: "prf_missing" });
+  const stranger = await SoftKey.create();
+  assert.deepEqual(await (await post(async (ch) => ({ ...(await stranger.assert(ch, "desk.example", base)), prf: prfOut(5), parent: "tok" }))).json(), { error: "unknown_passkey" });
+  assert.equal(vault.calls.length, 0);
+  assert.deepEqual(await (await post(async (ch) => ({ ...(await key.assert(ch, "desk.example", base)), prf: prfOut(5), parent: "bad" }))).json(), { error: "not_a_token" });
+  const log = await new Desk(store, { origin: base, rpID: "desk.example" }).readLog();
+  assert.match(log.at(-1)!.detail!, /^master key setup: not_a_token/);
+});

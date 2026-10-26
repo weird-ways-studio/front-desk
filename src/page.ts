@@ -49,12 +49,16 @@ export function approvePage(g: Grant, options: unknown, nonce: string): string {
 <p><strong>${esc(describe)}</strong></p>
 <p class="muted">Job <code>${esc(g.job)}</code> · asked by ${esc(g.requester)} · expires ${new Date(g.expires_at).toISOString().slice(11, 16)} UTC</p>
 <p class="muted">The agent's words:</p><blockquote>${esc(g.reason)}</blockquote>
-<button id="go">Next: approve with Face ID</button>`,
+<button id="go">Next: approve with Face ID</button><pre id="after" class="muted" style="white-space:pre-wrap"></pre>`,
     `const opts=${JSON.stringify(options)};
 document.getElementById('go').onclick=async e=>{e.target.disabled=true;
  let c;try{c=await navigator.credentials.get({publicKey:{challenge:u2b(opts.challenge),rpId:opts.rpId,timeout:opts.timeout,userVerification:'required',
-  allowCredentials:(opts.allowCredentials||[]).map(a=>({type:'public-key',id:u2b(a.id)}))}})}catch(err){show(false,'FAIL: '+err.name);e.target.disabled=false;return}
- await finish(location.pathname,c)};`,
+  allowCredentials:(opts.allowCredentials||[]).map(a=>({type:'public-key',id:u2b(a.id)})),...(opts.prfSalt?{extensions:{prf:{eval:{first:u2b(opts.prfSalt)}}}}:{})}})}
+ catch(err){show(false,'FAIL: '+err.name);e.target.disabled=false;return}
+ const x=(c.getClientExtensionResults&&c.getClientExtensionResults().prf)||{};const first=x.results&&x.results.first;
+ const res=await fetch(location.pathname,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...cred(c),prf:first?b2u(first):null})});
+ const j=await res.json().catch(()=>({}));const bad=j.result&&j.result.error;show(res.ok&&!bad,res.ok?(bad?'FAIL: '+bad:'PASS'):'FAIL: '+(j.error||res.status));
+ if(j.result)document.getElementById('after').textContent=JSON.stringify(j.result,null,1)};`,
   );
 }
 
@@ -92,6 +96,30 @@ document.getElementById('go').onclick=async e=>{e.target.disabled=true;
   body:JSON.stringify({credential:cred(c),prf:first?b2u(first):null,prf_info:JSON.stringify(Object.keys(x))})});
  const j=await res.json().catch(()=>({}));show(res.ok,res.ok?'PASS: '+j.fingerprint:'FAIL: '+(j.error||res.status));
  document.getElementById('after').textContent='Now reload this page and tap Next once more. The same code twice means it works.'};`,
+  );
+}
+
+// One time: Ben pastes the Cloudflare token, taps Face ID, and the vault seals it. The page
+// then shows the paper recovery key once. The token is read from the box before the
+// passkey call, without an await, so the tap still counts as the user's gesture (C5a L3).
+export function setupPage(options: unknown, nonce: string): string {
+  return page(
+    "Store the master key",
+    nonce,
+    `<div id="status"></div><h1>Store the master key</h1>
+<p>Paste the Cloudflare token you just created, then tap Next. It is locked with your passkey and never shown again.</p>
+<textarea id="token" rows="3" style="width:100%;font-size:16px" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+<button id="go">Next: lock it with Face ID</button><div id="after"></div>`,
+    `const opts=${JSON.stringify(options)};
+document.getElementById('go').onclick=async e=>{const parent=document.getElementById('token').value.trim();e.target.disabled=true;
+ let c;try{c=await navigator.credentials.get({publicKey:{challenge:u2b(opts.challenge),rpId:opts.rpId,timeout:opts.timeout,userVerification:'required',
+  allowCredentials:(opts.allowCredentials||[]).map(a=>({type:'public-key',id:u2b(a.id)})),extensions:{prf:{eval:{first:u2b(opts.prfSalt)}}}}})}
+ catch(err){show(false,'FAIL: '+err.name);e.target.disabled=false;return}
+ const x=(c.getClientExtensionResults&&c.getClientExtensionResults().prf)||{};const first=x.results&&x.results.first;
+ const res=await fetch(location.pathname,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...cred(c),prf:first?b2u(first):null,parent})});
+ const j=await res.json().catch(()=>({}));show(res.ok,res.ok?'PASS':'FAIL: '+(j.error||res.status));document.getElementById('token').value='';
+ if(res.ok){const a=document.getElementById('after');a.innerHTML='<h2>Paper recovery key</h2><p>Write this down or print it now and keep it away from your phone. It is shown only once.</p><p style="font:20px/1.6 ui-monospace,monospace;word-break:break-all"></p>';
+  a.querySelector('p:last-child').textContent=j.recovery_key}};`,
   );
 }
 

@@ -16,6 +16,16 @@ A small service that lets studio agents ask for narrow, short-lived access, whic
 - Who is calling: Ben by his Access login email (`OWNER_EMAIL`); the c-box agent by its Access service token, whose signed ticket the Worker checks itself (`src/agent.ts`, settings `AGENT_CLIENT_ID` and `ACCESS_TEAM_DOMAIN`). All three are dashboard variables kept across deploys (`keep_vars`), never in this repo.
 - Entry point: `src/index.ts` (`main` in `wrangler.jsonc`); Cloudflare calls its default export's `fetch`.
 
+## The vault (`vault/`)
+
+A second Worker, `front-desk-vault`, holds the master key: a Cloudflare token that can make other tokens. It is kept apart so the code that can open the master key loads **no libraries** (the front desk itself uses two: passkey checks and Access-ticket checks).
+
+- No web address (`workers_dev: false`, no routes in `vault/wrangler.jsonc`). The only way in is the front desk's service binding `VAULT` (`services` in `wrangler.jsonc`), which calls the methods in `vault/src/index.ts` over RPC.
+- The master key is stored sealed (AES-GCM) under the secret Ben's passkey releases at his tap (WebAuthn PRF), and again under a paper recovery key shown once at setup (`/setup-master`). It is opened only to run one job from the fixed list and is never returned.
+- The vault deploys separately: a second Workers Builds connection on `main`, root directory the repo root, deploy command `npx wrangler deploy -c vault/wrangler.jsonc` (the repo's pinned wrangler). Deploy it before the front desk, whose binding needs it.
+- `test/vault.test.ts` fails if any vault file imports anything but a file beside it or `cloudflare:workers`.
+- Limits: the token pasted at setup and the passkey secret at each tap pass through the front desk (which runs the libraries) on their way to the vault. A tampered front desk could see them at that moment; the deploy lock is the control for that. A captured passkey secret alone opens nothing -- the sealed key never leaves the vault -- but it could ask the vault for a job from the fixed list.
+
 ## Run the tests
 
 `npm test` (Node 22's built-in test runner; no test dependencies).

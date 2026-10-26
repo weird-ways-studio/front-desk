@@ -1,0 +1,14 @@
+// The vault Worker: holds the sealed master key. No web address at all; only the
+// front desk reaches it, through its service binding (../wrangler.jsonc "services").
+// Deploy from the repo root so the pinned wrangler is used:
+//   npx wrangler deploy -c vault/wrangler.jsonc
+{
+  "name": "front-desk-vault",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "send_metrics": false,
+  "durable_objects": { "bindings": [{ "name": "BOX", "class_name": "VaultBox" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["VaultBox"] }]
+}

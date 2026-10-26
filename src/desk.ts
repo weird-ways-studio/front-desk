@@ -10,7 +10,8 @@ import {
   type AuthenticationResponseJSON,
   type RegistrationResponseJSON,
 } from "@simplewebauthn/server";
-import { JOBS, type JobName } from "./jobs.ts";
+import { JOBS, type Job, type JobName } from "./jobs.ts";
+import type { VaultApi } from "../vault/src/api.ts";
 
 export const APPROVE_WINDOW_MS = 10 * 60_000; // ask -> approve
 export const COLLECT_WINDOW_MS = 5 * 60_000; // approve -> collect
@@ -18,6 +19,8 @@ export const CHALLENGE_TTL_MS = 5 * 60_000;
 export const ROUTE_REFUSALS_PER_DAY = 20;
 // PRF check only. The master key will use a different label, so a check never reveals key material.
 export const PRF_CHECK_LABEL = "front-desk prf-check v1";
+// Salt for the secret that unlocks the master key (setup and vault jobs).
+export const PRF_MASTER_LABEL = "front-desk master-key v1";
 
 // The subset of Durable Object storage the desk uses; MemoryStore implements it for tests.
 export interface Store {
@@ -40,6 +43,8 @@ export interface Grant {
   status: GrantStatus;
   approved_at?: number;
   collected_at?: number;
+  // What a vault job reported when it ran at approval (never a secret).
+  result?: unknown;
 }
 
 export interface Passkey {
@@ -50,7 +55,7 @@ export interface Passkey {
 }
 
 interface Challenge {
-  purpose: "approve" | "enroll" | "check";
+  purpose: "approve" | "enroll" | "check" | "setup";
   grant_id?: string;
   expires_at: number;
   used: boolean;
@@ -122,7 +127,21 @@ export async function grantHash(g: Pick<Grant, "id" | "job" | "params" | "reques
 // Test seam: lets a test pause an approval between verification and commit.
 export interface DeskHooks {
   afterVerify?: (grantId: string) => Promise<void>;
+  // The vault Worker (service binding VAULT); absent in tests that do not need it.
+  vault?: VaultApi;
 }
+
+// The passkey secret a browser sent with its answer, if it is 32 bytes.
+function prfOf(input: unknown): string | null {
+  const prf = (input as { prf?: unknown } | null)?.prf;
+  try {
+    return typeof prf === "string" && fromB64url(prf).length === 32 ? prf : null;
+  } catch {
+    return null;
+  }
+}
+
+const isVault = (job: JobName) => (JOBS[job] as Job).vault === true;
 
 export class Desk {
   private store: Store;
@@ -205,7 +224,7 @@ export class Desk {
       expires_at: now + CHALLENGE_TTL_MS,
       used: false,
     });
-    return options;
+    return isVault(g.job) ? { ...options, prfSalt: await saltFor(PRF_MASTER_LABEL) } : options;
   }
 
   // A refusal Ben should be able to see, for something not tied to one grant.
@@ -264,6 +283,12 @@ export class Desk {
     }
     const fail = (detail: string) => this.log({ event: "refused", ...this.grantFacts(g), detail }, now);
     const { key, newCounter } = await this.verifyPasskey(response, challenge, fail);
+    // A vault job needs the passkey's secret; without it nothing is approved.
+    const prf = isVault(g.job) ? prfOf(response) : null;
+    if (isVault(g.job) && !prf) {
+      await fail("no passkey secret sent");
+      throw new DeskError("prf_missing", 422);
+    }
     await this.hooks.afterVerify?.(g.id);
     // Verification awaited crypto, so another request may have run meanwhile.
     // Re-read and commit with storage calls only, which the Durable Object does not interleave.
@@ -272,7 +297,20 @@ export class Desk {
     const approved: Grant = { ...current, status: "approved", approved_at: now };
     await this.store.put(`grant:${g.id}`, approved);
     await this.log({ event: "approved", ...this.grantFacts(g) }, now);
-    return approved;
+    if (!prf) return approved;
+    // Committed as approved first, so a replay finds it not pending while the vault works.
+    let result: unknown;
+    try {
+      if (!this.hooks.vault) throw new Error("vault not connected");
+      result = await this.hooks.vault.run(g.job, g.params, prf);
+      await this.log({ event: "job_done", ...this.grantFacts(g), detail: JSON.stringify(result).slice(0, 160) }, now);
+    } catch (e) {
+      result = { error: (e as Error).message.slice(0, 120) };
+      await this.log({ event: "job_failed", ...this.grantFacts(g), detail: (e as Error).message.slice(0, 120) }, now);
+    }
+    const done: Grant = { ...approved, result };
+    await this.store.put(`grant:${g.id}`, done);
+    return done;
   }
 
   // Checks Ben's passkey answer against a challenge already taken. Every failure is logged through `fail`.
@@ -321,7 +359,7 @@ export class Desk {
       allowCredentials: keys.map((k) => ({ id: k.id })),
     });
     await this.store.put<Challenge>(`challenge:${options.challenge}`, { purpose: "check", expires_at: now + CHALLENGE_TTL_MS, used: false });
-    return { ...options, prfSalt: b64url(await sha256(enc.encode(PRF_CHECK_LABEL))) };
+    return { ...options, prfSalt: await saltFor(PRF_CHECK_LABEL) };
   }
 
   async prfCheck(input: unknown, now: number): Promise<{ fingerprint: string }> {
@@ -346,6 +384,45 @@ export class Desk {
     return { fingerprint };
   }
 
+  // Master key setup, once: Ben pastes the Cloudflare token, taps Face ID, and the vault
+  // seals it under the passkey's secret plus a new paper recovery key.
+  async setupOptions(now: number) {
+    const keys = await this.passkeys();
+    if (!keys.length) throw new DeskError("no_passkey_enrolled", 409);
+    const status = this.hooks.vault ? await this.hooks.vault.status() : { stored: false };
+    if (status.stored) throw new DeskError("already_stored", 409);
+    const options = await generateAuthenticationOptions({
+      rpID: this.site.rpID,
+      userVerification: "required",
+      allowCredentials: keys.map((k) => ({ id: k.id })),
+    });
+    await this.store.put<Challenge>(`challenge:${options.challenge}`, { purpose: "setup", expires_at: now + CHALLENGE_TTL_MS, used: false });
+    return { ...options, prfSalt: await saltFor(PRF_MASTER_LABEL) };
+  }
+
+  async setupMaster(input: unknown, now: number): Promise<{ token_id: string; recovery_key: string }> {
+    const body = (input ?? {}) as AuthenticationResponseJSON & { parent?: unknown };
+    const { challenge } = await this.takeChallenge(body, "setup", now);
+    const fail = (detail: string) => this.log({ event: "refused", detail: `master key setup: ${detail}` }, now);
+    const { key, newCounter } = await this.verifyPasskey(body, challenge, fail);
+    await this.commitCounter(key.id, newCounter);
+    const prf = prfOf(body);
+    if (!prf) {
+      await fail("no passkey secret sent");
+      throw new DeskError("prf_missing", 422);
+    }
+    if (!this.hooks.vault) throw new DeskError("vault_not_connected", 503);
+    try {
+      const out = await this.hooks.vault.setup(prf, String(body.parent ?? ""));
+      await this.log({ event: "master_key_stored", detail: `Cloudflare token ${out.token_id}; paper recovery key shown once` }, now);
+      return out;
+    } catch (e) {
+      const code = (e as Error).message.slice(0, 120);
+      await fail(code);
+      throw new DeskError(code.split(":")[0], 400);
+    }
+  }
+
   // Marked collected before the job runs: two collects, or a crash mid-job, never run it twice.
   async collect(id: string, requester: string, now: number): Promise<{ grant: Grant; result: unknown }> {
     const g = await this.grant(id);
@@ -355,7 +432,8 @@ export class Desk {
     if (now > (g.approved_at ?? 0) + COLLECT_WINDOW_MS) throw new DeskError("collect_window_closed", 410);
     const collected: Grant = { ...g, status: "collected", collected_at: now };
     await this.store.put(`grant:${g.id}`, collected);
-    const result = await JOBS[g.job].run(g.params);
+    const job = JOBS[g.job] as Job;
+    const result = job.vault ? g.result : await job.run!(g.params);
     await this.log({ event: "collected", ...this.grantFacts(g) }, now);
     return { grant: collected, result };
   }
@@ -412,6 +490,10 @@ export class Desk {
     await this.log({ event: "passkey_enrolled", detail: `passkey ${key.id.slice(0, 8)}…` }, now);
     return key;
   }
+}
+
+async function saltFor(label: string): Promise<string> {
+  return b64url(await sha256(enc.encode(label)));
 }
 
 function hexToBytes(h: string): Uint8Array {
