@@ -52,5 +52,6 @@ export async function agentOf(
   }
   // A person's ticket carries an email and no common_name; only a service token's names a Client ID.
   if (claims.common_name !== clientId || claims.email) return { ok: false, why: "not_agent_token" };
-  return { ok: true, requester: `c-box agent (${clientId.slice(0, 8)})` };
+  // The full Client ID: grants are owned and collected by exact identity (a prefix could collide).
+  return { ok: true, requester: `c-box agent ${clientId}` };
 }

@@ -34,13 +34,21 @@ const why = async (jwt: string | undefined, a = access(), c: Parameters<typeof a
 };
 
 test("a genuine service-token ticket is the agent, named from its Client ID", async () => {
-  assert.equal(await why(await ticket()), "ok:c-box agent (01234567)");
+  assert.equal(await why(await ticket()), `ok:c-box agent ${CLIENT}`);
+});
+
+test("two Client IDs sharing a prefix stay two requesters", async () => {
+  const twin = "01234567ffffffffffffffffffffffff.access";
+  const a = await agentOf(req(await ticket()), access(), cfg, keys);
+  const b = await agentOf(req(await ticket({ claims: { common_name: twin } })), access(), { ...cfg, AGENT_CLIENT_ID: twin }, keys);
+  assert.ok(a.ok && b.ok);
+  assert.notEqual(a.requester, b.requester);
 });
 
 test("forged, misdirected, expired or unsigned tickets are refused", async () => {
   assert.equal(await why(await ticket({ key: stranger.privateKey })), "bad_jwt", "signed by another key");
   assert.equal(await why(await ticket({ aud: "other-app" })), "bad_jwt", "meant for another app");
-  assert.equal(await why(await ticket()), "ok:c-box agent (01234567)");
+  assert.equal(await why(await ticket()), `ok:c-box agent ${CLIENT}`);
   assert.equal(await why(await ticket(), access("other-app")), "bad_jwt", "this app's aud differs");
   assert.equal(await why(await ticket({ iss: "https://evil.example" })), "bad_jwt", "another team");
   assert.equal(await why(await ticket({ exp: "-1m" })), "bad_jwt", "expired");
