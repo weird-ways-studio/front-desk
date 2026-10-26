@@ -234,13 +234,7 @@ function fakeVault(stored = false) {
   return {
     calls,
     async status() {
-      return stored ? { stored: true, token_id: "t1" } : { stored: false };
-    },
-    async setup(prf: string, parent: string) {
-      calls.push({ op: "setup", args: [prf, parent] });
-      if (parent === "bad") throw new Error("not_a_token");
-      stored = true;
-      return { token_id: "t1", recovery_key: "aaaa-bbbb" };
+      return stored ? { stored: true, pending: false, token_id: "t1" } : { stored: false, pending: false };
     },
     async run(job: string, params: Record<string, string>, prf: string) {
       calls.push({ op: "run", args: [job, params, prf] });
@@ -309,41 +303,6 @@ test("vault job: a result that is not ok is logged as job_failed with the full e
   const row = (await new Desk(store, { origin: base, rpID: "desk.example" }).readLog()).at(-1)!;
   assert.equal(row.event, "job_failed");
   assert.match(row.detail!, /"deleted":false/);
-});
-
-test("master key setup: owner and passkey with secret; token goes to the vault; paper key returned once", async () => {
-  const { store, key } = await enrolled();
-  const vault = fakeVault();
-  assert.equal((await callV(store, vault, "/setup-master", undefined, "agent")).status, 403);
-  const opts = await optsIn(await callV(store, vault, "/setup-master"));
-  const salt = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("front-desk master-key v1"))).toString("base64url");
-  assert.equal(opts.prfSalt, salt);
-  const res = await callV(store, vault, "/setup-master", {
-    method: "POST",
-    body: JSON.stringify({ ...(await key.assert(opts.challenge, "desk.example", base)), prf: prfOut(5), parent: "tok" }),
-  });
-  assert.deepEqual(await res.json(), { ok: true, token_id: "t1", recovery_key: "aaaa-bbbb" });
-  assert.deepEqual(vault.calls, [{ op: "setup", args: [prfOut(5), "tok"] }]);
-  const log = await new Desk(store, { origin: base, rpID: "desk.example" }).readLog();
-  assert.equal(log.at(-1)!.event, "master_key_stored");
-  assert.ok(!JSON.stringify(log).includes("aaaa-bbbb"), "the paper key is never logged");
-  assert.deepEqual(await (await callV(store, vault, "/setup-master")).json(), { error: "already_stored" });
-});
-
-test("master key setup refuses: no secret, a stranger's passkey, a vault refusal (logged)", async () => {
-  const { store, key } = await enrolled();
-  const vault = fakeVault();
-  const post = async (body: (challenge: string) => Promise<unknown>) => {
-    const opts = await optsIn(await callV(store, vault, "/setup-master"));
-    return callV(store, vault, "/setup-master", { method: "POST", body: JSON.stringify(await body(opts.challenge)) });
-  };
-  assert.deepEqual(await (await post(async (ch) => key.assert(ch, "desk.example", base))).json(), { error: "prf_missing" });
-  const stranger = await SoftKey.create();
-  assert.deepEqual(await (await post(async (ch) => ({ ...(await stranger.assert(ch, "desk.example", base)), prf: prfOut(5), parent: "tok" }))).json(), { error: "unknown_passkey" });
-  assert.equal(vault.calls.length, 0);
-  assert.deepEqual(await (await post(async (ch) => ({ ...(await key.assert(ch, "desk.example", base)), prf: prfOut(5), parent: "bad" }))).json(), { error: "not_a_token" });
-  const log = await new Desk(store, { origin: base, rpID: "desk.example" }).readLog();
-  assert.match(log.at(-1)!.detail!, /^master key setup: not_a_token/);
 });
 
 test("vault job: a collect while the vault is still working is refused, and the grant is collected once", async () => {

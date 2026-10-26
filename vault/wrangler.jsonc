@@ -1,12 +1,14 @@
-// The vault Worker: holds the sealed master key. No web address at all; only the
-// front desk reaches it, through its service binding (../wrangler.jsonc "services").
+// The vault Worker: holds the sealed master key. The front desk reaches it through its
+// service binding (../wrangler.jsonc "services"). Its own workers.dev address sits behind
+// the account-wide Cloudflare Access login and serves only the one-time setup page
+// (src/setup.ts), which answers 404 for good once a key is stored.
 // Deploy from the repo root so the pinned wrangler is used:
 //   npx wrangler deploy -c vault/wrangler.jsonc
 {
   "name": "front-desk-vault",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
-  "workers_dev": false,
+  "workers_dev": true,
   "preview_urls": false,
   "send_metrics": false,
   "durable_objects": { "bindings": [{ "name": "BOX", "class_name": "VaultBox" }] },

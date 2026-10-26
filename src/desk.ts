@@ -386,45 +386,6 @@ export class Desk {
     return { fingerprint };
   }
 
-  // Master key setup, once: Ben pastes the Cloudflare token, taps Face ID, and the vault
-  // seals it under the passkey's secret plus a new paper recovery key.
-  async setupOptions(now: number) {
-    const keys = await this.passkeys();
-    if (!keys.length) throw new DeskError("no_passkey_enrolled", 409);
-    const status = this.hooks.vault ? await this.hooks.vault.status() : { stored: false };
-    if (status.stored) throw new DeskError("already_stored", 409);
-    const options = await generateAuthenticationOptions({
-      rpID: this.site.rpID,
-      userVerification: "required",
-      allowCredentials: keys.map((k) => ({ id: k.id })),
-    });
-    await this.store.put<Challenge>(`challenge:${options.challenge}`, { purpose: "setup", expires_at: now + CHALLENGE_TTL_MS, used: false });
-    return { ...options, prfSalt: await saltFor(PRF_MASTER_LABEL) };
-  }
-
-  async setupMaster(input: unknown, now: number): Promise<{ token_id: string; recovery_key: string }> {
-    const body = (input ?? {}) as AuthenticationResponseJSON & { parent?: unknown };
-    const { challenge } = await this.takeChallenge(body, "setup", now);
-    const fail = (detail: string) => this.log({ event: "refused", detail: `master key setup: ${detail}` }, now);
-    const { key, newCounter } = await this.verifyPasskey(body, challenge, fail);
-    await this.commitCounter(key.id, newCounter);
-    const prf = prfOf(body);
-    if (!prf) {
-      await fail("no passkey secret sent");
-      throw new DeskError("prf_missing", 422);
-    }
-    if (!this.hooks.vault) throw new DeskError("vault_not_connected", 503);
-    try {
-      const out = await this.hooks.vault.setup(prf, String(body.parent ?? ""));
-      await this.log({ event: "master_key_stored", detail: `Cloudflare token ${out.token_id}; paper recovery key shown once` }, now);
-      return out;
-    } catch (e) {
-      const code = (e as Error).message.slice(0, 120);
-      await fail(code);
-      throw new DeskError(code.split(":")[0], 400);
-    }
-  }
-
   // Marked collected before the job runs: two collects, or a crash mid-job, never run it twice.
   async collect(id: string, requester: string, now: number): Promise<{ grant: Grant; result: unknown }> {
     const g = await this.grant(id);

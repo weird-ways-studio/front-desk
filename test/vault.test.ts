@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { MemoryStore } from "../src/desk.ts";
 import { MASTER_LABEL, RECOVERY_LABEL, open, seal, b64url, fromB64url } from "../vault/src/seal.ts";
-import { PROBE_TOKEN_MS, VaultLogic } from "../vault/src/vault.ts";
+import { PENDING_MS, PROBE_TOKEN_MS, VaultLogic } from "../vault/src/vault.ts";
+import { handleSetup } from "../vault/src/setup.ts";
 
 const ACCOUNT = "a".repeat(32);
 const ZONE_ID = "b".repeat(32);
@@ -82,10 +83,11 @@ function fakeCloudflare(fail?: Fail, baseline = 3) {
 async function stored(fail?: Fail, baseline = 3) {
   const cf = fakeCloudflare(fail, baseline);
   const store = new MemoryStore();
-  const vault = new VaultLogic(store, cf.fetchFn, () => NOW);
-  const out = await vault.setup(prf(7), PARENT);
+  const clock = { now: NOW };
+  const vault = new VaultLogic(store, cf.fetchFn, () => clock.now);
+  const out = await vault.setup(PARENT);
   cf.calls.length = 0;
-  return { store, vault, out, cf };
+  return { store, vault, out, cf, clock };
 }
 const probe = (vault: VaultLogic) => vault.run("cf.dns.txt.probe", { zone: ZONE }, prf(7));
 
@@ -100,27 +102,46 @@ test("seal: opens with the same secret and label only; an altered box never open
   await assert.rejects(open(secret, MASTER_LABEL, { ...box, data: b64url(flipped) }), /wrong_secret/);
 });
 
-test("setup: checks the token with Cloudflare, seals it twice, records the token baseline, returns the paper key once", async () => {
+test("setup: checks the token with Cloudflare, holds it under a one-time key, returns the paper key once", async () => {
   const { store, out, vault } = await stored(undefined, 60);
   assert.equal(out.token_id, "t0");
   assert.match(out.recovery_key, /^([0-9a-f]{4}-){15}[0-9a-f]{4}$/);
   const master = (await store.get<any>("master"))!;
   assert.ok(!JSON.stringify(master).includes(PARENT), "token never stored in the clear");
-  assert.equal(await open(fromB64url(prf(7)), MASTER_LABEL, master.by_passkey), PARENT);
+  assert.equal(master.by_passkey, undefined, "not locked to the passkey until Ben's first tap");
   const paper = Uint8Array.from(out.recovery_key.replace(/-/g, "").match(/../g)!, (h) => parseInt(h, 16));
   assert.equal(await open(paper, RECOVERY_LABEL, master.by_recovery), PARENT, "the paper key opens the same store");
   assert.equal(master.baseline.length, 60, "every page of tokens is in the baseline");
-  assert.deepEqual(await vault.status(), { stored: true, token_id: "t0" });
-  await assert.rejects(vault.setup(prf(7), PARENT), /already_stored/);
+  assert.deepEqual(await vault.status(), { stored: false, pending: true, token_id: "t0" });
+  await assert.rejects(vault.setup(PARENT), /already_stored/);
 });
 
-test("setup refuses: not a token, no single account, inactive token, bad passkey secret", async () => {
+test("first Face ID tap locks the key to the passkey and forgets the one-time key; after that only that secret opens it", async () => {
+  const { store, vault } = await stored();
+  const first = await probe(vault);
+  assert.deepEqual(first.master, { token_id: "t0", locked_to_passkey_now: true });
+  const master = (await store.get<any>("master"))!;
+  assert.equal(master.pending, undefined);
+  assert.equal(await open(fromB64url(prf(7)), MASTER_LABEL, master.by_passkey), PARENT);
+  assert.deepEqual(await vault.status(), { stored: true, pending: false, token_id: "t0" });
+  assert.equal((await probe(vault)).master.locked_to_passkey_now, false);
+  await assert.rejects(vault.run("cf.dns.txt.probe", { zone: ZONE }, prf(8)), /wrong_secret/);
+});
+
+test("a setup nobody confirms within 30 minutes lapses and can be done again", async () => {
+  const { vault, clock } = await stored();
+  clock.now += PENDING_MS + 1;
+  assert.deepEqual(await vault.status(), { stored: false, pending: false });
+  await assert.rejects(probe(vault), /no_master_key/);
+  assert.equal((await vault.setup(PARENT)).token_id, "t0");
+});
+
+test("setup refuses: not a token, no single account, inactive token", async () => {
   const fresh = (fail?: Fail) => new VaultLogic(new MemoryStore(), fakeCloudflare(fail).fetchFn, () => NOW);
-  await assert.rejects(fresh().setup(prf(7), "short"), /not_a_token/);
-  await assert.rejects(fresh("accounts2").setup(prf(7), PARENT), /account_unclear/);
-  await assert.rejects(fresh("accounts0").setup(prf(7), PARENT), /account_unclear/);
-  await assert.rejects(fresh("inactive").setup(prf(7), PARENT), /token_not_active/);
-  await assert.rejects(fresh().setup(b64url(new Uint8Array(16)), PARENT), /bad_secret/);
+  await assert.rejects(fresh().setup("short"), /not_a_token/);
+  await assert.rejects(fresh("accounts2").setup(PARENT), /account_unclear/);
+  await assert.rejects(fresh("accounts0").setup(PARENT), /account_unclear/);
+  await assert.rejects(fresh("inactive").setup(PARENT), /token_not_active/);
 });
 
 test("probe: zone found with a read key, record added then removed with a one-zone key, both keys deleted, audit clean", async () => {
@@ -143,6 +164,9 @@ test("probe: zone found with a read key, record added then removed with a one-zo
 
 test("probe refuses before any Cloudflare call: wrong passkey secret, unknown job, zone not on the list, no master key", async () => {
   const { vault, cf } = await stored();
+  await probe(vault); // locks the key to prf(7)
+  cf.calls.length = 0;
+  await assert.rejects(vault.run("cf.dns.txt.probe", { zone: ZONE }, b64url(new Uint8Array(16))), /bad_secret/);
   await assert.rejects(vault.run("cf.dns.txt.probe", { zone: ZONE }, prf(8)), /wrong_secret/);
   await assert.rejects(vault.run("cf.access.edit", { zone: ZONE }, prf(7)), /job_not_offered/);
   await assert.rejects(vault.run("cf.dns.txt.probe", { zone: "example.com" }, prf(7)), /zone_not_offered/);
@@ -172,6 +196,40 @@ for (const [fail, check] of [
   });
 }
 
+// The vault's own setup page (vault/src/setup.ts).
+const VAULT = "https://vault.example";
+const form = (token: string, origin = VAULT) =>
+  new Request(`${VAULT}/setup`, { method: "POST", headers: { origin, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token }) });
+
+test("setup page: Ben gets the form, saves the token, sees the paper key once; then every address is 404", async () => {
+  const vault = new VaultLogic(new MemoryStore(), fakeCloudflare().fetchFn, () => NOW);
+  const get = await handleSetup(new Request(`${VAULT}/setup`), vault, "ben@example.com");
+  assert.equal(get.status, 200);
+  assert.match(get.headers.get("content-security-policy")!, /form-action 'self'/);
+  assert.ok(!(await get.text()).includes("<script"), "no script on the page");
+  const saved = await handleSetup(form(PARENT), vault, "ben@example.com");
+  const html = await saved.text();
+  assert.equal(saved.status, 200);
+  assert.match(html, /PASS: stored/);
+  assert.match(html, /([0-9a-f]{4}-){15}[0-9a-f]{4}/);
+  assert.ok(!html.includes(PARENT), "the token is not echoed back");
+  for (const req of [new Request(`${VAULT}/setup`), form(PARENT), new Request(`${VAULT}/`)]) {
+    assert.equal((await handleSetup(req, vault, "ben@example.com")).status, 404);
+  }
+});
+
+test("setup page refuses: no email (the agent or no login), another site's form, other paths, a bad token", async () => {
+  const vault = new VaultLogic(new MemoryStore(), fakeCloudflare().fetchFn, () => NOW);
+  assert.equal((await handleSetup(new Request(`${VAULT}/setup`), vault, "")).status, 403);
+  assert.equal((await handleSetup(form(PARENT), vault, "")).status, 403);
+  assert.equal((await handleSetup(form(PARENT, "https://evil.example"), vault, "ben@example.com")).status, 403);
+  assert.equal((await handleSetup(new Request(`${VAULT}/`), vault, "ben@example.com")).status, 404);
+  const bad = await handleSetup(form("short"), vault, "ben@example.com");
+  assert.equal(bad.status, 400);
+  assert.match(await bad.text(), /FAIL: not_a_token/);
+  assert.deepEqual(await vault.status(), { stored: false, pending: false }, "nothing stored by any refused request");
+});
+
 test("the vault loads no libraries: every import is a file beside it or the runtime", () => {
   for (const f of readdirSync("vault/src")) {
     const src = readFileSync(`vault/src/${f}`, "utf8");
@@ -180,5 +238,24 @@ test("the vault loads no libraries: every import is a file beside it or the runt
       assert.ok(spec === "cloudflare:workers" || /^\.\/[a-z]+\.ts$/.test(spec), `${f} imports ${spec}`);
     }
     assert.ok(!/\bimport\s*\(/.test(src), `${f} has a dynamic import`);
+  }
+});
+
+test("deploy-vault.sh deploys the vault only in Workers Builds, on a real deploy of main", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync, writeFileSync, chmodSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  // A stand-in npx that only reports what it was asked to run.
+  const bin = mkdtempSync(`${tmpdir()}/fake-npx-`);
+  writeFileSync(`${bin}/npx`, '#!/bin/sh\necho "npx $*"\n');
+  chmodSync(`${bin}/npx`, 0o755);
+  const run = (env: Record<string, string>) =>
+    execFileSync("sh", ["scripts/deploy-vault.sh"], { env: { PATH: `${bin}:/usr/bin:/bin`, ...env }, encoding: "utf8" });
+  const ci = { WORKERS_CI: "1", WRANGLER_COMMAND: "deploy", WORKERS_CI_BRANCH: "main" };
+  assert.match(run(ci), /npx wrangler deploy -c vault\/wrangler\.jsonc/);
+  for (const env of [{}, { ...ci, WORKERS_CI: "" }, { ...ci, WRANGLER_COMMAND: "dev" }, { ...ci, WORKERS_CI_BRANCH: "probe" }]) {
+    const out = run(env);
+    assert.match(out, /skipping/);
+    assert.doesNotMatch(out, /npx/);
   }
 });

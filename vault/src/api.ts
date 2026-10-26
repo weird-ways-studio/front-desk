@@ -5,7 +5,6 @@ import type { ProbeResult } from "./vault.ts";
 export type { ProbeResult };
 
 export interface VaultApi {
-  status(): Promise<{ stored: boolean; token_id?: string }>;
-  setup(prf: string, parent: string): Promise<{ token_id: string; recovery_key: string }>;
+  status(): Promise<{ stored: boolean; pending: boolean; token_id?: string }>;
   run(job: string, params: Record<string, string>, prf: string): Promise<ProbeResult>;
 }

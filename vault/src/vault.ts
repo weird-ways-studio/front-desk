@@ -5,10 +5,13 @@
 
 import { Cloudflare, type Fetch } from "./cloudflare.ts";
 import { STUDIO_ZONES } from "./zones.ts";
-import { MASTER_LABEL, RECOVERY_LABEL, VaultError, open, seal, secretBytes, type Sealed } from "./seal.ts";
+import { MASTER_LABEL, RECOVERY_LABEL, VaultError, b64url, fromB64url, open, seal, secretBytes, type Sealed } from "./seal.ts";
 
 export const PROBE_TOKEN_MS = 5 * 60_000;
 export const PROBE_RECORD = "_front-desk-probe";
+// Setup waits this long for Ben's first Face ID tap to lock the key to his passkey.
+export const PENDING_MS = 30 * 60_000;
+const PENDING_LABEL = "front-desk pending-key v1";
 
 export interface VaultStore {
   get<T>(key: string): Promise<T | undefined>;
@@ -18,7 +21,10 @@ export interface VaultStore {
 interface Master {
   account_id: string;
   token_id: string;
-  by_passkey: Sealed;
+  // Locked to Ben's passkey secret. Absent until his first tap after setup.
+  by_passkey?: Sealed;
+  // Between setup and that tap: the token sealed under a one-time key the vault holds.
+  pending?: { key: string; box: Sealed; until: number };
   by_recovery: Sealed;
   stored_at: number;
   // Token ids in the account at setup: the audit's baseline (ids are not secrets).
@@ -27,6 +33,7 @@ interface Master {
 
 export interface ProbeResult {
   ok: boolean; // true only when every step below checked out
+  master: { token_id: string; locked_to_passkey_now: boolean };
   zone: string;
   record: string;
   before: number;
@@ -52,19 +59,26 @@ export class VaultLogic {
     this.now = now;
   }
 
-  /** Whether a master key is stored, and which provider token it is (not secret). */
-  async status(): Promise<{ stored: boolean; token_id?: string }> {
-    const m = await this.store.get<Master>("master");
-    return m ? { stored: true, token_id: m.token_id } : { stored: false };
+  private async master(): Promise<Master | undefined> {
+    const m = await this.store.get<Master | null>("master");
+    // A setup nobody confirmed with Face ID in time counts as no key at all.
+    if (!m || (!m.by_passkey && (!m.pending || this.now() > m.pending.until))) return undefined;
+    return m;
+  }
+
+  /** Whether a key is locked to Ben's passkey, or waiting for his first tap (ids are not secret). */
+  async status(): Promise<{ stored: boolean; pending: boolean; token_id?: string }> {
+    const m = await this.master();
+    return m ? { stored: !!m.by_passkey, pending: !m.by_passkey, token_id: m.token_id } : { stored: false, pending: false };
   }
 
   /**
-   * One time only: checks the pasted token with Cloudflare, seals it under the passkey's
-   * secret and under a new random recovery key, and returns the recovery key once (for paper).
+   * One time, on the vault's own page (setup.ts): checks the pasted token with Cloudflare, seals it
+   * under a one-time key the vault keeps until Ben's next Face ID tap, and under a new paper
+   * recovery key, which it returns once. The token never passes through the front desk.
    */
-  async setup(prf: string, parent: string): Promise<{ token_id: string; recovery_key: string }> {
-    if (await this.store.get<Master>("master")) throw new VaultError("already_stored");
-    const secret = secretBytes(prf);
+  async setup(parent: string): Promise<{ token_id: string; recovery_key: string }> {
+    if (await this.master()) throw new VaultError("already_stored");
     if (typeof parent !== "string" || !/^[A-Za-z0-9_-]{40,80}$/.test(parent.trim())) throw new VaultError("not_a_token");
     const token = parent.trim();
     const cf = new Cloudflare(token, this.fetch);
@@ -75,32 +89,46 @@ export class VaultLogic {
     if (check.status !== "active") throw new VaultError("token_not_active");
     const baseline = (await listTokens(cf, account_id)).map((t) => t.id);
     const recovery = crypto.getRandomValues(new Uint8Array(32));
+    const once = crypto.getRandomValues(new Uint8Array(32));
     const master: Master = {
       account_id,
       token_id: check.id,
-      by_passkey: await seal(secret, MASTER_LABEL, token),
+      pending: { key: b64url(once), box: await seal(once, PENDING_LABEL, token), until: this.now() + PENDING_MS },
       by_recovery: await seal(recovery, RECOVERY_LABEL, token),
       stored_at: this.now(),
       baseline,
     };
     // Re-checked after the awaited calls, so two setups cannot both store.
-    if (await this.store.get<Master>("master")) throw new VaultError("already_stored");
+    if (await this.master()) throw new VaultError("already_stored");
     await this.store.put("master", master);
     return { token_id: check.id, recovery_key: hex(recovery).replace(/(.{4})(?!$)/g, "$1-") };
+  }
+
+  // Opens the key with Ben's passkey secret. On the first tap after setup, locks it to that
+  // secret instead and forgets the one-time key.
+  private async unlock(m: Master, prf: string): Promise<{ token: string; lockedNow: boolean }> {
+    const secret = secretBytes(prf);
+    if (m.by_passkey) return { token: await open(secret, MASTER_LABEL, m.by_passkey), lockedNow: false };
+    const token = await open(fromB64url(m.pending!.key), PENDING_LABEL, m.pending!.box);
+    const locked: Master = { ...m, by_passkey: await seal(secret, MASTER_LABEL, token) };
+    delete locked.pending;
+    await this.store.put("master", locked);
+    return { token, lockedNow: true };
   }
 
   /** Runs one job from the fixed list with the master key opened by Ben's passkey secret. */
   async run(job: string, params: Record<string, string>, prf: string): Promise<ProbeResult> {
     if (job !== "cf.dns.txt.probe") throw new VaultError("job_not_offered");
     if (!STUDIO_ZONES.includes(params?.zone ?? "")) throw new VaultError("zone_not_offered");
-    const m = await this.store.get<Master>("master");
+    const m = await this.master();
     if (!m) throw new VaultError("no_master_key");
-    const parent = await open(secretBytes(prf), MASTER_LABEL, m.by_passkey);
-    return this.probe(new Cloudflare(parent, this.fetch), m, params.zone);
+    const { token, lockedNow } = await this.unlock(m, prf);
+    const r = await this.probe(new Cloudflare(token, this.fetch), m, params.zone);
+    return { ...r, master: { token_id: m.token_id, locked_to_passkey_now: lockedNow } };
   }
 
   // Mints a short key, uses it, and always deletes it (its expiry is the backstop).
-  private async withKey<T>(master: Cloudflare, account: string, r: ProbeResult, policy: unknown, use: (cf: Cloudflare) => Promise<T>): Promise<T> {
+  private async withKey<T>(master: Cloudflare, account: string, r: Omit<ProbeResult, "master">, policy: unknown, use: (cf: Cloudflare) => Promise<T>): Promise<T> {
     const minted = await master.call<{ id: string; value: string }>("POST", `/accounts/${account}/tokens`, {
       name: `front-desk probe ${isoSeconds(this.now())}`,
       policies: [policy],
@@ -123,9 +151,9 @@ export class VaultLogic {
   // Finds the zone with a read-only key, then adds one TXT record with a key for that zone
   // only, checks it, and removes it -- removal is tried even if a check failed. Then lists
   // every token in the account and compares with the setup baseline (Ben's QB check).
-  private async probe(master: Cloudflare, m: Master, zoneName: string): Promise<ProbeResult> {
+  private async probe(master: Cloudflare, m: Master, zoneName: string): Promise<Omit<ProbeResult, "master">> {
     const account = m.account_id;
-    const r: ProbeResult = {
+    const r: Omit<ProbeResult, "master"> = {
       ok: false, zone: zoneName, record: `${PROBE_RECORD}.${zoneName}`, before: -1, added: false, seen_after_add: false,
       removed: false, after: -1, minted: [], audit: { tokens: -1, minted_still_listed: [], new_since_setup: [] },
     };
@@ -176,7 +204,7 @@ export class VaultLogic {
   }
 }
 
-function note(r: ProbeResult, message: string): void {
+function note(r: { error?: string }, message: string): void {
   r.error = `${r.error ? `${r.error}; ` : ""}${message.slice(0, 120)}`;
 }
 

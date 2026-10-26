@@ -99,30 +99,6 @@ document.getElementById('go').onclick=async e=>{e.target.disabled=true;
   );
 }
 
-// One time: Ben pastes the Cloudflare token, taps Face ID, and the vault seals it. The page
-// then shows the paper recovery key once. The token is read from the box before the
-// passkey call, without an await, so the tap still counts as the user's gesture (C5a L3).
-export function setupPage(options: unknown, nonce: string): string {
-  return page(
-    "Store the master key",
-    nonce,
-    `<div id="status"></div><h1>Store the master key</h1>
-<p>Paste the Cloudflare token you just created, then tap Next. It is locked with your passkey and never shown again.</p>
-<textarea id="token" rows="3" style="width:100%;font-size:16px" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-<button id="go">Next: lock it with Face ID</button><div id="after"></div>`,
-    `const opts=${JSON.stringify(options)};
-document.getElementById('go').onclick=async e=>{const parent=document.getElementById('token').value.trim();e.target.disabled=true;
- let c;try{c=await navigator.credentials.get({publicKey:{challenge:u2b(opts.challenge),rpId:opts.rpId,timeout:opts.timeout,userVerification:'required',
-  allowCredentials:(opts.allowCredentials||[]).map(a=>({type:'public-key',id:u2b(a.id)})),extensions:{prf:{eval:{first:u2b(opts.prfSalt)}}}}})}
- catch(err){show(false,'FAIL: '+err.name);e.target.disabled=false;return}
- const x=(c.getClientExtensionResults&&c.getClientExtensionResults().prf)||{};const first=x.results&&x.results.first;
- const res=await fetch(location.pathname,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...cred(c),prf:first?b2u(first):null,parent})});
- const j=await res.json().catch(()=>({}));show(res.ok,res.ok?'PASS':'FAIL: '+(j.error||res.status));document.getElementById('token').value='';
- if(res.ok){const a=document.getElementById('after');a.innerHTML='<h2>Paper recovery key</h2><p>Write this down or print it now and keep it away from your phone. It is shown only once.</p><p style="font:20px/1.6 ui-monospace,monospace;word-break:break-all"></p>';
-  a.querySelector('p:last-child').textContent=j.recovery_key}};`,
-  );
-}
-
 export function logPage(entries: LogEntry[], nonce: string): string {
   const time = (ms: number) => new Date(ms).toISOString().replace("T", " ").slice(0, 16);
   const rows = entries
