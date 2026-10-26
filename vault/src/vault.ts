@@ -4,6 +4,7 @@
 // Design: studio-os docs/specifications/face-id-access/C4-SPIKE.md sections 3.4-3.7.
 
 import { Cloudflare, type Fetch } from "./cloudflare.ts";
+import { STUDIO_ZONES } from "./zones.ts";
 import { MASTER_LABEL, RECOVERY_LABEL, VaultError, open, seal, secretBytes, type Sealed } from "./seal.ts";
 
 export const PROBE_TOKEN_MS = 5 * 60_000;
@@ -20,18 +21,21 @@ interface Master {
   by_passkey: Sealed;
   by_recovery: Sealed;
   stored_at: number;
+  // Token ids in the account at setup: the audit's baseline (ids are not secrets).
+  baseline: string[];
 }
 
 export interface ProbeResult {
+  ok: boolean; // true only when every step below checked out
   zone: string;
   record: string;
   before: number;
+  added: boolean;
   seen_after_add: boolean;
+  removed: boolean;
   after: number;
-  minted_token_id: string;
-  minted_token_deleted: boolean;
-  minted_token_in_list: boolean;
-  tokens_in_account: number;
+  minted: { id: string; deleted: boolean }[];
+  audit: { tokens: number; minted_still_listed: string[]; new_since_setup: string[]; error?: string };
   error?: string;
 }
 
@@ -69,6 +73,7 @@ export class VaultLogic {
     const account_id = accounts[0].id;
     const check = await cf.call<{ id: string; status: string }>("GET", `/accounts/${account_id}/tokens/verify`);
     if (check.status !== "active") throw new VaultError("token_not_active");
+    const baseline = (await listTokens(cf, account_id)).map((t) => t.id);
     const recovery = crypto.getRandomValues(new Uint8Array(32));
     const master: Master = {
       account_id,
@@ -76,6 +81,7 @@ export class VaultLogic {
       by_passkey: await seal(secret, MASTER_LABEL, token),
       by_recovery: await seal(recovery, RECOVERY_LABEL, token),
       stored_at: this.now(),
+      baseline,
     };
     // Re-checked after the awaited calls, so two setups cannot both store.
     if (await this.store.get<Master>("master")) throw new VaultError("already_stored");
@@ -86,65 +92,101 @@ export class VaultLogic {
   /** Runs one job from the fixed list with the master key opened by Ben's passkey secret. */
   async run(job: string, params: Record<string, string>, prf: string): Promise<ProbeResult> {
     if (job !== "cf.dns.txt.probe") throw new VaultError("job_not_offered");
-    if (!/^[0-9a-f]{32}$/.test(params?.zone_id ?? "")) throw new VaultError("bad_params");
+    if (!STUDIO_ZONES.includes(params?.zone ?? "")) throw new VaultError("zone_not_offered");
     const m = await this.store.get<Master>("master");
     if (!m) throw new VaultError("no_master_key");
     const parent = await open(secretBytes(prf), MASTER_LABEL, m.by_passkey);
-    return this.probe(new Cloudflare(parent, this.fetch), m.account_id, params.zone_id);
+    return this.probe(new Cloudflare(parent, this.fetch), m, params.zone);
   }
 
-  // Makes a 5-minute DNS key for one zone, adds one TXT record, checks it, removes it,
-  // deletes the key, then lists the account's tokens to show the key is gone.
-  private async probe(master: Cloudflare, account: string, zoneId: string): Promise<ProbeResult> {
-    const groups = await master.call<{ id: string; name: string; scopes: string[] }[]>("GET", `/accounts/${account}/tokens/permission_groups`);
-    const group = (name: string) => {
-      const found = groups.filter((g) => g.name === name && g.scopes.includes("com.cloudflare.api.account.zone"));
-      if (found.length !== 1) throw new VaultError(`permission_group_unclear: ${name}`);
-      return { id: found[0].id };
-    };
+  // Mints a short key, uses it, and always deletes it (its expiry is the backstop).
+  private async withKey<T>(master: Cloudflare, account: string, r: ProbeResult, policy: unknown, use: (cf: Cloudflare) => Promise<T>): Promise<T> {
     const minted = await master.call<{ id: string; value: string }>("POST", `/accounts/${account}/tokens`, {
-      name: `front-desk dns probe ${isoSeconds(this.now())}`,
-      policies: [{ effect: "allow", resources: { [`com.cloudflare.api.account.zone.${zoneId}`]: "*" }, permission_groups: [group("DNS Write"), group("Zone Read")] }],
+      name: `front-desk probe ${isoSeconds(this.now())}`,
+      policies: [policy],
       expires_on: isoSeconds(this.now() + PROBE_TOKEN_MS),
     });
-    const r: ProbeResult = {
-      zone: "",
-      record: "",
-      before: -1,
-      seen_after_add: false,
-      after: -1,
-      minted_token_id: minted.id,
-      minted_token_deleted: false,
-      minted_token_in_list: true,
-      tokens_in_account: -1,
-    };
+    const entry = { id: minted.id, deleted: false };
+    r.minted.push(entry);
     try {
-      const dns = new Cloudflare(minted.value, this.fetch);
-      const zone = await dns.call<{ name: string }>("GET", `/zones/${zoneId}`);
-      r.zone = zone.name;
-      r.record = `${PROBE_RECORD}.${zone.name}`;
-      const find = () => dns.call<{ id: string; content: string }[]>("GET", `/zones/${zoneId}/dns_records?type=TXT&name=${encodeURIComponent(r.record)}`);
-      r.before = (await find()).length;
-      if (r.before !== 0) throw new VaultError("probe_record_exists");
-      const content = `"front desk probe ${hex(crypto.getRandomValues(new Uint8Array(8)))}"`;
-      const rec = await dns.call<{ id: string }>("POST", `/zones/${zoneId}/dns_records`, { type: "TXT", name: r.record, content, ttl: 60 });
-      r.seen_after_add = (await find()).some((x) => x.id === rec.id);
-      await dns.call("DELETE", `/zones/${zoneId}/dns_records/${rec.id}`);
-      r.after = (await find()).length;
-    } catch (e) {
-      r.error = (e as Error).message.slice(0, 120);
+      return await use(new Cloudflare(minted.value, this.fetch));
     } finally {
-      // The key is deleted whatever happened above; its 5-minute expiry is the backstop.
       try {
         await master.call("DELETE", `/accounts/${account}/tokens/${minted.id}`);
-        r.minted_token_deleted = true;
+        entry.deleted = true;
       } catch (e) {
-        r.error = `${r.error ? `${r.error}; ` : ""}token delete failed: ${(e as Error).message.slice(0, 80)}`;
+        note(r, `token delete failed: ${(e as Error).message}`);
       }
     }
-    const tokens = await master.call<{ id: string }[]>("GET", `/accounts/${account}/tokens?per_page=100`);
-    r.tokens_in_account = tokens.length;
-    r.minted_token_in_list = tokens.some((t) => t.id === minted.id);
+  }
+
+  // Finds the zone with a read-only key, then adds one TXT record with a key for that zone
+  // only, checks it, and removes it -- removal is tried even if a check failed. Then lists
+  // every token in the account and compares with the setup baseline (Ben's QB check).
+  private async probe(master: Cloudflare, m: Master, zoneName: string): Promise<ProbeResult> {
+    const account = m.account_id;
+    const r: ProbeResult = {
+      ok: false, zone: zoneName, record: `${PROBE_RECORD}.${zoneName}`, before: -1, added: false, seen_after_add: false,
+      removed: false, after: -1, minted: [], audit: { tokens: -1, minted_still_listed: [], new_since_setup: [] },
+    };
+    try {
+      const groups = await master.call<{ id: string; name: string; scopes: string[] }[]>("GET", `/accounts/${account}/tokens/permission_groups`);
+      const group = (name: string) => {
+        const found = groups.filter((g) => g.name === name && g.scopes.includes("com.cloudflare.api.account.zone"));
+        if (found.length !== 1) throw new VaultError(`permission_group_unclear: ${name}`);
+        return { id: found[0].id };
+      };
+      const allZones = { [`com.cloudflare.api.account.${account}`]: { "com.cloudflare.api.account.zone.*": "*" } };
+      const zoneId = await this.withKey(master, account, r, { effect: "allow", resources: allZones, permission_groups: [group("Zone Read")] }, async (cf) => {
+        const zones = await cf.call<{ id: string; name: string }[]>("GET", `/zones?name=${encodeURIComponent(zoneName)}`);
+        if (zones.length !== 1 || zones[0].name !== zoneName) throw new VaultError("zone_not_found");
+        return zones[0].id;
+      });
+      const oneZone = { [`com.cloudflare.api.account.zone.${zoneId}`]: "*" };
+      await this.withKey(master, account, r, { effect: "allow", resources: oneZone, permission_groups: [group("DNS Write"), group("Zone Read")] }, async (dns) => {
+        const find = () => dns.call<{ id: string }[]>("GET", `/zones/${zoneId}/dns_records?type=TXT&name=${encodeURIComponent(r.record)}`);
+        r.before = (await find()).length;
+        if (r.before !== 0) throw new VaultError("probe_record_exists");
+        const content = `"front desk probe ${hex(crypto.getRandomValues(new Uint8Array(8)))}"`;
+        const rec = await dns.call<{ id: string }>("POST", `/zones/${zoneId}/dns_records`, { type: "TXT", name: r.record, content, ttl: 60 });
+        r.added = true;
+        try {
+          r.seen_after_add = (await find()).some((x) => x.id === rec.id);
+        } finally {
+          await dns.call("DELETE", `/zones/${zoneId}/dns_records/${rec.id}`);
+          r.removed = true;
+          r.after = (await find()).length;
+        }
+      });
+    } catch (e) {
+      note(r, (e as Error).message);
+    }
+    try {
+      const ids = (await listTokens(master, account)).map((t) => t.id);
+      r.audit.tokens = ids.length;
+      r.audit.minted_still_listed = r.minted.map((t) => t.id).filter((id) => ids.includes(id));
+      r.audit.new_since_setup = ids.filter((id) => !m.baseline.includes(id));
+    } catch (e) {
+      r.audit.error = (e as Error).message.slice(0, 120);
+    }
+    r.ok =
+      !r.error && !r.audit.error && r.before === 0 && r.added && r.seen_after_add && r.removed && r.after === 0 &&
+      r.minted.length === 2 && r.minted.every((t) => t.deleted) && r.audit.minted_still_listed.length === 0 && r.audit.new_since_setup.length === 0;
     return r;
   }
+}
+
+function note(r: ProbeResult, message: string): void {
+  r.error = `${r.error ? `${r.error}; ` : ""}${message.slice(0, 120)}`;
+}
+
+// Every token in the account, all pages.
+async function listTokens(cf: Cloudflare, account: string): Promise<{ id: string }[]> {
+  const all: { id: string }[] = [];
+  for (let page = 1; page <= 20; page++) {
+    const batch = await cf.call<{ id: string }[]>("GET", `/accounts/${account}/tokens?per_page=50&page=${page}`);
+    all.push(...batch);
+    if (batch.length < 50) return all;
+  }
+  throw new VaultError("too_many_tokens");
 }

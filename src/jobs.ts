@@ -2,6 +2,8 @@
 // refused at /request. A job marked `vault` runs inside the vault Worker
 // (vault/src/vault.ts) at Ben's tap, with the master key his passkey unlocks.
 
+import { STUDIO_ZONES } from "../vault/src/zones.ts";
+
 export interface Job {
   // What Ben sees on the approval screen, built from the stored grant.
   describe(params: Record<string, string>): string;
@@ -23,10 +25,10 @@ export const JOBS = {
   },
   "cf.dns.txt.probe": {
     describe: (p) =>
-      `Cloudflare test: add one TXT record "_front-desk-probe" to zone ${p.zone_id}, check it, then remove it. A DNS key good for 5 minutes is made for this and deleted afterwards.`,
+      `Cloudflare test: add one TXT record "_front-desk-probe.${p.zone}", check it, then remove it. Two keys good for 5 minutes are made for this (find the zone; edit its DNS) and deleted afterwards.`,
     validate: (params) => {
-      const zone = (params as { zone_id?: unknown } | null)?.zone_id;
-      return typeof zone === "string" && /^[0-9a-f]{32}$/.test(zone) ? { zone_id: zone } : null;
+      const zone = (params as { zone?: unknown } | null)?.zone;
+      return typeof zone === "string" && STUDIO_ZONES.includes(zone) ? { zone } : null;
     },
     vault: true,
   },

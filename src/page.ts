@@ -57,7 +57,7 @@ document.getElementById('go').onclick=async e=>{e.target.disabled=true;
  catch(err){show(false,'FAIL: '+err.name);e.target.disabled=false;return}
  const x=(c.getClientExtensionResults&&c.getClientExtensionResults().prf)||{};const first=x.results&&x.results.first;
  const res=await fetch(location.pathname,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...cred(c),prf:first?b2u(first):null})});
- const j=await res.json().catch(()=>({}));const bad=j.result&&j.result.error;show(res.ok&&!bad,res.ok?(bad?'FAIL: '+bad:'PASS'):'FAIL: '+(j.error||res.status));
+ const j=await res.json().catch(()=>({}));const bad=j.result&&j.result.ok!==true;show(res.ok&&!bad,res.ok?(bad?'FAIL: '+(j.result.error||'a check did not pass, see below'):'PASS'):'FAIL: '+(j.error||res.status));
  if(j.result)document.getElementById('after').textContent=JSON.stringify(j.result,null,1)};`,
   );
 }

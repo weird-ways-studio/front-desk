@@ -303,7 +303,8 @@ export class Desk {
     try {
       if (!this.hooks.vault) throw new Error("vault not connected");
       result = await this.hooks.vault.run(g.job, g.params, prf);
-      await this.log({ event: "job_done", ...this.grantFacts(g), detail: JSON.stringify(result).slice(0, 160) }, now);
+      const ok = (result as { ok?: unknown } | null)?.ok === true;
+      await this.log({ event: ok ? "job_done" : "job_failed", ...this.grantFacts(g), detail: JSON.stringify(result).slice(0, 1200) }, now);
     } catch (e) {
       result = { error: (e as Error).message.slice(0, 120) };
       await this.log({ event: "job_failed", ...this.grantFacts(g), detail: (e as Error).message.slice(0, 120) }, now);
