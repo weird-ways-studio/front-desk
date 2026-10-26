@@ -120,3 +120,29 @@ test("owner only when Access signed in OWNER_EMAIL", async () => {
   assert.equal(await callerOf(access({ common_name: "abc.access" }), "ben@example.com"), "unknown");
   assert.equal(await callerOf(access(new Error("down")), "ben@example.com"), "unknown");
 });
+
+test("caller refusals are bounded: 20 log rows a day plus one notice, the rest only counted", async () => {
+  const store = new MemoryStore();
+  for (let i = 0; i < 25; i++) assert.equal((await call(store, "/log", undefined, "unknown")).status, 403);
+  const desk = new Desk(store, { origin: base, rpID: "desk.example" });
+  const rows = (await desk.readLog()).filter((e) => e.event === "refused");
+  assert.equal(rows.length, 21);
+  assert.match(rows[20].detail ?? "", /more caller refusals today/);
+  assert.deepEqual([...(await desk.refusalCounts()).values()], [25]);
+});
+
+test("garbled passkey answers are refused and logged, not a server error", async () => {
+  const store = new MemoryStore();
+  for (const path of ["/enroll", "/approve/x"]) {
+    const res = await call(store, path, { method: "POST", body: "not json" });
+    assert.equal(res.status, 400, path);
+    assert.deepEqual(await res.json(), { error: "bad_json" });
+  }
+  const details = (await new Desk(store, { origin: base, rpID: "desk.example" }).readLog()).map((e) => e.detail);
+  assert.deepEqual(details, ["enroll: bad_json", "approve: bad_json"]);
+});
+
+test("a synchronous throw from getIdentity still ends as unknown", async () => {
+  const bad = { aud: "x", getIdentity: () => { throw new Error("sync"); } } as unknown as ExecutionContext["access"];
+  assert.equal(await callerOf(bad, "ben@example.com"), "unknown");
+});

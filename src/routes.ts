@@ -13,7 +13,10 @@ export type Caller = "owner" | "agent" | "unknown";
 // Owner = the email Access signed in matches OWNER_EMAIL. Anything missing or failing = unknown.
 export async function callerOf(access: ExecutionContext["access"], ownerEmail: string | undefined): Promise<Caller> {
   if (!access || !ownerEmail) return "unknown";
-  const who = await access.getIdentity().catch(() => undefined);
+  // Promise.try-style wrap: a synchronous throw or odd return also ends as "unknown".
+  const who = await Promise.resolve()
+    .then(() => access.getIdentity())
+    .catch(() => undefined);
   const email = typeof who?.email === "string" ? who.email.trim().toLowerCase() : "";
   return email && email === ownerEmail.trim().toLowerCase() ? "owner" : "unknown";
 }
@@ -47,6 +50,16 @@ function html(body: string, nonce: string): Response {
   return new Response(body, { headers: { ...securityHeaders(nonce), "content-type": "text/html; charset=utf-8" } });
 }
 
+// A passkey answer that is not JSON is refused and logged, like any other failed tap.
+async function body<T>(request: Request, desk: Desk, what: string, now: number): Promise<T> {
+  try {
+    return (await request.json()) as T;
+  } catch {
+    await desk.refuse(`${what}: bad_json`, now);
+    throw new DeskError("bad_json", 400);
+  }
+}
+
 // The routes, kept apart from the Durable Object so tests can drive them.
 export async function route(request: Request, store: Store, caller: Caller, now = Date.now()): Promise<Response> {
   const url = new URL(request.url);
@@ -57,7 +70,7 @@ export async function route(request: Request, store: Store, caller: Caller, now 
   try {
     const needed = needs(m, parts);
     if (needed && caller !== needed) {
-      await desk.refuse(`${m} /${parts[0]} by ${caller}, needs ${needed}`, now);
+      await desk.refuseCaller(`${m} /${parts[0]} by ${caller}, needs ${needed}`, now);
       return json({ error: needed === "owner" ? "not_owner" : "not_agent" }, 403);
     }
     if (m === "GET" && url.pathname === "/health") return json({ ok: true, version: VERSION });
@@ -71,7 +84,7 @@ export async function route(request: Request, store: Store, caller: Caller, now 
         return html(approvePage(g, await desk.approvalOptions(g.id, now), nonce), nonce);
       }
       if (m === "POST") {
-        const g = await desk.approve(parts[1], await request.json(), now);
+        const g = await desk.approve(parts[1], await body(request, desk, "approve", now), now);
         return json({ ok: true, status: g.status });
       }
     }
@@ -82,7 +95,7 @@ export async function route(request: Request, store: Store, caller: Caller, now 
     if (url.pathname === "/enroll") {
       if (m === "GET") return html(enrollPage(await desk.enrollOptions(now), nonce), nonce);
       if (m === "POST") {
-        await desk.enroll(await request.json(), now);
+        await desk.enroll(await body(request, desk, "enroll", now), now);
         return json({ ok: true });
       }
     }

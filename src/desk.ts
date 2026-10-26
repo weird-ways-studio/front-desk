@@ -15,6 +15,7 @@ import { JOBS, type JobName } from "./jobs.ts";
 export const APPROVE_WINDOW_MS = 10 * 60_000; // ask -> approve
 export const COLLECT_WINDOW_MS = 5 * 60_000; // approve -> collect
 export const CHALLENGE_TTL_MS = 5 * 60_000;
+export const ROUTE_REFUSALS_PER_DAY = 20;
 
 // The subset of Durable Object storage the desk uses; MemoryStore implements it for tests.
 export interface Store {
@@ -210,6 +211,21 @@ export class Desk {
     await this.log({ event: "refused", detail: detail.slice(0, 160) }, now);
   }
 
+  // Refusals of callers who are not Ben or the agent. Anyone past the edge login could
+  // repeat these, so at most ROUTE_REFUSALS_PER_DAY get their own log row each UTC day;
+  // the rest only raise that day's count, one stored number per day.
+  async refuseCaller(detail: string, now: number): Promise<void> {
+    const key = `refusals:${new Date(now).toISOString().slice(0, 10)}`;
+    const count = ((await this.store.get<number>(key)) ?? 0) + 1;
+    await this.store.put(key, count);
+    if (count <= ROUTE_REFUSALS_PER_DAY) await this.refuse(detail, now);
+    else if (count === ROUTE_REFUSALS_PER_DAY + 1) await this.refuse(`more caller refusals today; counted under ${key}`, now);
+  }
+
+  async refusalCounts(): Promise<Map<string, number>> {
+    return this.store.list<number>({ prefix: "refusals:" });
+  }
+
   private async takeChallenge(response: { response: { clientDataJSON: string } }, purpose: Challenge["purpose"], now: number) {
     // Every refusal here is logged: these fail before the passkey is checked, and used to leave no trace.
     const refuse = async (code: string, status: number) => {
@@ -232,7 +248,13 @@ export class Desk {
   }
 
   async approve(id: string, response: AuthenticationResponseJSON, now: number): Promise<Grant> {
-    const g = await this.pending(id, now);
+    let g: Grant;
+    try {
+      g = await this.pending(id, now);
+    } catch (e) {
+      if (e instanceof DeskError) await this.refuse(`approve: ${e.code}`, now);
+      throw e;
+    }
     const { challenge, record } = await this.takeChallenge(response, "approve", now);
     if (record.grant_id !== g.id || !challengeCarries(challenge, g.hash)) {
       await this.log({ event: "refused", ...this.grantFacts(g), detail: "approval was for a different grant" }, now);
@@ -312,7 +334,10 @@ export class Desk {
   }
 
   async enroll(response: RegistrationResponseJSON, now: number): Promise<Passkey> {
-    if ((await this.passkeys()).length) throw new DeskError("already_enrolled", 409);
+    if ((await this.passkeys()).length) {
+      await this.refuse("enroll: already_enrolled", now);
+      throw new DeskError("already_enrolled", 409);
+    }
     const { challenge } = await this.takeChallenge(response, "enroll", now);
     let info;
     try {
