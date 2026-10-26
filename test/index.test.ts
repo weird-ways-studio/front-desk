@@ -1,11 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { route, VERSION } from "../src/routes.ts";
-import { MemoryStore } from "../src/desk.ts";
+import { callerOf, route, VERSION, type Caller } from "../src/routes.ts";
+import { Desk, MemoryStore } from "../src/desk.ts";
 import { SoftKey } from "./softkey.ts";
 
 const base = "https://desk.example";
-const call = (store: MemoryStore, path: string, init?: RequestInit) => route(new Request(base + path, init), store);
+// Each route gets the caller it needs, as the Worker would after Access (index.ts).
+const callerFor = (path: string, init?: RequestInit): Caller =>
+  path.startsWith("/request") || path.startsWith("/collect") ? "agent" : "owner";
+const call = (store: MemoryStore, path: string, init?: RequestInit, caller = callerFor(path, init)) =>
+  route(new Request(base + path, init), store, caller);
 
 test("health answers with the version", async () => {
   const res = await call(new MemoryStore(), "/health");
@@ -70,4 +74,49 @@ test("agent text is escaped on the log page", async () => {
   const body = await (await call(store, "/log")).text();
   assert.ok(!body.includes("<img src=x"));
   assert.ok(body.includes("&lt;img src=x"));
+});
+
+test("owner routes refuse the agent and unknown callers, and log it", async () => {
+  const store = new MemoryStore();
+  for (const caller of ["agent", "unknown"] as const) {
+    for (const [path, init] of [["/enroll"], ["/enroll", { method: "POST", body: "{}" }], ["/log"], ["/approve/x"], ["/approve/x", { method: "POST", body: "{}" }]] as [string, RequestInit?][]) {
+      const res = await call(store, path, init, caller);
+      assert.equal(res.status, 403, `${caller} ${path}`);
+      assert.deepEqual(await res.json(), { error: "not_owner" });
+    }
+  }
+  const log = await new Desk(store, { origin: base, rpID: "desk.example" }).readLog();
+  assert.equal(log.filter((e) => e.event === "refused" && /needs owner/.test(e.detail ?? "")).length, 10);
+});
+
+test("agent routes refuse Ben and unknown callers", async () => {
+  for (const caller of ["owner", "unknown"] as const) {
+    const asked = await call(new MemoryStore(), "/request", { method: "POST", body: JSON.stringify({ job: "test.echo", params: { word: "hi" }, reason: "x" }) }, caller);
+    assert.equal(asked.status, 403);
+    assert.deepEqual(await asked.json(), { error: "not_agent" });
+    assert.equal((await call(new MemoryStore(), "/collect/x", { method: "POST" }, caller)).status, 403);
+  }
+});
+
+test("health needs no caller", async () => {
+  assert.equal((await call(new MemoryStore(), "/health", undefined, "unknown")).status, 200);
+});
+
+const access = (identity: unknown): ExecutionContext["access"] => ({
+  aud: "test-aud",
+  getIdentity: async () => {
+    if (identity instanceof Error) throw identity;
+    return identity as CloudflareAccessIdentity | undefined;
+  },
+});
+
+test("owner only when Access signed in OWNER_EMAIL", async () => {
+  assert.equal(await callerOf(access({ email: " Ben@Example.com " }), "ben@example.com"), "owner");
+  assert.equal(await callerOf(access({ email: "someone@example.com" }), "ben@example.com"), "unknown");
+  assert.equal(await callerOf(undefined, "ben@example.com"), "unknown", "no Access login");
+  assert.equal(await callerOf(access({ email: "ben@example.com" }), undefined), "unknown", "OWNER_EMAIL unset");
+  assert.equal(await callerOf(access({ email: "" }), ""), "unknown", "both empty");
+  assert.equal(await callerOf(access(undefined), "ben@example.com"), "unknown", "no identity, e.g. a service token");
+  assert.equal(await callerOf(access({ common_name: "abc.access" }), "ben@example.com"), "unknown");
+  assert.equal(await callerOf(access(new Error("down")), "ben@example.com"), "unknown");
 });

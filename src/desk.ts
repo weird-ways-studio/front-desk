@@ -205,17 +205,27 @@ export class Desk {
     return options;
   }
 
+  // A refusal Ben should be able to see, for something not tied to one grant.
+  async refuse(detail: string, now: number): Promise<void> {
+    await this.log({ event: "refused", detail: detail.slice(0, 160) }, now);
+  }
+
   private async takeChallenge(response: { response: { clientDataJSON: string } }, purpose: Challenge["purpose"], now: number) {
+    // Every refusal here is logged: these fail before the passkey is checked, and used to leave no trace.
+    const refuse = async (code: string, status: number) => {
+      await this.refuse(`${purpose}: ${code}`, now);
+      return new DeskError(code, status);
+    };
     let challenge: string;
     try {
       challenge = JSON.parse(new TextDecoder().decode(fromB64url(response.response.clientDataJSON))).challenge;
     } catch {
-      throw new DeskError("bad_response", 400);
+      throw await refuse("bad_response", 400);
     }
     const c = await this.store.get<Challenge>(`challenge:${challenge}`);
-    if (!c || c.purpose !== purpose) throw new DeskError("unknown_challenge", 403);
-    if (c.used) throw new DeskError("challenge_used", 403);
-    if (now > c.expires_at) throw new DeskError("challenge_expired", 403);
+    if (!c || c.purpose !== purpose) throw await refuse("unknown_challenge", 403);
+    if (c.used) throw await refuse("challenge_used", 403);
+    if (now > c.expires_at) throw await refuse("challenge_expired", 403);
     // Burned before verification, so a failed or replayed attempt never gets a second try.
     await this.store.put<Challenge>(`challenge:${challenge}`, { ...c, used: true });
     return { challenge, record: c };
@@ -229,7 +239,10 @@ export class Desk {
       throw new DeskError("wrong_grant", 403);
     }
     const key = await this.store.get<Passkey>(`passkey:${response.id}`);
-    if (!key) throw new DeskError("unknown_passkey", 403);
+    if (!key) {
+      await this.log({ event: "refused", ...this.grantFacts(g), detail: "unknown passkey" }, now);
+      throw new DeskError("unknown_passkey", 403);
+    }
     let verified = false;
     let newCounter = key.counter;
     try {
