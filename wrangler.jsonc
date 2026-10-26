@@ -1,11 +1,11 @@
 // Cloudflare Workers config. Workers Builds deploys main only (Ben-reviewed).
-// Not reachable yet on purpose: no workers.dev address and no preview URLs
-// until Cloudflare Access is in front (instruction.app-exposure-doors, door 2).
+// Reachable only on its workers.dev address, which Cloudflare Access guards
+// (instruction.app-exposure-doors, door 2). No preview URLs.
 {
   "name": "front-desk",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
-  "workers_dev": false,
+  "workers_dev": true,
   "preview_urls": false,
   "send_metrics": false,
   // One Durable Object holds every grant, passkey and log entry (src/index.ts).
