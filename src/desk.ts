@@ -304,7 +304,7 @@ export class Desk {
       if (!this.hooks.vault) throw new Error("vault not connected");
       result = await this.hooks.vault.run(g.job, g.params, prf);
       const ok = (result as { ok?: unknown } | null)?.ok === true;
-      await this.log({ event: ok ? "job_done" : "job_failed", ...this.grantFacts(g), detail: JSON.stringify(result).slice(0, 1200) }, now);
+      await this.log({ event: ok ? "job_done" : "job_failed", ...this.grantFacts(g), detail: logDetail(result) }, now);
     } catch (e) {
       result = { error: (e as Error).message.slice(0, 120) };
       await this.log({ event: "job_failed", ...this.grantFacts(g), detail: (e as Error).message.slice(0, 120) }, now);
@@ -494,6 +494,24 @@ export class Desk {
     await this.log({ event: "passkey_enrolled", detail: `passkey ${key.id.slice(0, 8)}…` }, now);
     return key;
   }
+}
+
+export const LOG_DETAIL_MAX = 1200;
+
+// The job's evidence for the log, always valid JSON. If it is too long, the token-id lists are
+// shortened to their first 10 with their full counts and "truncated": true (Codex r2 #5); the
+// complete result stays on the grant record.
+export function logDetail(result: unknown): string {
+  const full = JSON.stringify(result);
+  if (full.length <= LOG_DETAIL_MAX) return full;
+  const r = result as { audit?: { new_since_setup?: string[]; minted_still_listed?: string[] } };
+  const cut = (ids: string[] = []) => ({ first: ids.slice(0, 10), total: ids.length });
+  const short = JSON.stringify({
+    ...r,
+    audit: { ...r.audit, new_since_setup: cut(r.audit?.new_since_setup), minted_still_listed: cut(r.audit?.minted_still_listed) },
+    truncated: true,
+  });
+  return short.length <= LOG_DETAIL_MAX ? short : JSON.stringify({ truncated: true, ok: (result as { ok?: unknown }).ok === true, note: "see grant record" });
 }
 
 async function saltFor(label: string): Promise<string> {
