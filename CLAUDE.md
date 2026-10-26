@@ -12,6 +12,7 @@ Off-box service that lets studio agents ask for narrow, short-lived access, appr
 ## Where behavior lives
 
 - `src/index.ts` -- Worker entry (named by `main` in `wrangler.jsonc`); forwards every request to the one Durable Object `FrontDesk`.
+- `src/agent.ts` -- recognises the c-box agent from its verified Access service-token ticket.
 - `src/routes.ts` -- HTTP routes. `src/desk.ts` -- grant, approval, collect and log rules. `src/jobs.ts` -- the fixed job list. `src/page.ts` -- phone pages.
 
 ## Release Checklist

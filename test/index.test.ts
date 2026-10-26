@@ -9,7 +9,8 @@ const base = "https://desk.example";
 const callerFor = (path: string, init?: RequestInit): Caller =>
   path.startsWith("/request") || path.startsWith("/collect") ? "agent" : "owner";
 const call = (store: MemoryStore, path: string, init?: RequestInit, caller = callerFor(path, init)) =>
-  route(new Request(base + path, init), store, caller);
+  route(new Request(base + path, init), store, { caller, requester: caller === "agent" ? AGENT : undefined });
+const AGENT = "c-box agent (test)";
 
 test("health answers with the version", async () => {
   const res = await call(new MemoryStore(), "/health");
