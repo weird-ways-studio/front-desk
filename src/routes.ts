@@ -2,9 +2,9 @@
 // so tests can drive them with an in-memory store.
 
 import { Desk, DeskError, type Store } from "./desk.ts";
-import { approvePage, enrollPage, logPage } from "./page.ts";
+import { approvePage, enrollPage, logPage, prfCheckPage } from "./page.ts";
 
-export const VERSION = "0.4.0-agent-identity";
+export const VERSION = "0.5.0-prf-check";
 
 // Who is calling, worked out by the Worker from Cloudflare Access (index.ts):
 // owner from Ben's email (callerOf), agent from the service-token ticket (agent.ts).
@@ -29,7 +29,7 @@ export async function callerOf(access: ExecutionContext["access"], ownerEmail: s
 
 // Which caller each route needs. Ben enrolls, approves and reads the log; the agent asks and collects.
 function needs(m: string, parts: string[]): Caller | null {
-  if (parts[0] === "enroll" || parts[0] === "approve" || parts[0] === "log") return "owner";
+  if (parts[0] === "enroll" || parts[0] === "approve" || parts[0] === "log" || parts[0] === "prf-check") return "owner";
   if ((m === "POST" && parts[0] === "request") || parts[0] === "collect") return "agent";
   return null;
 }
@@ -102,6 +102,10 @@ export async function route(request: Request, store: Store, who: Who, now = Date
         await desk.enroll(await body(request, desk, "enroll", now), now);
         return json({ ok: true });
       }
+    }
+    if (url.pathname === "/prf-check") {
+      if (m === "GET") return html(prfCheckPage(await desk.prfCheckOptions(now), nonce), nonce);
+      if (m === "POST") return json({ ok: true, ...(await desk.prfCheck(await body(request, desk, "prf check", now), now)) });
     }
     if (m === "GET" && url.pathname === "/log") return html(logPage(await desk.readLog(), nonce), nonce);
     return json({ error: "not_found" }, 404);

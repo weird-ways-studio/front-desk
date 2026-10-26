@@ -73,6 +73,28 @@ document.getElementById('go').onclick=async e=>{e.target.disabled=true;
   );
 }
 
+// One tap: Face ID with the enrolled passkey, asking it for its PRF secret (salted with the
+// check label, never the master key's). PASS shows a fingerprint; a second tap should match.
+export function prfCheckPage(options: unknown, nonce: string): string {
+  return page(
+    "Passkey secret check",
+    nonce,
+    `<div id="status"></div><h1>Passkey secret check</h1>
+<p>Tests whether your passkey can unlock the master key later. Nothing is stored or changed.</p>
+<button id="go">Next: check with Face ID</button><p id="after" class="muted"></p>`,
+    `const opts=${JSON.stringify(options)};
+document.getElementById('go').onclick=async e=>{e.target.disabled=true;
+ let c;try{c=await navigator.credentials.get({publicKey:{challenge:u2b(opts.challenge),rpId:opts.rpId,timeout:opts.timeout,userVerification:'required',
+  allowCredentials:(opts.allowCredentials||[]).map(a=>({type:'public-key',id:u2b(a.id)})),extensions:{prf:{eval:{first:u2b(opts.prfSalt)}}}}})}
+ catch(err){show(false,'FAIL: '+err.name);e.target.disabled=false;return}
+ const x=(c.getClientExtensionResults&&c.getClientExtensionResults().prf)||{};const first=x.results&&x.results.first;
+ const res=await fetch(location.pathname,{method:'POST',headers:{'content-type':'application/json'},
+  body:JSON.stringify({credential:cred(c),prf:first?b2u(first):null,prf_info:JSON.stringify(Object.keys(x))})});
+ const j=await res.json().catch(()=>({}));show(res.ok,res.ok?'PASS: '+j.fingerprint:'FAIL: '+(j.error||res.status));
+ document.getElementById('after').textContent='Now reload this page and tap Next once more. The same code twice means it works.'};`,
+  );
+}
+
 export function logPage(entries: LogEntry[], nonce: string): string {
   const time = (ms: number) => new Date(ms).toISOString().replace("T", " ").slice(0, 16);
   const rows = entries
