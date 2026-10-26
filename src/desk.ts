@@ -116,12 +116,19 @@ export async function grantHash(g: Pick<Grant, "id" | "job" | "params" | "reques
   return hex(await sha256(enc.encode(canonical(fixed))));
 }
 
+// Test seam: lets a test pause an approval between verification and commit.
+export interface DeskHooks {
+  afterVerify?: (grantId: string) => Promise<void>;
+}
+
 export class Desk {
   private store: Store;
   private site: Site;
-  constructor(store: Store, site: Site) {
+  private hooks: DeskHooks;
+  constructor(store: Store, site: Site, hooks: DeskHooks = {}) {
     this.store = store;
     this.site = site;
+    this.hooks = hooks;
   }
 
   private grantFacts(g: Grant) {
@@ -241,11 +248,16 @@ export class Desk {
       throw new DeskError("passkey_check_failed", 403);
     }
     if (!verified) throw new DeskError("passkey_check_failed", 403);
+    await this.hooks.afterVerify?.(g.id);
     // Verification awaited crypto, so another request may have run meanwhile.
     // Re-read and commit with storage calls only, which the Durable Object does not interleave.
     const current = await this.pending(id, now);
     const currentKey = await this.store.get<Passkey>(`passkey:${key.id}`);
-    if (!currentKey || (newCounter !== 0 && newCounter <= currentKey.counter)) throw new DeskError("stale_counter", 409);
+    // A counter that does not move forward means a replayed or cloned passkey (unless both stay 0,
+    // which synced passkeys such as 1Password's report).
+    if (!currentKey) throw new DeskError("unknown_passkey", 403);
+    const inUse = newCounter > 0 || currentKey.counter > 0;
+    if (inUse && newCounter <= currentKey.counter) throw new DeskError("stale_counter", 409);
     await this.store.put<Passkey>(`passkey:${key.id}`, { ...currentKey, counter: newCounter });
     const approved: Grant = { ...current, status: "approved", approved_at: now };
     await this.store.put(`grant:${g.id}`, approved);

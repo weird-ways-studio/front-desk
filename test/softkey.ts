@@ -66,8 +66,8 @@ export class SoftKey {
     };
   }
 
-  async assert(challenge: string, rpID: string, origin: string, { userVerified = true } = {}) {
-    this.counter++;
+  async assert(challenge: string, rpID: string, origin: string, { userVerified = true, counter }: { userVerified?: boolean; counter?: number } = {}) {
+    this.counter = counter ?? this.counter + 1;
     const authData = await this.authData(rpID, userVerified ? 0x05 : 0x01);
     const clientDataJSON = enc.encode(JSON.stringify({ type: "webauthn.get", challenge, origin }));
     const signed = new Uint8Array([...authData, ...(await sha256(clientDataJSON))]);
