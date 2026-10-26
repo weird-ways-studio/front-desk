@@ -4,11 +4,17 @@
 import { Desk, DeskError, type Store } from "./desk.ts";
 import { approvePage, enrollPage, logPage } from "./page.ts";
 
-export const VERSION = "0.3.0-owner-check";
+export const VERSION = "0.4.0-agent-identity";
 
-// Who is calling, worked out by the Worker from Cloudflare Access (index.ts).
-// "agent" is not yet produced there: the c-box service token lands in PR3b-2.
+// Who is calling, worked out by the Worker from Cloudflare Access (index.ts):
+// owner from Ben's email (callerOf), agent from the service-token ticket (agent.ts).
 export type Caller = "owner" | "agent" | "unknown";
+// requester: who asked, from the verified identity (agent only). why: why the agent check failed, for the log.
+export interface Who {
+  caller: Caller;
+  requester?: string;
+  why?: string;
+}
 
 // Owner = the email Access signed in matches OWNER_EMAIL. Anything missing or failing = unknown.
 export async function callerOf(access: ExecutionContext["access"], ownerEmail: string | undefined): Promise<Caller> {
@@ -20,9 +26,6 @@ export async function callerOf(access: ExecutionContext["access"], ownerEmail: s
   const email = typeof who?.email === "string" ? who.email.trim().toLowerCase() : "";
   return email && email === ownerEmail.trim().toLowerCase() ? "owner" : "unknown";
 }
-
-// Who asked. One agent identity until service tokens name the agent (PR3b-2).
-const REQUESTER = "c-box agent";
 
 // Which caller each route needs. Ben enrolls, approves and reads the log; the agent asks and collects.
 function needs(m: string, parts: string[]): Caller | null {
@@ -61,7 +64,8 @@ async function body<T>(request: Request, desk: Desk, what: string, now: number):
 }
 
 // The routes, kept apart from the Durable Object so tests can drive them.
-export async function route(request: Request, store: Store, caller: Caller, now = Date.now()): Promise<Response> {
+export async function route(request: Request, store: Store, who: Who, now = Date.now()): Promise<Response> {
+  const { caller, requester = "" } = who;
   const url = new URL(request.url);
   const desk = new Desk(store, { origin: url.origin, rpID: url.hostname });
   const nonce = crypto.randomUUID().replace(/-/g, "");
@@ -70,12 +74,12 @@ export async function route(request: Request, store: Store, caller: Caller, now 
   try {
     const needed = needs(m, parts);
     if (needed && caller !== needed) {
-      await desk.refuseCaller(`${m} /${parts[0]} by ${caller}, needs ${needed}`, now);
+      await desk.refuseCaller(`${m} /${parts[0]} by ${caller}, needs ${needed}${who.why ? ` (${who.why})` : ""}`, now);
       return json({ error: needed === "owner" ? "not_owner" : "not_agent" }, 403);
     }
     if (m === "GET" && url.pathname === "/health") return json({ ok: true, version: VERSION });
     if (m === "POST" && url.pathname === "/request") {
-      const g = await desk.request(await request.json().catch(() => null), REQUESTER, now);
+      const g = await desk.request(await request.json().catch(() => null), requester, now);
       return json({ id: g.id, approve_url: `${url.origin}/approve/${g.id}`, expires_at: g.expires_at }, 201);
     }
     if (parts[0] === "approve" && parts.length === 2) {
@@ -89,7 +93,7 @@ export async function route(request: Request, store: Store, caller: Caller, now 
       }
     }
     if (m === "POST" && parts[0] === "collect" && parts.length === 2) {
-      const { result } = await desk.collect(parts[1], REQUESTER, now);
+      const { result } = await desk.collect(parts[1], requester, now);
       return json({ ok: true, result });
     }
     if (url.pathname === "/enroll") {

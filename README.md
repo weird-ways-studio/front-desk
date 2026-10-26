@@ -13,6 +13,7 @@ A small service that lets studio agents ask for narrow, short-lived access, whic
 - Cloudflare **Workers Builds** watches `main` of this repo and deploys it. Builds for any other branch are **off** -- a branch build runs code nobody reviewed with Cloudflare's deploy rights.
 - `main` is protected by the `protect-main` ruleset: pull request plus Ben's approval of the latest push; no bypass, no force push, no deletion.
 - `wrangler.jsonc` serves the Worker only on its workers.dev address (`workers_dev: true`), which a Cloudflare Access policy allowing only Ben guards; preview URLs stay off (`preview_urls: false`).
+- Who is calling: Ben by his Access login email (`OWNER_EMAIL`); the c-box agent by its Access service token, whose signed ticket the Worker checks itself (`src/agent.ts`, settings `AGENT_CLIENT_ID` and `ACCESS_TEAM_DOMAIN`). All three are dashboard variables kept across deploys (`keep_vars`), never in this repo.
 - Entry point: `src/index.ts` (`main` in `wrangler.jsonc`); Cloudflare calls its default export's `fetch`.
 
 ## Run the tests
