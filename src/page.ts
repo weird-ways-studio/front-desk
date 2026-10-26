@@ -1,0 +1,94 @@
+// HTML for Ben's phone. Everything shown about a grant comes from the stored
+// grant; the agent's reason appears only as a labelled quote.
+
+import type { Grant, LogEntry } from "./desk.ts";
+import { JOBS } from "./jobs.ts";
+
+export function esc(text: string): string {
+  return text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+}
+
+const STYLE = `
+:root{--bg:#fff;--fg:#111;--muted:#555;--line:#ddd;--ok:#0a7d32;--bad:#b3261e;--btn:#1a56db}
+@media (prefers-color-scheme:dark){:root{--bg:#111;--fg:#eee;--muted:#aaa;--line:#333;--ok:#4ade80;--bad:#f87171;--btn:#3b82f6}}
+body{background:var(--bg);color:var(--fg);font:17px/1.45 -apple-system,system-ui,sans-serif;margin:0;padding:16px;max-width:560px}
+#status{font-size:28px;font-weight:700;min-height:1.4em;margin:4px 0 12px}
+#status.pass{color:var(--ok)}#status.fail{color:var(--bad)}
+.muted{color:var(--muted);font-size:15px}
+blockquote{margin:8px 0;padding:8px 12px;border-left:4px solid var(--line)}
+button{width:100%;font-size:20px;padding:16px;border:0;border-radius:12px;background:var(--btn);color:#fff;margin-top:16px}
+button:disabled{opacity:.5}
+table{border-collapse:collapse;width:100%;font-size:14px}td,th{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertical-align:top}
+`;
+
+// Converts between the JSON the server speaks and the bytes the browser API wants.
+// navigator.credentials.* is the first call in the tap handler (C5a lesson L3).
+const CLIENT = `
+const b2u=b=>btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');
+const u2b=s=>Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0));
+const show=(ok,text)=>{const s=document.getElementById('status');s.className=ok?'pass':'fail';s.textContent=text};
+function cred(c){const r=c.response,o={id:c.id,rawId:b2u(c.rawId),type:c.type,clientExtensionResults:{},response:{clientDataJSON:b2u(r.clientDataJSON)}};
+ if(r.attestationObject){o.response.attestationObject=b2u(r.attestationObject)}else{o.response.authenticatorData=b2u(r.authenticatorData);o.response.signature=b2u(r.signature);if(r.userHandle)o.response.userHandle=b2u(r.userHandle)}return o}
+async function finish(path,c){const res=await fetch(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(cred(c))});
+ const j=await res.json().catch(()=>({}));show(res.ok,res.ok?'PASS':'FAIL: '+(j.error||res.status))}
+`;
+
+function page(title: string, nonce: string, body: string, script = ""): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><title>${esc(title)}</title><style>${STYLE}</style></head>
+<body>${body}${script ? `<script nonce="${nonce}">${CLIENT}${script}</script>` : ""}</body></html>`;
+}
+
+export function approvePage(g: Grant, options: unknown, nonce: string): string {
+  const describe = JOBS[g.job].describe(g.params);
+  return page(
+    "Approve access",
+    nonce,
+    `<div id="status"></div>
+<h1>Approve this?</h1>
+<p><strong>${esc(describe)}</strong></p>
+<p class="muted">Job <code>${esc(g.job)}</code> · asked by ${esc(g.requester)} · expires ${new Date(g.expires_at).toISOString().slice(11, 16)} UTC</p>
+<p class="muted">The agent's words:</p><blockquote>${esc(g.reason)}</blockquote>
+<button id="go">Next: approve with Face ID</button>`,
+    `const opts=${JSON.stringify(options)};
+document.getElementById('go').onclick=async e=>{e.target.disabled=true;
+ let c;try{c=await navigator.credentials.get({publicKey:{challenge:u2b(opts.challenge),rpId:opts.rpId,timeout:opts.timeout,userVerification:'required',
+  allowCredentials:(opts.allowCredentials||[]).map(a=>({type:'public-key',id:u2b(a.id)}))}})}catch(err){show(false,'FAIL: '+err.name);e.target.disabled=false;return}
+ await finish(location.pathname,c)};`,
+  );
+}
+
+export function enrollPage(options: unknown, nonce: string): string {
+  return page(
+    "Set up your passkey",
+    nonce,
+    `<div id="status"></div><h1>Set up your passkey</h1>
+<p>One time only. After this, approvals need this passkey.</p><button id="go">Next: create passkey</button>`,
+    `const opts=${JSON.stringify(options)};
+document.getElementById('go').onclick=async e=>{e.target.disabled=true;
+ let c;try{c=await navigator.credentials.create({publicKey:{challenge:u2b(opts.challenge),rp:opts.rp,user:{...opts.user,id:u2b(opts.user.id)},
+  pubKeyCredParams:opts.pubKeyCredParams,timeout:opts.timeout,authenticatorSelection:opts.authenticatorSelection,attestation:'none',extensions:{prf:{}}}})}
+ catch(err){show(false,'FAIL: '+err.name);e.target.disabled=false;return}
+ await finish(location.pathname,c)};`,
+  );
+}
+
+export function logPage(entries: LogEntry[], nonce: string): string {
+  const time = (ms: number) => new Date(ms).toISOString().replace("T", " ").slice(0, 16);
+  const rows = entries
+    .slice()
+    .reverse()
+    .map((e) => {
+      const what = e.job ? (e.params ? JOBS[e.job as keyof typeof JOBS]?.describe(e.params) ?? e.job : e.job) : "";
+      return `<tr><td>${time(e.at)}</td><td><strong>${esc(e.event)}</strong>${e.grant_id ? `<br><span class="muted">${esc(e.grant_id.slice(0, 8))}</span>` : ""}</td>
+<td>${esc(what)}${e.detail ? `<br><span class="muted">${esc(e.detail)}</span>` : ""}</td><td>${esc(e.requester ?? "")}</td>
+<td>${e.reason ? `<q>${esc(e.reason)}</q>` : ""}</td><td>${e.expires_at ? time(e.expires_at) : ""}</td></tr>`;
+    })
+    .join("");
+  return page(
+    "Grant log",
+    nonce,
+    `<h1>Grant log</h1><p class="muted">Newest first. Times UTC. Nothing here can be edited or deleted. The reason is the agent's own words.</p>
+<table><tr><th>When</th><th>What happened</th><th>Job</th><th>Who</th><th>Why</th><th>Expires</th></tr>${rows}</table>`,
+  );
+}

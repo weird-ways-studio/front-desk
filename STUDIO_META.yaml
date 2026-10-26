@@ -1,0 +1,23 @@
+name: front-desk
+phase: Prototype
+phase_since: 2026-10-25
+description: |
+  Off-box access broker: agents request a fixed job, Ben approves with his
+  passkey, the agent collects once; every step is logged. Part of epic 46fc7b61.
+language: typescript
+deploy: Cloudflare Workers Builds from main (separate Cloudflare account)
+staging_environment: none
+canonical_test_command: npm test
+canonical_sources:
+  version: src/routes.ts
+  coverage: not measured
+  health: none   # not reachable until Cloudflare Access is in front
+infrastructure:
+  ci_workflow: none
+  pre_commit_hook: true   # studio-os hooks/front-desk-pre-commit.sh (secret scan)
+  pre_push_hook: false
+  post_merge_hook: false
+  coverage_floor: null
+  specs_doc: ~/studio/studio-os/docs/specifications/face-id-access/C4-SPIKE.md
+known_gaps:
+  - Requester identity and first-passkey enrollment not yet bound to Cloudflare Access identity (PR3b).
