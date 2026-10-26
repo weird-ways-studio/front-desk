@@ -331,3 +331,22 @@ test("master key setup refuses: no secret, a stranger's passkey, a vault refusal
   const log = await new Desk(store, { origin: base, rpID: "desk.example" }).readLog();
   assert.match(log.at(-1)!.detail!, /^master key setup: not_a_token/);
 });
+
+test("vault job: a collect while the vault is still working is refused, and the grant is collected once", async () => {
+  const { store, key } = await enrolled();
+  const vault = fakeVault(true);
+  const id = await askProbe(store, vault);
+  let during: Response | undefined;
+  const run = vault.run.bind(vault);
+  vault.run = async (...args) => {
+    during = await callV(store, vault, `/collect/${id}`, { method: "POST" });
+    return run(...args);
+  };
+  const opts = await optsIn(await callV(store, vault, `/approve/${id}`));
+  const answer = { ...(await key.assert(opts.challenge, "desk.example", base)), prf: prfOut(5) };
+  assert.equal((await callV(store, vault, `/approve/${id}`, { method: "POST", body: JSON.stringify(answer) })).status, 200);
+  assert.deepEqual(await during!.json(), { error: "not_ready" });
+  const first = await callV(store, vault, `/collect/${id}`, { method: "POST" });
+  assert.equal(((await first.json()) as any).result.zone, "example.com");
+  assert.deepEqual(await (await callV(store, vault, `/collect/${id}`, { method: "POST" })).json(), { error: "already_collected" });
+});

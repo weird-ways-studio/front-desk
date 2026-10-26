@@ -308,7 +308,8 @@ export class Desk {
       result = { error: (e as Error).message.slice(0, 120) };
       await this.log({ event: "job_failed", ...this.grantFacts(g), detail: (e as Error).message.slice(0, 120) }, now);
     }
-    const done: Grant = { ...approved, result };
+    // Re-read: other requests ran while the vault worked; only the result is added.
+    const done: Grant = { ...(await this.grant(id)), result };
     await this.store.put(`grant:${g.id}`, done);
     return done;
   }
@@ -430,6 +431,8 @@ export class Desk {
     if (g.status === "pending") throw new DeskError("not_approved", 403);
     if (g.status === "collected") throw new DeskError("already_collected", 409);
     if (now > (g.approved_at ?? 0) + COLLECT_WINDOW_MS) throw new DeskError("collect_window_closed", 410);
+    // A vault job is approved before the vault finishes; until its result is in, there is nothing to collect.
+    if ((JOBS[g.job] as Job).vault && g.result === undefined) throw new DeskError("not_ready", 409);
     const collected: Grant = { ...g, status: "collected", collected_at: now };
     await this.store.put(`grant:${g.id}`, collected);
     const job = JOBS[g.job] as Job;
