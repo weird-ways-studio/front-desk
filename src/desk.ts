@@ -16,6 +16,8 @@ export const APPROVE_WINDOW_MS = 10 * 60_000; // ask -> approve
 export const COLLECT_WINDOW_MS = 5 * 60_000; // approve -> collect
 export const CHALLENGE_TTL_MS = 5 * 60_000;
 export const ROUTE_REFUSALS_PER_DAY = 20;
+// PRF check only. The master key will use a different label, so a check never reveals key material.
+export const PRF_CHECK_LABEL = "front-desk prf-check v1";
 
 // The subset of Durable Object storage the desk uses; MemoryStore implements it for tests.
 export interface Store {
@@ -48,7 +50,7 @@ export interface Passkey {
 }
 
 interface Challenge {
-  purpose: "approve" | "enroll";
+  purpose: "approve" | "enroll" | "check";
   grant_id?: string;
   expires_at: number;
   used: boolean;
@@ -260,13 +262,26 @@ export class Desk {
       await this.log({ event: "refused", ...this.grantFacts(g), detail: "approval was for a different grant" }, now);
       throw new DeskError("wrong_grant", 403);
     }
+    const fail = (detail: string) => this.log({ event: "refused", ...this.grantFacts(g), detail }, now);
+    const { key, newCounter } = await this.verifyPasskey(response, challenge, fail);
+    await this.hooks.afterVerify?.(g.id);
+    // Verification awaited crypto, so another request may have run meanwhile.
+    // Re-read and commit with storage calls only, which the Durable Object does not interleave.
+    const current = await this.pending(id, now);
+    await this.commitCounter(key.id, newCounter);
+    const approved: Grant = { ...current, status: "approved", approved_at: now };
+    await this.store.put(`grant:${g.id}`, approved);
+    await this.log({ event: "approved", ...this.grantFacts(g) }, now);
+    return approved;
+  }
+
+  // Checks Ben's passkey answer against a challenge already taken. Every failure is logged through `fail`.
+  private async verifyPasskey(response: AuthenticationResponseJSON, challenge: string, fail: (detail: string) => Promise<void>) {
     const key = await this.store.get<Passkey>(`passkey:${response.id}`);
     if (!key) {
-      await this.log({ event: "refused", ...this.grantFacts(g), detail: "unknown passkey" }, now);
+      await fail("unknown passkey");
       throw new DeskError("unknown_passkey", 403);
     }
-    let verified = false;
-    let newCounter = key.counter;
     try {
       const result = await verifyAuthenticationResponse({
         response,
@@ -276,28 +291,59 @@ export class Desk {
         credential: { id: key.id, publicKey: new Uint8Array(key.publicKey), counter: key.counter },
         requireUserVerification: true,
       });
-      verified = result.verified;
-      newCounter = result.authenticationInfo.newCounter;
+      if (!result.verified) throw new Error("not verified");
+      return { key, newCounter: result.authenticationInfo.newCounter };
     } catch (e) {
-      await this.log({ event: "refused", ...this.grantFacts(g), detail: `passkey check failed: ${(e as Error).message.slice(0, 120)}` }, now);
+      await fail(`passkey check failed: ${(e as Error).message.slice(0, 120)}`);
       throw new DeskError("passkey_check_failed", 403);
     }
-    if (!verified) throw new DeskError("passkey_check_failed", 403);
-    await this.hooks.afterVerify?.(g.id);
-    // Verification awaited crypto, so another request may have run meanwhile.
-    // Re-read and commit with storage calls only, which the Durable Object does not interleave.
-    const current = await this.pending(id, now);
-    const currentKey = await this.store.get<Passkey>(`passkey:${key.id}`);
-    // A counter that does not move forward means a replayed or cloned passkey (unless both stay 0,
-    // which synced passkeys such as 1Password's report).
+  }
+
+  // Storage calls only, after verification. A counter that does not move forward means a replayed
+  // or cloned passkey (unless both stay 0, which synced passkeys such as 1Password's report).
+  private async commitCounter(id: string, newCounter: number): Promise<void> {
+    const currentKey = await this.store.get<Passkey>(`passkey:${id}`);
     if (!currentKey) throw new DeskError("unknown_passkey", 403);
     const inUse = newCounter > 0 || currentKey.counter > 0;
     if (inUse && newCounter <= currentKey.counter) throw new DeskError("stale_counter", 409);
-    await this.store.put<Passkey>(`passkey:${key.id}`, { ...currentKey, counter: newCounter });
-    const approved: Grant = { ...current, status: "approved", approved_at: now };
-    await this.store.put(`grant:${g.id}`, approved);
-    await this.log({ event: "approved", ...this.grantFacts(g) }, now);
-    return approved;
+    await this.store.put<Passkey>(`passkey:${id}`, { ...currentKey, counter: newCounter });
+  }
+
+  // PRF check: does Ben's passkey give the same secret on every tap? Nothing secret is stored;
+  // only a short fingerprint of the output is logged. The output comes from Ben's browser and is
+  // not signed by the passkey -- fine for a check; the master key's decryption is its own proof.
+  async prfCheckOptions(now: number) {
+    const keys = await this.passkeys();
+    if (!keys.length) throw new DeskError("no_passkey_enrolled", 409);
+    const options = await generateAuthenticationOptions({
+      rpID: this.site.rpID,
+      userVerification: "required",
+      allowCredentials: keys.map((k) => ({ id: k.id })),
+    });
+    await this.store.put<Challenge>(`challenge:${options.challenge}`, { purpose: "check", expires_at: now + CHALLENGE_TTL_MS, used: false });
+    return { ...options, prfSalt: b64url(await sha256(enc.encode(PRF_CHECK_LABEL))) };
+  }
+
+  async prfCheck(input: unknown, now: number): Promise<{ fingerprint: string }> {
+    const body = (input ?? {}) as { credential?: AuthenticationResponseJSON; prf?: unknown; prf_info?: unknown };
+    const { challenge } = await this.takeChallenge(body.credential as AuthenticationResponseJSON, "check", now);
+    const fail = (detail: string) => this.log({ event: "refused", detail: `prf check: ${detail}` }, now);
+    const { key, newCounter } = await this.verifyPasskey(body.credential!, challenge, fail);
+    await this.commitCounter(key.id, newCounter);
+    let bytes: Uint8Array | null = null;
+    try {
+      if (typeof body.prf === "string" && body.prf) bytes = fromB64url(body.prf);
+    } catch {
+      bytes = null;
+    }
+    if (!bytes || bytes.length !== 32) {
+      const info = typeof body.prf_info === "string" ? body.prf_info.slice(0, 60) : "";
+      await this.log({ event: "prf_check", detail: `FAIL: no usable PRF output (${info || "none"}), passkey ${key.id.slice(0, 8)}…` }, now);
+      throw new DeskError("prf_missing", 422);
+    }
+    const fingerprint = hex(await sha256(bytes)).slice(0, 16);
+    await this.log({ event: "prf_check", detail: `PASS: fingerprint ${fingerprint}, passkey ${key.id.slice(0, 8)}…` }, now);
+    return { fingerprint };
   }
 
   // Marked collected before the job runs: two collects, or a crash mid-job, never run it twice.

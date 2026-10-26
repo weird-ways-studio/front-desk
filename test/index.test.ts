@@ -147,3 +147,83 @@ test("a synchronous throw from getIdentity still ends as unknown", async () => {
   const bad = { aud: "x", getIdentity: () => { throw new Error("sync"); } } as unknown as ExecutionContext["access"];
   assert.equal(await callerOf(bad, "ben@example.com"), "unknown");
 });
+
+// PRF check (PR3b-2b step 1): Ben's passkey must give the same secret on every tap.
+async function enrolled() {
+  const store = new MemoryStore();
+  const key = await SoftKey.create();
+  const enrollHtml = await (await call(store, "/enroll")).text();
+  const regOpts = JSON.parse(enrollHtml.match(/const opts=(\{.*?\});\n/)![1]);
+  await call(store, "/enroll", { method: "POST", body: JSON.stringify(await key.register(regOpts, base)) });
+  return { store, key };
+}
+const checkOpts = async (store: MemoryStore) =>
+  JSON.parse((await (await call(store, "/prf-check")).text()).match(/const opts=(\{.*?\});\n/)![1]);
+const prfOut = (fill: number) => Buffer.from(new Uint8Array(32).fill(fill)).toString("base64url");
+const check = (store: MemoryStore, body: unknown) => call(store, "/prf-check", { method: "POST", body: JSON.stringify(body) });
+
+test("PRF check: same secret twice gives the same fingerprint; a different secret does not", async () => {
+  const { store, key } = await enrolled();
+  const prints: string[] = [];
+  for (const fill of [7, 7, 8]) {
+    const opts = await checkOpts(store);
+    const res = await check(store, { credential: await key.assert(opts.challenge, "desk.example", base), prf: prfOut(fill) });
+    assert.equal(res.status, 200);
+    prints.push(((await res.json()) as { fingerprint: string }).fingerprint);
+  }
+  assert.equal(prints[0], prints[1]);
+  assert.notEqual(prints[0], prints[2]);
+  const rows = (await new Desk(store, { origin: base, rpID: "desk.example" }).readLog()).filter((e) => e.event === "prf_check");
+  assert.equal(rows.length, 3);
+  assert.match(rows[0].detail!, new RegExp(`^PASS: fingerprint ${prints[0]}`));
+});
+
+test("PRF check: salt is the check label's hash, never shared with anything else", async () => {
+  const { store } = await enrolled();
+  const opts = await checkOpts(store);
+  const want = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("front-desk prf-check v1"))).toString("base64url");
+  assert.equal(opts.prfSalt, want);
+});
+
+test("PRF check: no PRF output is a logged FAIL with what the browser returned", async () => {
+  const { store, key } = await enrolled();
+  const opts = await checkOpts(store);
+  const res = await check(store, { credential: await key.assert(opts.challenge, "desk.example", base), prf: null, prf_info: '["enabled"]' });
+  assert.equal(res.status, 422);
+  assert.deepEqual(await res.json(), { error: "prf_missing" });
+  const log = await new Desk(store, { origin: base, rpID: "desk.example" }).readLog();
+  assert.match(log.at(-1)!.detail!, /^FAIL: no usable PRF output \(\["enabled"\]\)/);
+  // A PRF output must be 32 bytes; anything shorter is not one.
+  const o2 = await checkOpts(store);
+  const short = await check(store, { credential: await key.assert(o2.challenge, "desk.example", base), prf: Buffer.from(new Uint8Array(16)).toString("base64url") });
+  assert.equal(short.status, 422);
+});
+
+test("PRF check: needs a valid passkey answer to its own one-time challenge", async () => {
+  const { store, key } = await enrolled();
+  // Replay of a used challenge.
+  const opts = await checkOpts(store);
+  const answer = await key.assert(opts.challenge, "desk.example", base);
+  assert.equal((await check(store, { credential: answer, prf: prfOut(1) })).status, 200);
+  assert.deepEqual(await (await check(store, { credential: answer, prf: prfOut(1) })).json(), { error: "challenge_used" });
+  // A challenge made for an approval cannot be spent here.
+  const asked = await call(store, "/request", { method: "POST", body: JSON.stringify({ job: "test.echo", params: { word: "hi" }, reason: "x" }) });
+  const { id } = (await asked.json()) as { id: string };
+  const aOpts = JSON.parse((await (await call(store, `/approve/${id}`)).text()).match(/const opts=(\{.*?\});\n/)![1]);
+  const wrong = await check(store, { credential: await key.assert(aOpts.challenge, "desk.example", base), prf: prfOut(1) });
+  assert.deepEqual(await wrong.json(), { error: "unknown_challenge" });
+  // A passkey that is not enrolled.
+  const stranger = await SoftKey.create();
+  const o2 = await checkOpts(store);
+  assert.deepEqual(await (await check(store, { credential: await stranger.assert(o2.challenge, "desk.example", base), prf: prfOut(1) })).json(), { error: "unknown_passkey" });
+  // Garbage body.
+  assert.deepEqual(await (await check(store, { prf: prfOut(1) })).json(), { error: "bad_response" });
+});
+
+test("PRF check: owner only", async () => {
+  const { store } = await enrolled();
+  for (const caller of ["agent", "unknown"] as const) {
+    assert.equal((await call(store, "/prf-check", undefined, caller)).status, 403);
+    assert.equal((await call(store, "/prf-check", { method: "POST", body: "{}" }, caller)).status, 403);
+  }
+});
