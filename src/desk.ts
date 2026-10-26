@@ -60,6 +60,8 @@ export interface LogEntry {
   job?: string;
   reason?: string;
   requester?: string;
+  params?: Record<string, string>;
+  expires_at?: number;
   detail?: string;
 }
 
@@ -122,6 +124,10 @@ export class Desk {
     this.site = site;
   }
 
+  private grantFacts(g: Grant) {
+    return { grant_id: g.id, job: g.job, params: g.params, reason: g.reason, requester: g.requester, expires_at: g.expires_at };
+  }
+
   private async log(entry: Omit<LogEntry, "at">, now: number): Promise<void> {
     // Keys sort by a running number; there is no delete or update path for log entries.
     const seq = ((await this.store.get<number>("meta:logseq")) ?? 0) + 1;
@@ -159,7 +165,7 @@ export class Desk {
     const base = { id: crypto.randomUUID(), job, params, requester, expires_at: now + APPROVE_WINDOW_MS };
     const g: Grant = { ...base, reason: body.reason.trim(), created_at: now, hash: await grantHash(base), status: "pending" };
     await this.store.put(`grant:${g.id}`, g);
-    await this.log({ event: "requested", grant_id: g.id, job, reason: g.reason, requester }, now);
+    await this.log({ event: "requested", ...this.grantFacts(g) }, now);
     return g;
   }
 
@@ -212,7 +218,7 @@ export class Desk {
     const g = await this.pending(id, now);
     const { challenge, record } = await this.takeChallenge(response, "approve", now);
     if (record.grant_id !== g.id || !challengeCarries(challenge, g.hash)) {
-      await this.log({ event: "refused", grant_id: g.id, detail: "approval was for a different grant" }, now);
+      await this.log({ event: "refused", ...this.grantFacts(g), detail: "approval was for a different grant" }, now);
       throw new DeskError("wrong_grant", 403);
     }
     const key = await this.store.get<Passkey>(`passkey:${response.id}`);
@@ -231,14 +237,19 @@ export class Desk {
       verified = result.verified;
       newCounter = result.authenticationInfo.newCounter;
     } catch (e) {
-      await this.log({ event: "refused", grant_id: g.id, detail: `passkey check failed: ${(e as Error).message.slice(0, 120)}` }, now);
+      await this.log({ event: "refused", ...this.grantFacts(g), detail: `passkey check failed: ${(e as Error).message.slice(0, 120)}` }, now);
       throw new DeskError("passkey_check_failed", 403);
     }
     if (!verified) throw new DeskError("passkey_check_failed", 403);
-    await this.store.put<Passkey>(`passkey:${key.id}`, { ...key, counter: newCounter });
-    const approved: Grant = { ...g, status: "approved", approved_at: now };
+    // Verification awaited crypto, so another request may have run meanwhile.
+    // Re-read and commit with storage calls only, which the Durable Object does not interleave.
+    const current = await this.pending(id, now);
+    const currentKey = await this.store.get<Passkey>(`passkey:${key.id}`);
+    if (!currentKey || (newCounter !== 0 && newCounter <= currentKey.counter)) throw new DeskError("stale_counter", 409);
+    await this.store.put<Passkey>(`passkey:${key.id}`, { ...currentKey, counter: newCounter });
+    const approved: Grant = { ...current, status: "approved", approved_at: now };
     await this.store.put(`grant:${g.id}`, approved);
-    await this.log({ event: "approved", grant_id: g.id, job: g.job }, now);
+    await this.log({ event: "approved", ...this.grantFacts(g) }, now);
     return approved;
   }
 
@@ -252,7 +263,7 @@ export class Desk {
     const collected: Grant = { ...g, status: "collected", collected_at: now };
     await this.store.put(`grant:${g.id}`, collected);
     const result = await JOBS[g.job].run(g.params);
-    await this.log({ event: "collected", grant_id: g.id, job: g.job, requester }, now);
+    await this.log({ event: "collected", ...this.grantFacts(g) }, now);
     return { grant: collected, result };
   }
 
@@ -293,6 +304,8 @@ export class Desk {
       await this.log({ event: "refused", detail: `enrollment failed: ${(e as Error).message.slice(0, 120)}` }, now);
       throw new DeskError("enroll_failed", 403);
     }
+    // Re-checked after the awaited verification, for the same reason as approve().
+    if ((await this.passkeys()).length) throw new DeskError("already_enrolled", 409);
     const key: Passkey = {
       id: info.credential.id,
       publicKey: [...info.credential.publicKey],

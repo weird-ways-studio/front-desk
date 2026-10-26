@@ -74,20 +74,21 @@ document.getElementById('go').onclick=async e=>{e.target.disabled=true;
 }
 
 export function logPage(entries: LogEntry[], nonce: string): string {
+  const time = (ms: number) => new Date(ms).toISOString().replace("T", " ").slice(0, 16);
   const rows = entries
     .slice()
     .reverse()
-    .map(
-      (e) =>
-        `<tr><td>${new Date(e.at).toISOString().replace("T", " ").slice(0, 19)}</td><td>${esc(e.event)}</td><td>${esc(e.job ?? "")}</td><td>${esc(
-          e.reason ?? e.detail ?? "",
-        )}</td><td>${esc(e.grant_id?.slice(0, 8) ?? "")}</td></tr>`,
-    )
+    .map((e) => {
+      const what = e.job ? (e.params ? JOBS[e.job as keyof typeof JOBS]?.describe(e.params) ?? e.job : e.job) : "";
+      return `<tr><td>${time(e.at)}</td><td><strong>${esc(e.event)}</strong>${e.grant_id ? `<br><span class="muted">${esc(e.grant_id.slice(0, 8))}</span>` : ""}</td>
+<td>${esc(what)}${e.detail ? `<br><span class="muted">${esc(e.detail)}</span>` : ""}</td><td>${esc(e.requester ?? "")}</td>
+<td>${e.reason ? `<q>${esc(e.reason)}</q>` : ""}</td><td>${e.expires_at ? time(e.expires_at) : ""}</td></tr>`;
+    })
     .join("");
   return page(
     "Grant log",
     nonce,
-    `<h1>Grant log</h1><p class="muted">Newest first. Times UTC. Nothing here can be edited or deleted.</p>
-<table><tr><th>When</th><th>What</th><th>Job</th><th>Why / detail</th><th>Grant</th></tr>${rows}</table>`,
+    `<h1>Grant log</h1><p class="muted">Newest first. Times UTC. Nothing here can be edited or deleted. The reason is the agent's own words.</p>
+<table><tr><th>When</th><th>What happened</th><th>Job</th><th>Who</th><th>Why</th><th>Expires</th></tr>${rows}</table>`,
   );
 }

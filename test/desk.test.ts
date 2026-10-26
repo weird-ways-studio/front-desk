@@ -115,3 +115,42 @@ test("the stored grant cannot be swapped under an approval", async () => {
   await store.put(`grant:${g.id}`, { ...g, params: { word: "swapped" }, hash: "0".repeat(64) });
   await refuses(desk.approve(g.id, await key.assert(options.challenge, site.rpID, site.origin), T0), "wrong_grant");
 });
+
+test("two approvals in flight for one grant: exactly one wins, and a collected grant stays collected", async () => {
+  const { desk, key } = await setup();
+  const g = await desk.request(ask, "agent", T0);
+  const o1 = await desk.approvalOptions(g.id, T0);
+  const o2 = await desk.approvalOptions(g.id, T0);
+  const s1 = await key.assert(o1.challenge, site.rpID, site.origin);
+  const s2 = await key.assert(o2.challenge, site.rpID, site.origin);
+  const results = await Promise.allSettled([desk.approve(g.id, s1, T0), desk.approve(g.id, s2, T0)]);
+  assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
+  await desk.collect(g.id, "agent", T0);
+  assert.equal((await desk.grant(g.id)).status, "collected");
+});
+
+test("two first-passkey enrollments in flight: exactly one passkey ends up enrolled", async () => {
+  const store = new MemoryStore();
+  const desk = new Desk(store, site);
+  const a = await SoftKey.create();
+  const b = await SoftKey.create();
+  const ra = await a.register(await desk.enrollOptions(T0), site.origin);
+  const rb = await b.register(await desk.enrollOptions(T0), site.origin);
+  const results = await Promise.allSettled([desk.enroll(ra, T0), desk.enroll(rb, T0)]);
+  assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
+  assert.equal((await desk.passkeys()).length, 1);
+});
+
+test("the log records who, what (exact params), why, when and expiry", async () => {
+  const { desk, key } = await setup();
+  const g = await desk.request(ask, "agent", T0);
+  await approveWith(desk, key, g.id);
+  await desk.collect(g.id, "agent", T0);
+  for (const e of (await desk.readLog()).filter((e) => e.grant_id === g.id)) {
+    assert.equal(e.requester, "agent");
+    assert.deepEqual(e.params, { word: "hello" });
+    assert.equal(e.reason, "prove the desk works");
+    assert.equal(e.expires_at, g.expires_at);
+    assert.equal(typeof e.at, "number");
+  }
+});
