@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { APPROVE_WINDOW_MS, COLLECT_WINDOW_MS, Desk, DeskError, MemoryStore, type DeskHooks } from "../src/desk.ts";
+import { APPROVE_WINDOW_MS, CHALLENGE_TTL_MS, COLLECT_WINDOW_MS, Desk, DeskError, MemoryStore, type DeskHooks } from "../src/desk.ts";
 import { SoftKey } from "./softkey.ts";
 
 const site = { origin: "https://desk.example", rpID: "desk.example" };
@@ -200,4 +200,43 @@ test("a held counter-0 approval cannot roll back a counter-1 approval on another
   await refuses(held, "stale_counter");
   assert.equal((await desk.passkeys())[0].counter, 1);
   assert.equal((await desk.grant(a.id)).status, "pending");
+});
+
+test("taps refused before the passkey check are logged (expired, reused, unknown passkey)", async () => {
+  const { desk, key } = await setup();
+  const fresh = await SoftKey.create();
+  const lines = async () => (await desk.readLog()).filter((e) => e.event === "refused").map((e) => e.detail);
+  // Enrollment page left open past the challenge clock -- Ben's 2026-10-26 first attempt.
+  const store2 = new MemoryStore();
+  const desk2 = new Desk(store2, site);
+  const late = await fresh.register(await desk2.enrollOptions(T0), site.origin);
+  await refuses(desk2.enroll(late, T0 + CHALLENGE_TTL_MS + 1), "challenge_expired");
+  assert.deepEqual((await desk2.readLog()).map((e) => e.detail), ["enroll: challenge_expired"]);
+  const g = await desk.request(ask, "agent", T0);
+  const options = await desk.approvalOptions(g.id, T0);
+  await refuses(desk.approve(g.id, await key.assert(options.challenge, site.rpID, site.origin), T0 + CHALLENGE_TTL_MS + 1), "challenge_expired");
+  const o2 = await desk.approvalOptions(g.id, T0);
+  await refuses(desk.approve(g.id, await fresh.assert(o2.challenge, site.rpID, site.origin), T0), "unknown_passkey");
+  const o3 = await desk.approvalOptions(g.id, T0);
+  const signed = await key.assert(o3.challenge, site.rpID, site.origin);
+  await desk.approve(g.id, signed, T0);
+  const g2 = await desk.request(ask, "agent", T0);
+  await refuses(desk.approve(g2.id, signed, T0), "challenge_used");
+  assert.deepEqual(await lines(), ["approve: challenge_expired", "unknown passkey", "approve: challenge_used"]);
+});
+
+test("approvals for missing, used or expired grants and a second enrollment are logged", async () => {
+  const { desk, key } = await setup();
+  const fresh = await SoftKey.create();
+  const g = await desk.request(ask, "agent", T0);
+  const o = await desk.approvalOptions(g.id, T0);
+  const signed = await key.assert(o.challenge, site.rpID, site.origin);
+  await refuses(desk.approve("nope", signed, T0), "no_such_grant");
+  await desk.approve(g.id, signed, T0);
+  await refuses(desk.approve(g.id, signed, T0), "not_pending");
+  const late = await desk.request(ask, "agent", T0);
+  await refuses(desk.approve(late.id, signed, T0 + APPROVE_WINDOW_MS + 1), "grant_expired");
+  await refuses(desk.enroll(await fresh.register({ challenge: "x", rp: { id: site.rpID, name: "x" }, user: { id: "eA", name: "x", displayName: "x" } } as never, site.origin), T0), "already_enrolled");
+  const details = (await desk.readLog()).filter((e) => e.event === "refused").map((e) => e.detail);
+  assert.deepEqual(details, ["approve: no_such_grant", "approve: not_pending", "approve: grant_expired", "enroll: already_enrolled"]);
 });

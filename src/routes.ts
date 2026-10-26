@@ -4,10 +4,32 @@
 import { Desk, DeskError, type Store } from "./desk.ts";
 import { approvePage, enrollPage, logPage } from "./page.ts";
 
-export const VERSION = "0.2.0-approvals";
+export const VERSION = "0.3.0-owner-check";
 
-// Who asked. One agent identity until the Access token check lands (PR3b).
+// Who is calling, worked out by the Worker from Cloudflare Access (index.ts).
+// "agent" is not yet produced there: the c-box service token lands in PR3b-2.
+export type Caller = "owner" | "agent" | "unknown";
+
+// Owner = the email Access signed in matches OWNER_EMAIL. Anything missing or failing = unknown.
+export async function callerOf(access: ExecutionContext["access"], ownerEmail: string | undefined): Promise<Caller> {
+  if (!access || !ownerEmail) return "unknown";
+  // Promise.try-style wrap: a synchronous throw or odd return also ends as "unknown".
+  const who = await Promise.resolve()
+    .then(() => access.getIdentity())
+    .catch(() => undefined);
+  const email = typeof who?.email === "string" ? who.email.trim().toLowerCase() : "";
+  return email && email === ownerEmail.trim().toLowerCase() ? "owner" : "unknown";
+}
+
+// Who asked. One agent identity until service tokens name the agent (PR3b-2).
 const REQUESTER = "c-box agent";
+
+// Which caller each route needs. Ben enrolls, approves and reads the log; the agent asks and collects.
+function needs(m: string, parts: string[]): Caller | null {
+  if (parts[0] === "enroll" || parts[0] === "approve" || parts[0] === "log") return "owner";
+  if ((m === "POST" && parts[0] === "request") || parts[0] === "collect") return "agent";
+  return null;
+}
 
 export function securityHeaders(nonce = ""): Record<string, string> {
   return {
@@ -28,14 +50,29 @@ function html(body: string, nonce: string): Response {
   return new Response(body, { headers: { ...securityHeaders(nonce), "content-type": "text/html; charset=utf-8" } });
 }
 
+// A passkey answer that is not JSON is refused and logged, like any other failed tap.
+async function body<T>(request: Request, desk: Desk, what: string, now: number): Promise<T> {
+  try {
+    return (await request.json()) as T;
+  } catch {
+    await desk.refuse(`${what}: bad_json`, now);
+    throw new DeskError("bad_json", 400);
+  }
+}
+
 // The routes, kept apart from the Durable Object so tests can drive them.
-export async function route(request: Request, store: Store, now = Date.now()): Promise<Response> {
+export async function route(request: Request, store: Store, caller: Caller, now = Date.now()): Promise<Response> {
   const url = new URL(request.url);
   const desk = new Desk(store, { origin: url.origin, rpID: url.hostname });
   const nonce = crypto.randomUUID().replace(/-/g, "");
   const parts = url.pathname.split("/").filter(Boolean);
   const m = request.method;
   try {
+    const needed = needs(m, parts);
+    if (needed && caller !== needed) {
+      await desk.refuseCaller(`${m} /${parts[0]} by ${caller}, needs ${needed}`, now);
+      return json({ error: needed === "owner" ? "not_owner" : "not_agent" }, 403);
+    }
     if (m === "GET" && url.pathname === "/health") return json({ ok: true, version: VERSION });
     if (m === "POST" && url.pathname === "/request") {
       const g = await desk.request(await request.json().catch(() => null), REQUESTER, now);
@@ -47,7 +84,7 @@ export async function route(request: Request, store: Store, now = Date.now()): P
         return html(approvePage(g, await desk.approvalOptions(g.id, now), nonce), nonce);
       }
       if (m === "POST") {
-        const g = await desk.approve(parts[1], await request.json(), now);
+        const g = await desk.approve(parts[1], await body(request, desk, "approve", now), now);
         return json({ ok: true, status: g.status });
       }
     }
@@ -58,7 +95,7 @@ export async function route(request: Request, store: Store, now = Date.now()): P
     if (url.pathname === "/enroll") {
       if (m === "GET") return html(enrollPage(await desk.enrollOptions(now), nonce), nonce);
       if (m === "POST") {
-        await desk.enroll(await request.json(), now);
+        await desk.enroll(await body(request, desk, "enroll", now), now);
         return json({ ok: true });
       }
     }

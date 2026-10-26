@@ -8,6 +8,8 @@
   "workers_dev": true,
   "preview_urls": false,
   "send_metrics": false,
+  // OWNER_EMAIL is set by Ben in the dashboard, not here (public repo); keep it across deploys.
+  "keep_vars": true,
   // One Durable Object holds every grant, passkey and log entry (src/index.ts).
   "durable_objects": { "bindings": [{ "name": "DESK", "class_name": "FrontDesk" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["FrontDesk"] }]
