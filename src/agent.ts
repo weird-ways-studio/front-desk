@@ -27,6 +27,7 @@ function teamKeys(team: string): JWTVerifyGetKey {
   return keys;
 }
 
+/** The c-box agent with its name, or the reason this request is not the agent. */
 export async function agentOf(
   request: Request,
   access: ExecutionContext["access"],

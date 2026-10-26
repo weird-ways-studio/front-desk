@@ -26,6 +26,7 @@ export class FrontDesk extends DurableObject {
   }
 }
 
+/** Owner first (Ben's email), then the agent (verified service-token ticket), else unknown with the reason. */
 async function whoIs(request: Request, env: Env, ctx: ExecutionContext): Promise<Who> {
   if ((await callerOf(ctx.access, env.OWNER_EMAIL)) === "owner") return { caller: "owner" };
   const agent = await agentOf(request, ctx.access, env);
