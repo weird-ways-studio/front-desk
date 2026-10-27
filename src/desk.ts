@@ -142,12 +142,21 @@ export async function grantHash(g: Pick<Grant, "id" | "job" | "params" | "reques
 // Throws when the alarm did not take it.
 export type Alarm = (ok: boolean, detail: string) => Promise<void>;
 
-/** Pings healthchecks.io: the check URL for all-clear, its /fail with the detail otherwise. */
-export function headcountAlarm(url: string | undefined, fetchFn: typeof fetch = fetch): Alarm | undefined {
+/**
+ * Pings healthchecks.io: the check URL for all-clear, its /fail with the detail otherwise. Its phone
+ * alert does not carry that detail (VERIFIED: healthchecks ntfy_message.html has no ping body), so a
+ * failed count is ALSO pushed straight to ntfy with the detail when `ntfyUrl` is set.
+ */
+export function headcountAlarm(url: string | undefined, ntfyUrl?: string, fetchFn: typeof fetch = fetch): Alarm | undefined {
   if (!url || !/^https:\/\/hc-ping\.com\/[0-9a-f-]{36}$/.test(url.trim())) return undefined;
+  const ntfy = ntfyUrl && /^https:\/\/ntfy\.sh\/[A-Za-z0-9_-]{16,64}$/.test(ntfyUrl.trim()) ? ntfyUrl.trim() : undefined;
   return async (ok, detail) => {
     const res = await fetchFn(ok ? url.trim() : `${url.trim()}/fail`, { method: "POST", body: detail });
     if (!res.ok) throw new Error(`healthchecks answered ${res.status}`);
+    if (ok) return;
+    if (!ntfy) throw new Error("no ntfy topic set: the phone alert will not name the keys");
+    const push = await fetchFn(ntfy, { method: "POST", body: detail.slice(0, 3000), headers: { Title: "Front desk: key headcount MISMATCH", Priority: "high" } });
+    if (!push.ok) throw new Error(`ntfy answered ${push.status}`);
   };
 }
 

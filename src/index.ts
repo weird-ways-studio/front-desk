@@ -23,6 +23,8 @@ interface Env extends AgentConfig {
   // The nightly headcount's healthchecks.io ping URL, set by Ben in the dashboard as a secret. The
   // c-box never holds it, so the c-box cannot send the all-clear. Unset = every night logs a failed alarm.
   HC_HEADCOUNT_URL?: string;
+  // ntfy topic URL (dashboard secret) for the mismatch detail push, which names the keys.
+  NTFY_TOPIC_URL?: string;
   // The vault Worker (vault/), reached only through this service binding (wrangler.jsonc "services").
   VAULT: Service & VaultApi;
 }
@@ -33,7 +35,7 @@ export class FrontDesk extends DurableObject<Env> {
   }
   // The nightly count runs in here too, so its log rows join the one log.
   async headcount(): Promise<void> {
-    await new Desk(this.ctx.storage, { origin: "", rpID: "" }, { vault: this.env.VAULT }).headcount(headcountAlarm(this.env.HC_HEADCOUNT_URL), Date.now());
+    await new Desk(this.ctx.storage, { origin: "", rpID: "" }, { vault: this.env.VAULT }).headcount(headcountAlarm(this.env.HC_HEADCOUNT_URL, this.env.NTFY_TOPIC_URL), Date.now());
   }
 }
 

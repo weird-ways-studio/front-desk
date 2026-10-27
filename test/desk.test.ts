@@ -302,17 +302,29 @@ test("headcount: no alarm, or an alarm that fails, is logged", async () => {
   assert.match((await b.desk.readLog())[1].detail ?? "", /503/);
 });
 
-test("headcount alarm: pings the check URL for all-clear and /fail with the detail; refuses other URLs", async () => {
+test("headcount alarm: all-clear pings the check; a fail pings /fail AND pushes the detail to ntfy; refuses other URLs", async () => {
   const hc = "https://hc-ping.com/0f2e8a4c-1b2d-4e5f-8a9b-0c1d2e3f4a5b";
-  const sent: { url: string; body: unknown }[] = [];
-  const fetchFn = (async (url: string, init?: RequestInit) => (sent.push({ url, body: init?.body }), new Response("OK"))) as typeof fetch;
-  await headcountAlarm(hc, fetchFn)!(true, "ok");
-  await headcountAlarm(hc, fetchFn)!(false, "MISMATCH planted1");
-  assert.deepEqual(sent, [{ url: hc, body: "ok" }, { url: `${hc}/fail`, body: "MISMATCH planted1" }]);
+  const topic = "https://ntfy.sh/front-desk-test-topic-0001";
+  const sent: { url: string; body: unknown; title?: string }[] = [];
+  const fetchFn = (async (url: string, init?: RequestInit) => (
+    sent.push({ url, body: init?.body, title: (init?.headers as Record<string, string> | undefined)?.Title }), new Response("OK")
+  )) as typeof fetch;
+  await headcountAlarm(hc, topic, fetchFn)!(true, "ok");
+  await headcountAlarm(hc, topic, fetchFn)!(false, "MISMATCH planted1");
+  assert.deepEqual(sent, [
+    { url: hc, body: "ok", title: undefined },
+    { url: `${hc}/fail`, body: "MISMATCH planted1", title: undefined },
+    { url: topic, body: "MISMATCH planted1", title: "Front desk: key headcount MISMATCH" },
+  ]);
   for (const bad of [undefined, "", "http://hc-ping.com/0f2e8a4c-1b2d-4e5f-8a9b-0c1d2e3f4a5b", "https://evil.example/0f2e8a4c-1b2d-4e5f-8a9b-0c1d2e3f4a5b"])
-    assert.equal(headcountAlarm(bad, fetchFn), undefined);
+    assert.equal(headcountAlarm(bad, topic, fetchFn), undefined);
+  sent.length = 0;
+  await assert.rejects(headcountAlarm(hc, "https://evil.example/topic-name-long-enough", fetchFn)!(false, "x"), /no ntfy topic/);
+  assert.deepEqual(sent.map((x) => x.url), [`${hc}/fail`], "healthchecks still gets the fail when ntfy is not set");
   const down = (async () => new Response("", { status: 503 })) as unknown as typeof fetch;
-  await assert.rejects(headcountAlarm(hc, down)!(true, "ok"), /503/);
+  await assert.rejects(headcountAlarm(hc, topic, down)!(true, "ok"), /503/);
+  const ntfyDown = (async (url: string) => new Response("", { status: url.includes("ntfy") ? 502 : 200 })) as unknown as typeof fetch;
+  await assert.rejects(headcountAlarm(hc, topic, ntfyDown)!(false, "x"), /ntfy answered 502/);
 });
 
 test("headcount setup job: takes no parameters and says it is a standing key", () => {
