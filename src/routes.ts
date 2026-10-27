@@ -1,11 +1,11 @@
 // The front desk's HTTP routes, kept apart from the Durable Object (index.ts)
 // so tests can drive them with an in-memory store.
 
-import { Desk, DeskError, type Store } from "./desk.ts";
+import { Desk, DeskError, withoutSecret, type Store } from "./desk.ts";
 import type { VaultApi } from "../vault/src/api.ts";
 import { approvePage, enrollPage, logPage, prfCheckPage } from "./page.ts";
 
-export const VERSION = "0.6.0-vault";
+export const VERSION = "0.7.0-minted-key";
 
 // Who is calling, worked out by the Worker from Cloudflare Access (index.ts):
 // owner from Ben's email (callerOf), agent from the service-token ticket (agent.ts).
@@ -80,7 +80,8 @@ export async function route(request: Request, store: Store, who: Who, now = Date
     }
     if (m === "GET" && url.pathname === "/health") return json({ ok: true, version: VERSION });
     if (m === "POST" && url.pathname === "/request") {
-      const g = await desk.request(await request.json().catch(() => null), requester, now);
+      // CF-Connecting-IP is set by Cloudflare's edge to the caller's address; a sent value is replaced.
+      const g = await desk.request(await request.json().catch(() => null), requester, now, request.headers.get("cf-connecting-ip") ?? undefined);
       return json({ id: g.id, approve_url: `${url.origin}/approve/${g.id}`, expires_at: g.expires_at }, 201);
     }
     if (parts[0] === "approve" && parts.length === 2) {
@@ -90,7 +91,7 @@ export async function route(request: Request, store: Store, who: Who, now = Date
       }
       if (m === "POST") {
         const g = await desk.approve(parts[1], await body(request, desk, "approve", now), now);
-        return json({ ok: true, status: g.status, ...(g.result === undefined ? {} : { result: g.result }) });
+        return json({ ok: true, status: g.status, ...(g.result === undefined ? {} : { result: withoutSecret(g.result) }) });
       }
     }
     if (m === "POST" && parts[0] === "collect" && parts.length === 2) {

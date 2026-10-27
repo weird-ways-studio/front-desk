@@ -323,3 +323,54 @@ test("vault job: a collect while the vault is still working is refused, and the 
   assert.equal(((await first.json()) as any).result.zone, "example.com");
   assert.deepEqual(await (await callV(store, vault, `/collect/${id}`, { method: "POST" })).json(), { error: "already_collected" });
 });
+
+// Minted key for the agent (PR3b-2b step 3).
+const SECRET = "S".repeat(40);
+const askKey = (store: MemoryStore, vault: ReturnType<typeof fakeVault>, params: Record<string, string>, ip?: string) =>
+  callV(store, vault, "/request", {
+    method: "POST",
+    headers: ip ? { "cf-connecting-ip": ip } : {},
+    body: JSON.stringify({ job: "cf.token.zone.read", params, reason: "read the zone" }),
+  });
+
+test("minted key: pinned to the address Cloudflare saw, not one the agent names; Ben sees it on the approval screen", async () => {
+  const { store } = await enrolled();
+  const res = await askKey(store, fakeVault(true), { zone: ZONE, minutes: "10", ip: "198.51.100.66" }, "203.0.113.7");
+  assert.equal(res.status, 201);
+  const { id } = (await res.json()) as { id: string };
+  const g = await new Desk(store, { origin: base, rpID: "desk.example" }).grant(id);
+  assert.deepEqual(g.params, { zone: ZONE, minutes: "10", ip: "203.0.113.7" });
+  const page = await (await callV(store, fakeVault(true), `/approve/${id}`)).text();
+  assert.match(page, /expires after 10 minutes and works only from 203\.0\.113\.7/);
+});
+
+test("minted key: refused with no caller address, over 15 minutes, or another zone", async () => {
+  const { store } = await enrolled();
+  for (const [params, ip] of [
+    [{ zone: ZONE, minutes: "10" }, undefined],
+    [{ zone: ZONE, minutes: "16" }, "203.0.113.7"],
+    [{ zone: ZONE, minutes: "015" }, "203.0.113.7"],
+    [{ zone: "example.com", minutes: "5" }, "203.0.113.7"],
+    [{ zone: ZONE, minutes: "5" }, "2001:db8::1"],
+  ] as const) {
+    assert.deepEqual(await (await askKey(store, fakeVault(true), params, ip)).json(), { error: "bad_params" }, JSON.stringify([params, ip]));
+  }
+});
+
+test("minted key: the secret reaches the agent once at collect, never Ben's screen or the log, and is erased after", async () => {
+  const { store, key } = await enrolled();
+  const vault = fakeVault(true);
+  vault.run = async () => ({ ok: true, zone: ZONE, key: { id: "k1", expires_on: "2026-10-27T03:00:00Z", ip: "203.0.113.7", value: SECRET } }) as any;
+  const { id } = (await (await askKey(store, vault, { zone: ZONE, minutes: "10" }, "203.0.113.7")).json()) as { id: string };
+  const opts = await optsIn(await callV(store, vault, `/approve/${id}`));
+  const answer = { ...(await key.assert(opts.challenge, "desk.example", base)), prf: prfOut(5) };
+  const shown = await (await callV(store, vault, `/approve/${id}`, { method: "POST", body: JSON.stringify(answer) })).text();
+  assert.ok(!shown.includes(SECRET), "not on Ben's screen");
+  assert.match(shown, /"id":"k1"/);
+  const got = (await (await callV(store, vault, `/collect/${id}`, { method: "POST" })).json()) as any;
+  assert.equal(got.result.key.value, SECRET, "the agent gets it");
+  const desk = new Desk(store, { origin: base, rpID: "desk.example" });
+  assert.ok(!JSON.stringify(await desk.readLog()).includes(SECRET), "never logged");
+  assert.ok(!JSON.stringify(await desk.grant(id)).includes(SECRET), "erased from storage after collect");
+  assert.deepEqual(await (await callV(store, vault, `/collect/${id}`, { method: "POST" })).json(), { error: "already_collected" });
+});

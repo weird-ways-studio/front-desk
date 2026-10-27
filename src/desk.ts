@@ -43,7 +43,8 @@ export interface Grant {
   status: GrantStatus;
   approved_at?: number;
   collected_at?: number;
-  // What a vault job reported when it ran at approval (never a secret).
+  // What a vault job reported when it ran at approval. A minted key's secret (result.key.value)
+  // is kept only until the agent collects it, then erased; it is never logged or shown to Ben.
   result?: unknown;
 }
 
@@ -179,14 +180,16 @@ export class Desk {
     return g;
   }
 
-  async request(input: unknown, requester: string, now: number): Promise<Grant> {
+  async request(input: unknown, requester: string, now: number, clientIp?: string): Promise<Grant> {
     const body = (input ?? {}) as { job?: unknown; params?: unknown; reason?: unknown };
     if (typeof body.job !== "string" || !Object.hasOwn(JOBS, body.job)) {
       await this.log({ event: "refused", requester, detail: `job not offered: ${String(body.job).slice(0, 60)}` }, now);
       throw new DeskError("job_not_offered", 400);
     }
     const job = body.job as JobName;
-    const params = JOBS[job].validate(body.params);
+    // Whatever ip the agent sent is replaced with the address Cloudflare saw.
+    const asked = (JOBS[job] as Job).pinIp ? { ...((body.params ?? {}) as object), ip: clientIp } : body.params;
+    const params = JOBS[job].validate(asked);
     if (!params) throw new DeskError("bad_params", 400);
     if (typeof body.reason !== "string" || !body.reason.trim() || body.reason.length > 200) {
       throw new DeskError("bad_reason", 400);
@@ -304,7 +307,7 @@ export class Desk {
       if (!this.hooks.vault) throw new Error("vault not connected");
       result = await this.hooks.vault.run(g.job, g.params, prf);
       const ok = (result as { ok?: unknown } | null)?.ok === true;
-      await this.log({ event: ok ? "job_done" : "job_failed", ...this.grantFacts(g), detail: logDetail(result) }, now);
+      await this.log({ event: ok ? "job_done" : "job_failed", ...this.grantFacts(g), detail: logDetail(withoutSecret(result)) }, now);
     } catch (e) {
       result = { error: (e as Error).message.slice(0, 120) };
       await this.log({ event: "job_failed", ...this.grantFacts(g), detail: (e as Error).message.slice(0, 120) }, now);
@@ -395,7 +398,8 @@ export class Desk {
     if (now > (g.approved_at ?? 0) + COLLECT_WINDOW_MS) throw new DeskError("collect_window_closed", 410);
     // A vault job is approved before the vault finishes; until its result is in, there is nothing to collect.
     if ((JOBS[g.job] as Job).vault && g.result === undefined) throw new DeskError("not_ready", 409);
-    const collected: Grant = { ...g, status: "collected", collected_at: now };
+    // The stored copy loses the key's secret: it is handed over this once.
+    const collected: Grant = { ...g, status: "collected", collected_at: now, result: withoutSecret(g.result) };
     await this.store.put(`grant:${g.id}`, collected);
     const job = JOBS[g.job] as Job;
     const result = job.vault ? g.result : await job.run!(g.params);
@@ -458,6 +462,14 @@ export class Desk {
 }
 
 export const LOG_DETAIL_MAX = 1200;
+
+/** A copy of a vault result with a minted key's secret removed (for the log, Ben's screen, storage after collect). */
+export function withoutSecret(result: unknown): unknown {
+  const key = (result as { key?: unknown } | null)?.key;
+  if (!key || typeof key !== "object" || !("value" in key)) return result;
+  const { value: _drop, ...rest } = key as Record<string, unknown>;
+  return { ...(result as object), key: rest };
+}
 
 // The job's evidence for the log, always valid JSON. If it is too long, the token-id lists are
 // shortened to their first 10 with their full counts and "truncated": true (Codex r2 #5); the

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { MemoryStore } from "../src/desk.ts";
 import { MASTER_LABEL, RECOVERY_LABEL, open, seal, b64url, fromB64url } from "../vault/src/seal.ts";
-import { PENDING_MS, PROBE_TOKEN_MS, VaultLogic } from "../vault/src/vault.ts";
+import { PENDING_MS, PROBE_TOKEN_MS, VaultLogic, type MintResult, type ProbeResult } from "../vault/src/vault.ts";
 import { handleSetup } from "../vault/src/setup.ts";
 
 const ACCOUNT = "a".repeat(32);
@@ -12,7 +12,7 @@ const ZONE = "benculbert.com";
 const PARENT = "P".repeat(40);
 const NOW = Date.UTC(2026, 9, 26, 23, 0, 0);
 const prf = (fill: number) => b64url(new Uint8Array(32).fill(fill));
-type Fail = "accounts2" | "accounts0" | "inactive" | "existing" | "add" | "verifyRead" | "recordDelete" | "tokenDelete" | "list" | "newToken" | "staysListed";
+type Fail = "accounts2" | "accounts0" | "inactive" | "existing" | "add" | "verifyRead" | "recordDelete" | "tokenDelete" | "list" | "newToken" | "staysListed" | "offboxAllowed";
 
 // A fake Cloudflare API: answers the calls the vault makes and records each with the token used.
 // `fail` makes one step go wrong, to show what the vault does then.
@@ -21,6 +21,7 @@ function fakeCloudflare(fail?: Fail, baseline = 3) {
   let records: { id: string }[] = fail === "existing" ? [{ id: "old" }] : [];
   const tokens = Array.from({ length: baseline }, (_, i) => ({ id: `t${i}` }));
   const live = new Map<string, string>(); // minted value -> id
+  const pinned = new Map<string, string>(); // minted value -> the one address it works from
   let n = 0;
   let finds = 0;
   const ok = (result: unknown) => Response.json({ success: true, result });
@@ -44,6 +45,8 @@ function fakeCloudflare(fail?: Fail, baseline = 3) {
       const id = `minted${++n}`;
       tokens.push({ id });
       live.set(`V${n}`.padEnd(40, "v"), id);
+      const cidr = body?.condition?.request_ip?.in?.[0];
+      if (cidr) pinned.set(`V${n}`.padEnd(40, "v"), cidr);
       return ok({ id, value: `V${n}`.padEnd(40, "v") });
     }
     if (method === "DELETE" && path.startsWith(`/accounts/${ACCOUNT}/tokens/`)) {
@@ -60,6 +63,11 @@ function fakeCloudflare(fail?: Fail, baseline = 3) {
       return ok(all.slice((page - 1) * per, page * per));
     }
     if (path === `/zones?name=${ZONE}`) return ok([{ id: ZONE_ID, name: ZONE }]);
+    // The vault calls from Cloudflare's network, never the pinned c-box address.
+    if (method === "GET" && path === `/zones/${ZONE_ID}`) {
+      if (pinned.has(token) && fail !== "offboxAllowed") return bad(403, "Cannot use the access token from location: 104.28.0.1");
+      return ok({ id: ZONE_ID, name: ZONE });
+    }
     if (method === "GET" && path.startsWith(`/zones/${ZONE_ID}/dns_records?`)) {
       finds++;
       if (fail === "verifyRead" && finds === 2) return bad(500, "read broke");
@@ -77,7 +85,7 @@ function fakeCloudflare(fail?: Fail, baseline = 3) {
     }
     return bad(404, `unexpected ${method} ${path}`);
   };
-  return { calls, fetchFn, live, records: () => records };
+  return { calls, fetchFn, live, pinned, tokens, records: () => records };
 }
 
 async function stored(fail?: Fail, baseline = 3) {
@@ -89,7 +97,7 @@ async function stored(fail?: Fail, baseline = 3) {
   cf.calls.length = 0;
   return { store, vault, out, cf, clock };
 }
-const probe = (vault: VaultLogic) => vault.run("cf.dns.txt.probe", { zone: ZONE }, prf(7));
+const probe = (vault: VaultLogic) => vault.run("cf.dns.txt.probe", { zone: ZONE }, prf(7)) as Promise<ProbeResult>;
 
 test("seal: opens with the same secret and label only; an altered box never opens", async () => {
   const secret = fromB64url(prf(1));
@@ -214,6 +222,50 @@ for (const [fail, check] of [
 const VAULT = "https://vault.example";
 const form = (token: string, origin = VAULT) =>
   new Request(`${VAULT}/setup`, { method: "POST", headers: { origin, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token }) });
+
+const CBOX = "203.0.113.7";
+const mint = (vault: VaultLogic, params: Record<string, string> = { zone: ZONE, minutes: "15", ip: CBOX }) =>
+  vault.run("cf.token.zone.read", params, prf(7)) as Promise<MintResult>;
+
+test("minted key: read-only on one zone, expires in <=15 minutes, pinned to the asking address, refused off it", async () => {
+  const { vault, cf } = await stored();
+  const r = await mint(vault);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const made = cf.calls.find((c) => c.method === "POST" && c.path.endsWith("/tokens") && c.body.condition)!;
+  assert.deepEqual(made.body.condition, { request_ip: { in: [`${CBOX}/32`] } });
+  assert.deepEqual(made.body.policies, [{ effect: "allow", resources: { [`com.cloudflare.api.account.zone.${ZONE_ID}`]: "*" }, permission_groups: [{ id: "zone-r" }] }]);
+  assert.equal(made.body.expires_on, new Date(NOW + 15 * 60_000).toISOString().replace(/\.\d{3}Z$/, "Z"));
+  assert.equal(r.key!.ip, CBOX);
+  assert.equal(cf.live.get(r.key!.value!), r.key!.id, "the value handed over is the minted key");
+  assert.equal(r.offbox_refused, true);
+  assert.match(r.offbox_error!, /location/);
+  assert.equal(r.minted.length, 1, "one helper key to find the zone");
+  assert.ok(r.minted[0].deleted);
+  assert.deepEqual(r.audit.new_since_setup, [], "the handed-over key is the only new token");
+  assert.ok(cf.tokens.some((t) => t.id === r.key!.id), "the key stays until it expires");
+});
+
+test("minted key fails closed: if it worked off the pinned address, or anything else is off, it is deleted and not handed over", async () => {
+  for (const fail of ["offboxAllowed", "newToken"] as const) {
+    const { vault, cf } = await stored(fail);
+    const r = await mint(vault);
+    assert.equal(r.ok, false, fail);
+    assert.equal(r.key?.value, undefined, `${fail}: no secret handed over`);
+    assert.ok(!cf.tokens.some((t) => t.id === r.key!.id), `${fail}: the key was deleted`);
+  }
+});
+
+test("minted key: the vault itself refuses over 15 minutes, a bad address, or another zone", async () => {
+  const { vault, cf } = await stored();
+  for (const params of [
+    { zone: ZONE, minutes: "16", ip: CBOX }, { zone: ZONE, minutes: "0", ip: CBOX }, { zone: ZONE, minutes: "60", ip: CBOX },
+    { zone: ZONE, minutes: "15", ip: "203.0.113.0/24" }, { zone: ZONE, minutes: "15", ip: "2001:db8::1" }, { zone: ZONE, minutes: "15" },
+  ]) {
+    await assert.rejects(mint(vault, params as Record<string, string>), /bad_params/, JSON.stringify(params));
+  }
+  await assert.rejects(mint(vault, { zone: "example.com", minutes: "5", ip: CBOX }), /zone_not_offered/);
+  assert.equal(cf.calls.length, 0, "refused before any call to Cloudflare");
+});
 
 test("setup page: Ben gets the form, saves the token, sees the paper key once; then every address is 404", async () => {
   const vault = new VaultLogic(new MemoryStore(), fakeCloudflare().fetchFn, () => NOW);
