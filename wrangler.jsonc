@@ -15,6 +15,8 @@
   // (scripts/deploy-vault.sh explains when it acts). One Builds connection ships both Workers.
   "build": { "command": "sh scripts/deploy-vault.sh" },
   // The vault Worker (vault/wrangler.jsonc) holds the sealed master key; the front desk reaches it only here.
+  // The nightly key headcount (src/index.ts scheduled -> desk.ts headcount), 04:17 UTC. Free on Workers.
+  "triggers": { "crons": ["17 4 * * *"] },
   "services": [{ "binding": "VAULT", "service": "front-desk-vault" }],
   "durable_objects": { "bindings": [{ "name": "DESK", "class_name": "FrontDesk" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["FrontDesk"] }]

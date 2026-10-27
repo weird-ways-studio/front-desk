@@ -28,6 +28,9 @@ export class VaultBox extends DurableObject<Env> {
   run(job: string, params: Record<string, string>, prf: string) {
     return this.logic().run(job, params, prf);
   }
+  headcount() {
+    return this.logic().headcount();
+  }
 }
 
 /** What the front desk calls (types: vault/src/api.ts), plus the setup page. */
@@ -43,5 +46,9 @@ export default class Vault extends WorkerEntrypoint<Env> {
   }
   run(job: string, params: Record<string, string>, prf: string) {
     return this.box().run(job, params, prf);
+  }
+  // The nightly count, called by the front desk's cron (../../src/index.ts scheduled). No tap; reads only.
+  headcount() {
+    return this.box().headcount();
   }
 }

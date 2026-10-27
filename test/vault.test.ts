@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { MemoryStore } from "../src/desk.ts";
 import { MASTER_LABEL, RECOVERY_LABEL, open, seal, b64url, fromB64url } from "../vault/src/seal.ts";
-import { PENDING_MS, PROBE_TOKEN_MS, VaultLogic, type MintResult, type ProbeResult } from "../vault/src/vault.ts";
+import { PENDING_MS, PROBE_TOKEN_MS, VaultLogic, type HeadcountSetupResult, type MintResult, type ProbeResult } from "../vault/src/vault.ts";
 import { handleSetup } from "../vault/src/setup.ts";
 
 const ACCOUNT = "a".repeat(32);
@@ -12,14 +12,16 @@ const ZONE = "benculbert.com";
 const PARENT = "P".repeat(40);
 const NOW = Date.UTC(2026, 9, 26, 23, 0, 0);
 const prf = (fill: number) => b64url(new Uint8Array(32).fill(fill));
-type Fail = "accounts2" | "accounts0" | "inactive" | "existing" | "add" | "verifyRead" | "recordDelete" | "tokenDelete" | "list" | "newToken" | "staysListed" | "offboxAllowed" | "offboxBroken" | "offboxOther403";
+type Fail = "accounts2" | "accounts0" | "inactive" | "existing" | "add" | "verifyRead" | "recordDelete" | "tokenDelete" | "list" | "newToken" | "staysListed" | "offboxAllowed" | "offboxBroken" | "offboxOther403" | "hcCanMint" | "hcMint500" | "hcNoGroup" | "hcOldStays";
 
 // A fake Cloudflare API: answers the calls the vault makes and records each with the token used.
 // `fail` makes one step go wrong, to show what the vault does then.
 function fakeCloudflare(fail?: Fail, baseline = 3) {
   const calls: { method: string; path: string; token: string; body?: any }[] = [];
   let records: { id: string }[] = fail === "existing" ? [{ id: "old" }] : [];
-  const tokens = Array.from({ length: baseline }, (_, i) => ({ id: `t${i}` }));
+  const tokens: { id: string; name?: string; expires_on?: string }[] = Array.from({ length: baseline }, (_, i) => ({ id: `t${i}` }));
+  const listOnly = new Set<string>(); // minted values that hold only the API Tokens Read group
+  const hcOld: { stuck?: string } = {}; // a headcount key whose delete fails (hcOldStays)
   const live = new Map<string, string>(); // minted value -> id
   const pinned = new Map<string, string>(); // minted value -> the one address it works from
   let n = 0;
@@ -40,10 +42,16 @@ function fakeCloudflare(fail?: Fail, baseline = 3) {
         { id: "dns-w", name: "DNS Write", scopes: ["com.cloudflare.api.account.zone"] },
         { id: "zone-r", name: "Zone Read", scopes: ["com.cloudflare.api.account.zone"] },
         { id: "acct-dns", name: "DNS Write", scopes: ["com.cloudflare.api.account"] },
+        ...(fail === "hcNoGroup" ? [] : [{ id: "tok-r", name: "Account API Tokens Read", scopes: ["com.cloudflare.api.account"] }]),
+        { id: "tok-r-zone", name: "API Tokens Read", scopes: ["com.cloudflare.api.account.zone"] },
       ]);
     if (method === "POST" && path === `/accounts/${ACCOUNT}/tokens`) {
+      if (!body?.policies?.length || !body.policies[0].permission_groups?.length) return bad(400, "policies required");
+      if (listOnly.has(token) && fail === "hcMint500") return bad(500, "internal error");
+      if (listOnly.has(token) && fail !== "hcCanMint") return bad(403, "Unauthorized to access requested resource");
       const id = `minted${++n}`;
-      tokens.push({ id });
+      tokens.push({ id, name: body?.name, expires_on: body?.expires_on });
+      if (body?.policies?.[0]?.permission_groups?.every((g: { id: string }) => g.id === "tok-r")) listOnly.add(`V${n}`.padEnd(40, "v"));
       live.set(`V${n}`.padEnd(40, "v"), id);
       const cidr = body?.condition?.request_ip?.in?.[0];
       if (cidr) pinned.set(`V${n}`.padEnd(40, "v"), cidr);
@@ -51,6 +59,7 @@ function fakeCloudflare(fail?: Fail, baseline = 3) {
     }
     if (method === "DELETE" && path.startsWith(`/accounts/${ACCOUNT}/tokens/`)) {
       if (fail === "tokenDelete") return bad(500, "delete broke");
+      if (fail === "hcOldStays" && hcOld.stuck && path.endsWith(`/${hcOld.stuck}`)) return bad(500, "delete broke");
       const id = path.split("/").pop()!;
       tokens.splice(tokens.findIndex((t) => t.id === id), 1);
       return ok({ id });
@@ -87,7 +96,7 @@ function fakeCloudflare(fail?: Fail, baseline = 3) {
     }
     return bad(404, `unexpected ${method} ${path}`);
   };
-  return { calls, fetchFn, live, pinned, tokens, records: () => records };
+  return { calls, fetchFn, live, pinned, tokens, listOnly, hcOld, records: () => records };
 }
 
 async function stored(fail?: Fail, baseline = 3) {
@@ -368,4 +377,121 @@ test("deploy-vault.sh deploys the vault only in Workers Builds, on a real deploy
     assert.match(out, /skipping/);
     assert.doesNotMatch(out, /npx/);
   }
+});
+
+// Nightly headcount (C5c-2 3baea7cc): its own list-only key, then a count with no tap.
+const hcSetup = (vault: VaultLogic) => vault.run("cf.token.headcount.setup", {}, prf(7)) as Promise<HeadcountSetupResult>;
+
+test("headcount setup: keeps a key that lists and is refused a mint; account-wide read only, no expiry", async () => {
+  const { store, vault, cf } = await stored();
+  const r = await hcSetup(vault);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.lists, true);
+  assert.equal(r.mint_refused, true);
+  const kept = (await store.get<any>("headcount"))!;
+  assert.equal(kept.token_id, r.key_id);
+  assert.ok(cf.listOnly.has(kept.value), "the kept key is the list-only one");
+  const made = cf.calls.find((c) => c.method === "POST" && c.path.endsWith("/tokens") && c.body?.name?.startsWith("front-desk headcount 2"))!;
+  assert.deepEqual(made.body.policies, [{ effect: "allow", resources: { [`com.cloudflare.api.account.${ACCOUNT}`]: "*" }, permission_groups: [{ id: "tok-r" }] }]);
+  assert.equal(made.body.expires_on, undefined);
+  assert.ok(!JSON.stringify(r).includes(kept.value), "the key's secret is never in the result");
+  const probeMint = cf.calls.find((c) => c.body?.name === "front-desk headcount must-fail")!;
+  assert.equal(probeMint.body.policies[0].permission_groups[0].id, "tok-r", "the refused mint was a complete, valid request");
+});
+
+for (const fail of ["hcCanMint", "hcMint500", "hcNoGroup"] as const) {
+  test(`headcount setup fails closed (${fail}): nothing kept, no key left in the account`, async () => {
+    const { store, vault, cf } = await stored(fail);
+    const r = await hcSetup(vault);
+    assert.equal(r.ok, false);
+    assert.equal(await store.get("headcount"), undefined);
+    assert.deepEqual(cf.tokens.map((t) => t.id), ["t0", "t1", "t2"], "the new key (and any key it made) is deleted");
+  });
+}
+
+test("headcount setup again: the new key replaces the old, which is deleted", async () => {
+  const { store, vault, cf } = await stored();
+  const first = await hcSetup(vault);
+  const second = await hcSetup(vault);
+  assert.equal(second.ok, true);
+  assert.deepEqual(second.replaced, [first.key_id]);
+  assert.equal((await store.get<any>("headcount")).token_id, second.key_id);
+  assert.ok(!cf.tokens.some((t) => t.id === first.key_id));
+});
+
+test("headcount: a clean account counts ok, using only the list-only key", async () => {
+  const { vault, cf } = await stored();
+  await hcSetup(vault);
+  cf.calls.length = 0;
+  const r = await vault.headcount();
+  assert.deepEqual(r, { ok: true, tokens: 4, unexpected: [], stretched: [], missing: [] });
+  assert.ok(cf.calls.every((c) => cf.listOnly.has(c.token) && c.method === "GET"), "reads only, never with the master");
+});
+
+test("headcount: a planted extra key is named", async () => {
+  const { vault, cf } = await stored();
+  await hcSetup(vault);
+  cf.tokens.push({ id: "planted", name: "not from the front desk" });
+  const r = await vault.headcount();
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.unexpected, [{ id: "planted", name: "not from the front desk" }]);
+});
+
+test("headcount: a handed-out key is expected even after expiry, until its expiry is stretched", async () => {
+  const { vault, cf, clock } = await stored();
+  await hcSetup(vault);
+  const minted = (await vault.run("cf.token.zone.read", { zone: ZONE, minutes: "5", ip: "198.51.100.7" }, prf(7))) as MintResult;
+  assert.equal(minted.ok, true, JSON.stringify(minted).slice(0, 400));
+  clock.now += 60 * 60_000; // expired, still listed: Cloudflare keeps it until the next job sweeps it
+  assert.equal((await vault.headcount()).ok, true);
+  cf.tokens.find((t) => t.id === minted.key!.id)!.expires_on = "2027-01-01T00:00:00Z";
+  const r = await vault.headcount();
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.stretched, [{ id: minted.key!.id, expires_on: "2027-01-01T00:00:00Z" }]);
+});
+
+test("headcount: refuses to report ok without a headcount key or a locked master", async () => {
+  const { vault } = await stored();
+  assert.match((await vault.headcount()).error ?? "", /no_master_key/, "setup not yet confirmed by Ben's tap");
+  await probe(vault);
+  const r = await vault.headcount();
+  assert.equal(r.ok, false);
+  assert.match(r.error ?? "", /headcount_not_set_up/);
+});
+
+test("headcount: a list failure is not ok", async () => {
+  const { vault, cf } = await stored();
+  await hcSetup(vault);
+  cf.tokens.length = 0;
+  const r = await vault.headcount();
+  assert.equal(r.ok, false, "an empty list is not a clean count: the master and headcount keys must appear");
+  assert.equal(r.missing.length, 2);
+});
+
+test("after headcount setup, the jobs' own audit expects the headcount key (probe and mint still pass)", async () => {
+  const { vault } = await stored();
+  await hcSetup(vault);
+  const p = await probe(vault);
+  assert.equal(p.ok, true, JSON.stringify(p.audit));
+  const k = (await vault.run("cf.token.zone.read", { zone: ZONE, minutes: "5", ip: "198.51.100.7" }, prf(7))) as MintResult;
+  assert.equal(k.ok, true, JSON.stringify(k.audit));
+});
+
+test("headcount setup again: an old key that will not delete makes the result not ok, alarms nightly, and is retried", async () => {
+  const { store, vault, cf } = await stored("hcOldStays");
+  const first = await hcSetup(vault);
+  cf.hcOld.stuck = first.key_id!;
+  const second = await hcSetup(vault);
+  assert.equal(second.ok, false);
+  assert.match(second.error ?? "", /delete failed/);
+  assert.deepEqual((await store.get<any>("headcount")).retired, [first.key_id]);
+  const night = await vault.headcount();
+  assert.equal(night.ok, false);
+  assert.deepEqual(night.unexpected.map((t) => t.id), [first.key_id]);
+  cf.hcOld.stuck = undefined;
+  const third = await hcSetup(vault);
+  assert.equal(third.ok, true);
+  assert.ok(third.replaced.includes(first.key_id!));
+  assert.deepEqual((await store.get<any>("headcount")).retired, []);
+  assert.equal((await vault.headcount()).ok, true);
 });
