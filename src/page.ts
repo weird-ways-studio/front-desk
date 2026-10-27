@@ -3,6 +3,7 @@
 
 import type { Grant, LogEntry } from "./desk.ts";
 import { JOBS } from "./jobs.ts";
+import type { CboxKey } from "./cboxkey.ts";
 
 export function esc(text: string): string {
   return text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -96,6 +97,23 @@ document.getElementById('go').onclick=async e=>{e.target.disabled=true;
   body:JSON.stringify({credential:cred(c),prf:first?b2u(first):null,prf_info:JSON.stringify(Object.keys(x))})});
  const j=await res.json().catch(()=>({}));show(res.ok,res.ok?'PASS: '+j.fingerprint:'FAIL: '+(j.error||res.status));
  document.getElementById('after').textContent='Now reload this page and tap Next once more. The same code twice means it works.'};`,
+  );
+}
+
+// Ben's page for a lost or stolen c-box: shows the enrolled signing key and removes it in one tap.
+export function cboxKeyPage(key: CboxKey | undefined, nonce: string): string {
+  const when = (ms: number) => new Date(ms).toISOString().replace("T", " ").slice(0, 16);
+  if (!key) return page("C-box key", nonce, `<h1>C-box key</h1><p>No c-box key is enrolled. Requests for keys are refused until one is.</p>`, "");
+  return page(
+    "C-box key",
+    nonce,
+    `<div id="status"></div><h1>C-box key</h1>
+<p>Enrolled key: <strong>${esc(key.fingerprint)}</strong>, since ${when(key.enrolled_at)} UTC.</p>
+<p>If the c-box is lost or stolen, remove it. Every key request is then refused until you approve a new one.</p>
+<button id="go">Remove c-box key</button>`,
+    `document.getElementById('go').onclick=async e=>{e.target.disabled=true;
+ const res=await fetch(location.pathname,{method:'POST'});const j=await res.json().catch(()=>({}));
+ show(res.ok,res.ok?'PASS: removed '+j.removed:'FAIL: '+(j.error||res.status))};`,
   );
 }
 

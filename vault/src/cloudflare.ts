@@ -22,9 +22,11 @@ export class Cloudflare {
       headers: { authorization: `Bearer ${this.token}`, ...(body ? { "content-type": "application/json" } : {}) },
       body: body ? JSON.stringify(body) : undefined,
     });
-    const json = (await res.json().catch(() => ({}))) as { success?: boolean; result?: T; errors?: { message?: string }[] };
+    const json = (await res.json().catch(() => ({}))) as { success?: boolean; result?: T; errors?: { message?: string; code?: number }[] };
     if (!res.ok || json.success === false) {
-      throw new VaultError(`cf_${res.status}: ${String(json.errors?.[0]?.message ?? "no message").slice(0, 100)}`);
+      const code = json.errors?.[0]?.code;
+      // The provider's error code is kept ("cf_403[9109]: ..."), so callers can tell refusals apart.
+      throw new VaultError(`cf_${res.status}${typeof code === "number" ? `[${code}]` : ""}: ${String(json.errors?.[0]?.message ?? "no message").slice(0, 100)}`);
     }
     return json.result as T;
   }
