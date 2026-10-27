@@ -11,11 +11,12 @@ import {
   type RegistrationResponseJSON,
 } from "@simplewebauthn/server";
 import { JOBS, type Job, type JobName } from "./jobs.ts";
-import { currentKey, fingerprint, type CboxKey } from "./cboxkey.ts";
+import { currentKey, fingerprint, keyRev, type CboxKey } from "./cboxkey.ts";
 import type { VaultApi } from "../vault/src/api.ts";
 
 export const APPROVE_WINDOW_MS = 10 * 60_000; // ask -> approve
 export const COLLECT_WINDOW_MS = 5 * 60_000; // approve -> collect
+export const MAX_PENDING = 3; // grants one requester may have waiting for Ben at once
 export const CHALLENGE_TTL_MS = 5 * 60_000;
 export const ROUTE_REFUSALS_PER_DAY = 20;
 // PRF check only. The master key will use a different label, so a check never reveals key material.
@@ -52,6 +53,9 @@ export interface Grant {
   status: GrantStatus;
   approved_at?: number;
   collected_at?: number;
+  // For key jobs: the c-box key generation (cboxkey.ts keyRev) the request was signed under. Approval
+  // and collect are refused if Ben has removed or replaced the key since (Codex architecture r2).
+  cbox_rev?: number;
   // What a vault job reported when it ran at approval. A minted key's secret (result.key.value)
   // is kept only until the agent collects it, then erased; it is never logged or shown to Ben.
   result?: unknown;
@@ -200,6 +204,14 @@ export class Desk {
     // A key for the agent is made only for a request signed with the enrolled c-box key, so a
     // stolen agent login used elsewhere gets nothing (Codex minted r1 #2, architecture review r1).
     if ((JOBS[job] as Job).pinIp) await this.requireSigned(source, requester, job, now);
+    // Bounds on what can wait for Ben, so a stolen login cannot flood his phone (Codex architecture r1 #4).
+    const waiting = [...(await this.store.list<Grant>({ prefix: "grant:" })).values()].filter((x) => x.status === "pending" && x.expires_at > now);
+    const refuseBusy = async (code: string) => {
+      await this.log({ event: "refused", requester, job, detail: `${job}: ${code}` }, now);
+      throw new DeskError(code, 429);
+    };
+    if (waiting.filter((x) => x.requester === requester).length >= MAX_PENDING) await refuseBusy("too_many_pending");
+    if (job === "cbox.key.enroll" && waiting.some((x) => x.job === "cbox.key.enroll")) await refuseBusy("enroll_pending");
     // Whatever ip the agent sent is replaced with the address Cloudflare saw.
     const asked = (JOBS[job] as Job).pinIp ? { ...((body.params ?? {}) as object), ip: source.ip } : body.params;
     const params: Record<string, string> | null = JOBS[job].validate(asked);
@@ -208,12 +220,14 @@ export class Desk {
       // Shown to Ben with what it replaces; approval is refused if that has changed since (stale request).
       params.fingerprint = await fingerprint(params.key);
       params.replaces = (await currentKey(this.store))?.fingerprint ?? "none";
+      params.rev = String(await keyRev(this.store));
     }
     if (typeof body.reason !== "string" || !body.reason.trim() || body.reason.length > 200) {
       throw new DeskError("bad_reason", 400);
     }
     const base = { id: crypto.randomUUID(), job, params, requester, expires_at: now + APPROVE_WINDOW_MS };
     const g: Grant = { ...base, reason: body.reason.trim(), created_at: now, hash: await grantHash(base), status: "pending" };
+    if ((JOBS[job] as Job).pinIp) g.cbox_rev = await keyRev(this.store);
     await this.store.put(`grant:${g.id}`, g);
     await this.log({ event: "requested", ...this.grantFacts(g) }, now);
     return g;
@@ -314,6 +328,10 @@ export class Desk {
     // Verification awaited crypto, so another request may have run meanwhile.
     // Re-read and commit with storage calls only, which the Durable Object does not interleave.
     const current = await this.pending(id, now);
+    if (current.cbox_rev !== undefined && current.cbox_rev !== (await keyRev(this.store))) {
+      await fail("the c-box key was removed or replaced since this request");
+      throw new DeskError("cbox_key_changed", 409);
+    }
     await this.commitCounter(key.id, newCounter);
     const approved: Grant = { ...current, status: "approved", approved_at: now };
     await this.store.put(`grant:${g.id}`, approved);
@@ -331,8 +349,14 @@ export class Desk {
       result = { error: (e as Error).message.slice(0, 120) };
       await this.log({ event: "job_failed", ...this.grantFacts(g), detail: (e as Error).message.slice(0, 120) }, now);
     }
-    // Re-read: other requests ran while the vault worked; only the result is added.
-    const done: Grant = { ...(await this.grant(id)), result };
+    // Re-read: other requests ran while the vault worked; only the result is added. If Ben removed or
+    // replaced the c-box key meanwhile, a minted key's secret is dropped, never released.
+    const latest = await this.grant(id);
+    if (latest.cbox_rev !== undefined && latest.cbox_rev !== (await keyRev(this.store)) && withoutSecret(result) !== result) {
+      result = withoutSecret(result);
+      await this.log({ event: "refused", ...this.grantFacts(g), detail: "c-box key changed during the job; the key's secret was dropped" }, now);
+    }
+    const done: Grant = { ...latest, result };
     await this.store.put(`grant:${g.id}`, done);
     return done;
   }
@@ -410,8 +434,13 @@ export class Desk {
 
   // Marked collected before the job runs: two collects, or a crash mid-job, never run it twice.
   async collect(id: string, requester: string, now: number, source: Source = {}): Promise<{ grant: Grant; result: unknown }> {
+    const first = await this.grant(id);
+    if (first.requester !== requester) throw new DeskError("not_your_grant", 403);
+    // A key is handed only to a signed collect from the address it is pinned to (Codex architecture r1 #2).
+    if ((JOBS[first.job] as Job).pinIp) await this.requireSigned(source, requester, first.job, now);
+    // Re-read after the signature's crypto: everything from here to the write is storage calls only,
+    // so two collects cannot both see "approved" (Codex architecture r2).
     const g = await this.grant(id);
-    if (g.requester !== requester) throw new DeskError("not_your_grant", 403);
     if (g.status === "pending") throw new DeskError("not_approved", 403);
     if (g.status === "collected") throw new DeskError("already_collected", 409);
     if (now > (g.approved_at ?? 0) + COLLECT_WINDOW_MS) {
@@ -420,9 +449,8 @@ export class Desk {
     }
     // A vault job is approved before the vault finishes; until its result is in, there is nothing to collect.
     if ((JOBS[g.job] as Job).vault && g.result === undefined) throw new DeskError("not_ready", 409);
-    // A key is handed only to a signed collect from the address it is pinned to (Codex architecture r1 #2).
     if ((JOBS[g.job] as Job).pinIp) {
-      await this.requireSigned(source, requester, g.job, now);
+      if (g.cbox_rev !== (await keyRev(this.store))) throw new DeskError("cbox_key_changed", 409);
       if (source.ip !== g.params.ip) {
         await this.log({ event: "refused", ...this.grantFacts(g), detail: `collect from ${String(source.ip).slice(0, 45)}, key is pinned to ${g.params.ip}` }, now);
         throw new DeskError("address_changed", 409);
@@ -453,11 +481,14 @@ export class Desk {
   // changed since the request (two enrollments approved out of order).
   private async enrollCboxKey(g: Grant, now: number): Promise<void> {
     const current = (await currentKey(this.store))?.fingerprint ?? "none";
-    if (current !== g.params.replaces) {
+    // A generation number, not the fingerprint: after enroll-then-remove, "none" again must not
+    // revive an old enrollment (Codex architecture r2).
+    if (String(await keyRev(this.store)) !== g.params.rev) {
       await this.log({ event: "refused", ...this.grantFacts(g), detail: `enroll: key changed since the request (now ${current})` }, now);
       throw new DeskError("stale_enroll", 409);
     }
     await this.store.put<CboxKey>("cbox:key", { spki: g.params.key, fingerprint: g.params.fingerprint, enrolled_at: now, grant_id: g.id });
+    await this.store.put("cbox:rev", (await keyRev(this.store)) + 1);
     await this.log({ event: "cbox_key_enrolled", ...this.grantFacts(g), detail: `c-box key ${g.params.fingerprint}, replaces ${current}` }, now);
   }
 
@@ -466,6 +497,7 @@ export class Desk {
     const k = await currentKey(this.store);
     if (!k) throw new DeskError("no_cbox_key", 404);
     await this.store.put("cbox:key", null);
+    await this.store.put("cbox:rev", (await keyRev(this.store)) + 1);
     await this.log({ event: "cbox_key_removed", detail: `c-box key ${k.fingerprint} removed by Ben` }, now);
     return k.fingerprint;
   }

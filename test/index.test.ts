@@ -381,17 +381,69 @@ test("c-box key: Ben enrolls it by Face ID; the screen shows its fingerprint and
   }
 });
 
-test("c-box key: two enrollments approved out of order -- the stale one is refused, and a replacement says what it replaces", async () => {
+test("c-box key: one enrollment waits at a time; one asked before a removal (or any other change) is refused as stale", async () => {
   const { store, key, cbox } = await withCboxKey();
   const old = (await desk(store).cboxKey())!.fingerprint;
   const a = await askEnroll(store, cboxKey().spki);
-  const b = await askEnroll(store, cboxKey().spki);
   assert.match(await (await callV(store, fakeVault(true), `/approve/${a}`)).text(), new RegExp(`REPLACING key ${old}`));
-  assert.equal((await approveAs(store, fakeVault(true), key, a)).status, 200);
-  assert.deepEqual(await (await approveAs(store, fakeVault(true), key, b)).json(), { error: "stale_enroll" });
-  assert.equal((await desk(store).cboxKey())!.fingerprint, (await desk(store).grant(a)).params.fingerprint);
-  // The old key no longer signs.
-  assert.deepEqual(await (await askKey(store, fakeVault(true), { zone: ZONE, minutes: "5" }, { ip: CBOX, pem: cbox.pem })).json(), { error: "bad_signature" });
+  const again = await agentPost(store, fakeVault(true), "/request", { job: "cbox.key.enroll", params: { key: cboxKey().spki }, reason: "r" });
+  assert.deepEqual(await again.json(), { error: "enroll_pending" });
+  // Ben removes the key, so "a" was asked about a state that no longer exists.
+  await callV(store, fakeVault(true), "/cbox-key", { method: "POST", headers: { origin: base } });
+  assert.deepEqual(await (await approveAs(store, fakeVault(true), key, a)).json(), { error: "stale_enroll" });
+  assert.equal(await desk(store).cboxKey(), undefined);
+  // enroll -> remove -> none again: an old request made when there was no key is still stale.
+  const e = await enrolled();
+  const first = await askEnroll(e.store, cboxKey().spki);
+  // (expire the first so a second may be asked)
+  const g = await desk(e.store).grant(first);
+  await e.store.put(`grant:${first}`, { ...g, expires_at: 0 });
+  const second = await askEnroll(e.store, cboxKey().spki);
+  await e.store.put(`grant:${first}`, g);
+  assert.equal((await approveAs(e.store, fakeVault(true), e.key, second)).status, 200);
+  await callV(e.store, fakeVault(true), "/cbox-key", { method: "POST", headers: { origin: base } });
+  assert.deepEqual(await (await approveAs(e.store, fakeVault(true), e.key, first)).json(), { error: "stale_enroll" });
+  void cbox;
+});
+
+test("requests waiting for Ben are capped per requester", async () => {
+  const { store, cbox } = await withCboxKey();
+  for (let i = 0; i < 3; i++) assert.equal((await askKey(store, fakeVault(true), { zone: ZONE, minutes: "5" }, { ip: CBOX, pem: cbox.pem })).status, 201);
+  assert.deepEqual(await (await askKey(store, fakeVault(true), { zone: ZONE, minutes: "5" }, { ip: CBOX, pem: cbox.pem })).json(), { error: "too_many_pending" });
+});
+
+test("minted key: a key request from before Ben removed or replaced the c-box key cannot be approved or collected", async () => {
+  const { store, key, cbox } = await withCboxKey();
+  const vault = fakeVault(true);
+  vault.run = async () => ({ ok: true, zone: ZONE, key: { id: "k1", expires_on: "x", ip: CBOX, value: SECRET } }) as any;
+  // Approve after removal: refused, the vault is never called.
+  const { id } = (await (await askKey(store, vault, { zone: ZONE, minutes: "5" }, { ip: CBOX, pem: cbox.pem })).json()) as { id: string };
+  await callV(store, vault, "/cbox-key", { method: "POST", headers: { origin: base } });
+  assert.deepEqual(await (await approveAs(store, vault, key, id, prfOut(5))).json(), { error: "cbox_key_changed" });
+  // Removal while the vault is minting: the secret is dropped, never stored or collected.
+  const k2 = cboxKey();
+  assert.equal((await approveAs(store, vault, key, await askEnroll(store, k2.spki))).status, 200);
+  const { id: id2 } = (await (await askKey(store, vault, { zone: ZONE, minutes: "5" }, { ip: CBOX, pem: k2.pem })).json()) as { id: string };
+  vault.run = async () => {
+    await callV(store, vault, "/cbox-key", { method: "POST", headers: { origin: base } });
+    return { ok: true, zone: ZONE, key: { id: "k2", expires_on: "x", ip: CBOX, value: SECRET } } as any;
+  };
+  await approveAs(store, vault, key, id2, prfOut(5));
+  assert.ok(!JSON.stringify(await desk(store).grant(id2)).includes(SECRET), "dropped");
+  // Replaced after approval: the new key cannot collect the old grant.
+  const k3 = cboxKey();
+  assert.equal((await approveAs(store, vault, key, await askEnroll(store, k3.spki))).status, 200);
+  assert.deepEqual(await (await agentPost(store, vault, `/collect/${id2}`, {}, { ip: CBOX, pem: k3.pem })).json(), { error: "cbox_key_changed" });
+});
+
+test("minted key: two signed collects at the same moment -- only one gets the secret (Codex architecture r2)", async () => {
+  const { store, key, cbox } = await withCboxKey();
+  const vault = fakeVault(true);
+  vault.run = async () => ({ ok: true, zone: ZONE, key: { id: "k1", expires_on: "x", ip: CBOX, value: SECRET } }) as any;
+  const { id } = (await (await askKey(store, vault, { zone: ZONE, minutes: "5" }, { ip: CBOX, pem: cbox.pem })).json()) as { id: string };
+  await approveAs(store, vault, key, id, prfOut(5));
+  const both = await Promise.all([1, 2].map((n) => agentPost(store, vault, `/collect/${id}`, { n }, { ip: CBOX, pem: cbox.pem }).then((r) => r.text())));
+  assert.equal(both.filter((t) => t.includes(SECRET)).length, 1, both.join(" | "));
 });
 
 test("c-box key: a key request is refused unsigned, with another key, too old, replayed, or before any key is enrolled -- each logged", async () => {

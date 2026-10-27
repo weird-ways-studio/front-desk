@@ -41,6 +41,11 @@ export async function fingerprint(spki: string): Promise<string> {
   return hex(await crypto.subtle.digest("SHA-256", fromB64url(spki))).slice(0, 16).replace(/(.{4})(?!$)/g, "$1-");
 }
 
+/** Goes up by one at every enrollment and removal, so a request or approval from before can be told apart. */
+export async function keyRev(store: Store): Promise<number> {
+  return (await store.get<number>("cbox:rev")) ?? 0;
+}
+
 export async function currentKey(store: Store): Promise<CboxKey | undefined> {
   return (await store.get<CboxKey | null>("cbox:key")) ?? undefined;
 }

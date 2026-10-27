@@ -10,9 +10,14 @@
 // in the environment (read from 1Password by the caller, per call).
 
 import { createHash, createPrivateKey, generateKeyPairSync, sign } from "node:crypto";
+import { setDefaultResultOrder } from "node:dns";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
+
+// Keys are pinned to one IPv4 address (/32), so the request and the key's later use both go over IPv4.
+// If IPv6 were used anyway, the front desk refuses (bad_params, address_changed): it fails closed.
+setDefaultResultOrder("ipv4first");
 
 const KEY = process.env.CBOX_KEY_FILE ?? `${homedir()}/.config/front-desk/cbox-key.pem`;
 const b64url = (b) => Buffer.from(b).toString("base64url");
