@@ -419,7 +419,8 @@ export class Desk {
   }
 
   // A minted key's secret not collected within the collect window is erased (Codex minted r1 #5).
-  // Run on every request and on a late collect, so it lives at most until the desk is next used.
+  // Runs at each new /request and at a late collect -- not on page views -- so with no further
+  // requests it stays stored (the key itself still expires within 15 minutes).
   private async eraseStaleSecrets(now: number): Promise<void> {
     for (const [k, g] of await this.store.list<Grant>({ prefix: "grant:" })) {
       if (g.status === "approved" && now > (g.approved_at ?? 0) + COLLECT_WINDOW_MS && withoutSecret(g.result) !== g.result) {

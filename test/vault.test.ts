@@ -12,7 +12,7 @@ const ZONE = "benculbert.com";
 const PARENT = "P".repeat(40);
 const NOW = Date.UTC(2026, 9, 26, 23, 0, 0);
 const prf = (fill: number) => b64url(new Uint8Array(32).fill(fill));
-type Fail = "accounts2" | "accounts0" | "inactive" | "existing" | "add" | "verifyRead" | "recordDelete" | "tokenDelete" | "list" | "newToken" | "staysListed" | "offboxAllowed" | "offboxBroken";
+type Fail = "accounts2" | "accounts0" | "inactive" | "existing" | "add" | "verifyRead" | "recordDelete" | "tokenDelete" | "list" | "newToken" | "staysListed" | "offboxAllowed" | "offboxBroken" | "offboxOther403";
 
 // A fake Cloudflare API: answers the calls the vault makes and records each with the token used.
 // `fail` makes one step go wrong, to show what the vault does then.
@@ -66,6 +66,7 @@ function fakeCloudflare(fail?: Fail, baseline = 3) {
     // The vault calls from Cloudflare's network, never the pinned c-box address.
     if (method === "GET" && path === `/zones/${ZONE_ID}`) {
       if (pinned.has(token) && fail === "offboxBroken") return bad(500, "internal error");
+      if (pinned.has(token) && fail === "offboxOther403") return bad(403, "Authentication error");
       if (pinned.has(token) && fail !== "offboxAllowed") return bad(403, "Cannot use the access token from location: 104.28.0.1");
       return ok({ id: ZONE_ID, name: ZONE });
     }
@@ -258,9 +259,31 @@ test("handed-out keys: a second mint is fine while the first is live; once expir
   assert.ok(!cf.tokens.some((t) => t.id === first.key!.id || t.id === second.key!.id), "both expired keys deleted");
 });
 
+test("handed-out keys: a sweep that overlaps another job's mint does not lose the new key (Codex minted r2)", async () => {
+  const { store, vault, cf, clock } = await stored();
+  const first = await mint(vault, { zone: ZONE, minutes: "2", ip: CBOX });
+  clock.now += 3 * 60_000;
+  // Hold the first delete of the expired key until the second job has finished.
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let holds = 0;
+  const slow = new VaultLogic(store, async (input, init) => {
+    if (init?.method === "DELETE" && String(input).endsWith(`/tokens/${first.key!.id}`) && holds++ === 0) await held;
+    return cf.fetchFn(input as string, init);
+  }, () => clock.now);
+  const sweeping = slow.run("cf.dns.txt.probe", { zone: ZONE }, prf(7));
+  await new Promise((r) => setTimeout(r, 10));
+  const second = await mint(vault, { zone: ZONE, minutes: "5", ip: CBOX });
+  assert.equal(second.ok, true);
+  release();
+  await sweeping;
+  const issued = ((await store.get<any>("master")).issued ?? []).map((k: { id: string }) => k.id);
+  assert.deepEqual(issued, [second.key!.id]);
+});
+
 test("minted key fails closed: if it worked off the pinned address, or anything else is off, it is deleted and not handed over", async () => {
   // offboxBroken: the off-box try failed for another reason, which proves nothing about the pin.
-  for (const fail of ["offboxAllowed", "offboxBroken", "newToken"] as const) {
+  for (const fail of ["offboxAllowed", "offboxBroken", "offboxOther403", "newToken"] as const) {
     const { vault, cf } = await stored(fail);
     const r = await mint(vault);
     assert.equal(r.ok, false, fail);

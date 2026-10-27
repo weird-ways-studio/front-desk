@@ -80,7 +80,8 @@ export async function route(request: Request, store: Store, who: Who, now = Date
     }
     if (m === "GET" && url.pathname === "/health") return json({ ok: true, version: VERSION });
     if (m === "POST" && url.pathname === "/request") {
-      // CF-Connecting-IP is set by Cloudflare's edge to the caller's address; a sent value is replaced.
+      // CF-Connecting-IP: for a direct request (not a Worker subrequest) Cloudflare's edge sets it to the
+      // caller's address. Checked live by sending a forged value; desk.request compares it with CBOX_IP.
       const g = await desk.request(await request.json().catch(() => null), requester, now, request.headers.get("cf-connecting-ip") ?? undefined, cboxIp);
       return json({ id: g.id, approve_url: `${url.origin}/approve/${g.id}`, expires_at: g.expires_at }, 201);
     }

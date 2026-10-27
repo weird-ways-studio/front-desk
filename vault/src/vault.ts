@@ -11,8 +11,9 @@ export const PROBE_TOKEN_MS = 5 * 60_000;
 // A key handed to the agent lasts at most this long (C4 design 3.7: <=15 minutes).
 export const MAX_KEY_MINUTES = 15;
 // How Cloudflare refuses a key used outside its request_ip condition (FROM MEMORY: HTTP 403,
-// "Cannot use the access token from location: <ip>"; confirmed or corrected by the first live run).
-export const OFFBOX_REFUSAL = /^cf_403: .*\blocation\b/i;
+// "Cannot use the access token from location: <ip>"; the first live run records the exact text and
+// code, and this is narrowed to them). Anything else -- another 403, an outage -- fails closed.
+export const OFFBOX_REFUSAL = /^cf_403(\[\d+\])?: Cannot use the access token from location\b/;
 export const PROBE_RECORD = "_front-desk-probe";
 // Setup waits this long for Ben's first Face ID tap to lock the key to his passkey.
 export const PENDING_MS = 30 * 60_000;
@@ -226,20 +227,24 @@ export class VaultLogic {
   // Deletes handed-out keys past their expiry and returns the ones still live. A failed delete
   // keeps the key on the list, so the audit still expects it and the next job tries again.
   private async sweepIssued(master: Cloudflare, m: Master): Promise<{ id: string; expires_on: string }[]> {
-    const live: { id: string; expires_on: string }[] = [];
+    const gone: string[] = [];
     for (const k of m.issued ?? []) {
-      const gone = Date.parse(k.expires_on) <= this.now() &&
-        (await master.call("DELETE", `/accounts/${m.account_id}/tokens/${k.id}`).then(() => true, (e: Error) => /^cf_404/.test(e.message)));
-      if (!gone) live.push(k);
+      if (Date.parse(k.expires_on) > this.now()) continue;
+      const deleted = await master.call("DELETE", `/accounts/${m.account_id}/tokens/${k.id}`).then(() => true, (e: Error) => /^cf_404/.test(e.message));
+      if (deleted) gone.push(k.id);
     }
-    await this.saveIssued(live);
-    return live;
+    // Removes only what this sweep deleted: a key another job recorded meanwhile is kept (Codex minted r2).
+    return this.updateIssued((list) => list.filter((k) => !gone.includes(k.id)));
   }
 
-  // Storage calls only (get then put), which the Durable Object does not interleave.
-  private async saveIssued(issued: { id: string; expires_on: string }[]): Promise<void> {
+  // Changes the handed-out list from its CURRENT stored value, with storage calls only (get then
+  // put, no await between them on anything else), which the Durable Object does not interleave.
+  private async updateIssued(change: (list: { id: string; expires_on: string }[]) => { id: string; expires_on: string }[]) {
     const now = await this.store.get<Master | null>("master");
-    if (now) await this.store.put("master", { ...now, issued });
+    if (!now) return [];
+    const issued = change(now.issued ?? []);
+    await this.store.put("master", { ...now, issued });
+    return issued;
   }
 
   // Looks up a zone's id by name with a read-only key for all zones, deleted straight after.
@@ -292,7 +297,8 @@ export class VaultLogic {
       !r.error && !r.audit.error && !!r.key && r.offbox_refused && r.minted.length === 1 && r.minted.every((t) => t.deleted) &&
       r.audit.minted_still_listed.length === 0 && r.audit.new_since_setup.length === 0;
     if (r.ok) {
-      await this.saveIssued([...(m.issued ?? []), { id: r.key!.id, expires_on: r.key!.expires_on }]);
+      const k = { id: r.key!.id, expires_on: r.key!.expires_on };
+      await this.updateIssued((list) => [...list, k]);
       return { ...r, key: { ...r.key!, value } };
     }
     if (r.key) {
