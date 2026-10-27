@@ -12,7 +12,7 @@ const ZONE = "benculbert.com";
 const PARENT = "P".repeat(40);
 const NOW = Date.UTC(2026, 9, 26, 23, 0, 0);
 const prf = (fill: number) => b64url(new Uint8Array(32).fill(fill));
-type Fail = "accounts2" | "accounts0" | "inactive" | "existing" | "add" | "verifyRead" | "recordDelete" | "tokenDelete" | "list" | "newToken" | "staysListed" | "offboxAllowed";
+type Fail = "accounts2" | "accounts0" | "inactive" | "existing" | "add" | "verifyRead" | "recordDelete" | "tokenDelete" | "list" | "newToken" | "staysListed" | "offboxAllowed" | "offboxBroken";
 
 // A fake Cloudflare API: answers the calls the vault makes and records each with the token used.
 // `fail` makes one step go wrong, to show what the vault does then.
@@ -65,6 +65,7 @@ function fakeCloudflare(fail?: Fail, baseline = 3) {
     if (path === `/zones?name=${ZONE}`) return ok([{ id: ZONE_ID, name: ZONE }]);
     // The vault calls from Cloudflare's network, never the pinned c-box address.
     if (method === "GET" && path === `/zones/${ZONE_ID}`) {
+      if (pinned.has(token) && fail === "offboxBroken") return bad(500, "internal error");
       if (pinned.has(token) && fail !== "offboxAllowed") return bad(403, "Cannot use the access token from location: 104.28.0.1");
       return ok({ id: ZONE_ID, name: ZONE });
     }
@@ -246,7 +247,8 @@ test("minted key: read-only on one zone, expires in <=15 minutes, pinned to the 
 });
 
 test("minted key fails closed: if it worked off the pinned address, or anything else is off, it is deleted and not handed over", async () => {
-  for (const fail of ["offboxAllowed", "newToken"] as const) {
+  // offboxBroken: the off-box try failed for another reason, which proves nothing about the pin.
+  for (const fail of ["offboxAllowed", "offboxBroken", "newToken"] as const) {
     const { vault, cf } = await stored(fail);
     const r = await mint(vault);
     assert.equal(r.ok, false, fail);

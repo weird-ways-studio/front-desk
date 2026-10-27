@@ -10,6 +10,9 @@ import { MASTER_LABEL, RECOVERY_LABEL, VaultError, b64url, fromB64url, open, sea
 export const PROBE_TOKEN_MS = 5 * 60_000;
 // A key handed to the agent lasts at most this long (C4 design 3.7: <=15 minutes).
 export const MAX_KEY_MINUTES = 15;
+// How Cloudflare refuses a key used outside its request_ip condition (FROM MEMORY: HTTP 403,
+// "Cannot use the access token from location: <ip>"; confirmed or corrected by the first live run).
+export const OFFBOX_REFUSAL = /^cf_403: .*\blocation\b/i;
 export const PROBE_RECORD = "_front-desk-probe";
 // Setup waits this long for Ben's first Face ID tap to lock the key to his passkey.
 export const PENDING_MS = 30 * 60_000;
@@ -253,8 +256,10 @@ export class VaultLogic {
         await new Cloudflare(made.value, this.fetch).call("GET", `/zones/${zoneId}`);
         r.offbox_error = "key worked off the pinned address";
       } catch (e) {
-        r.offbox_refused = true;
+        // Only Cloudflare's own address refusal counts. Any other failure (an outage, a key not
+        // yet live) proves nothing about the pin, so the key is not handed over.
         r.offbox_error = (e as Error).message.slice(0, 120);
+        r.offbox_refused = OFFBOX_REFUSAL.test(r.offbox_error);
       }
     } catch (e) {
       note(r, (e as Error).message);
