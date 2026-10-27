@@ -261,12 +261,16 @@ test("deploy-vault.sh deploys the vault only in Workers Builds, on a real deploy
   const { tmpdir } = await import("node:os");
   // A stand-in npx that only reports what it was asked to run.
   const bin = mkdtempSync(`${tmpdir()}/fake-npx-`);
-  writeFileSync(`${bin}/npx`, '#!/bin/sh\necho "npx $*"\n');
+  writeFileSync(`${bin}/npx`, '#!/bin/sh\necho "npx $* name=${WRANGLER_CI_OVERRIDE_NAME:-unset} tag=${WRANGLER_CI_MATCH_TAG:-unset}"\n');
   chmodSync(`${bin}/npx`, 0o755);
   const run = (env: Record<string, string>) =>
     execFileSync("sh", ["scripts/deploy-vault.sh"], { env: { PATH: `${bin}:/usr/bin:/bin`, ...env }, encoding: "utf8" });
   const ci = { WORKERS_CI: "1", WRANGLER_COMMAND: "deploy", WORKERS_CI_BRANCH: "main" };
   assert.match(run(ci), /npx wrangler deploy -c vault\/wrangler\.jsonc/);
+  // Workers Builds' name and tag for the front desk must not reach the vault deploy,
+  // or wrangler uploads the vault code as the front desk.
+  const builds = { ...ci, WRANGLER_CI_OVERRIDE_NAME: "front-desk", WRANGLER_CI_MATCH_TAG: "abc123" };
+  assert.match(run(builds), /npx wrangler deploy -c vault\/wrangler\.jsonc name=unset tag=unset/);
   for (const env of [{}, { ...ci, WORKERS_CI: "" }, { ...ci, WRANGLER_COMMAND: "dev" }, { ...ci, WORKERS_CI_BRANCH: "probe" }]) {
     const out = run(env);
     assert.match(out, /skipping/);
