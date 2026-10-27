@@ -48,6 +48,9 @@ interface HeadcountKey {
   token_id: string;
   value: string;
   made_at: number;
+  // Old headcount keys a replacement could not delete. Not expected by the count, so they alarm
+  // nightly until the next setup deletes them.
+  retired?: string[];
 }
 
 export interface HeadcountSetupResult {
@@ -57,7 +60,7 @@ export interface HeadcountSetupResult {
   lists: boolean;
   mint_refused: boolean;
   mint_error?: string;
-  replaced: string | null; // the previous headcount key, deleted
+  replaced: string[]; // previous headcount keys, deleted
   error?: string;
 }
 
@@ -212,7 +215,7 @@ export class VaultLogic {
   // it to list keys and to be refused a mint; otherwise it is deleted and the old one kept.
   private async setupHeadcount(master: Cloudflare, m: Master): Promise<Omit<HeadcountSetupResult, "master">> {
     const account = m.account_id;
-    const r: Omit<HeadcountSetupResult, "master"> = { ok: false, key_id: null, lists: false, mint_refused: false, replaced: null };
+    const r: Omit<HeadcountSetupResult, "master"> = { ok: false, key_id: null, lists: false, mint_refused: false, replaced: [] };
     let value: string | undefined;
     try {
       const groups = await master.call<{ id: string; name: string; scopes: string[] }[]>("GET", `/accounts/${account}/tokens/permission_groups`);
@@ -227,8 +230,12 @@ export class VaultLogic {
       const cf = new Cloudflare(made.value, this.fetch);
       r.lists = (await listTokens(cf, account)).some((t) => t.id === made.id);
       try {
+        // A complete, valid request (the same narrow policy, 5 minutes), so only a lack of
+        // permission can refuse it -- not a malformed body (Codex C5c-2 r1 #1).
         const leaked = await cf.call<{ id: string }>("POST", `/accounts/${account}/tokens`, {
-          name: "front-desk headcount must-fail", policies: [], expires_on: isoSeconds(this.now() + PROBE_TOKEN_MS),
+          name: "front-desk headcount must-fail",
+          policies: [{ effect: "allow", resources: { [`com.cloudflare.api.account.${account}`]: "*" }, permission_groups: [{ id: read[0].id }] }],
+          expires_on: isoSeconds(this.now() + PROBE_TOKEN_MS),
         });
         r.mint_error = "headcount key could mint";
         await master.call("DELETE", `/accounts/${account}/tokens/${leaked.id}`).catch((e: Error) => note(r, `leaked key delete failed: ${e.message}`));
@@ -245,14 +252,22 @@ export class VaultLogic {
       if (r.key_id) await master.call("DELETE", `/accounts/${account}/tokens/${r.key_id}`).catch((e: Error) => note(r, `key delete failed: ${e.message}`));
       return r;
     }
+    // The new key is stored first, then every older one is deleted. One that will not delete stays
+    // on `retired`: the result is not ok, the nightly count names it, and the next setup retries
+    // (Codex C5c-2 r1 #2).
     const old = await this.store.get<HeadcountKey | null>("headcount");
-    await this.store.put<HeadcountKey>("headcount", { token_id: r.key_id!, value: value!, made_at: this.now() });
-    if (old) {
-      await master.call("DELETE", `/accounts/${account}/tokens/${old.token_id}`).then(
-        () => (r.replaced = old.token_id),
-        (e: Error) => note(r, `old headcount key delete failed: ${e.message}`),
+    const olds = old ? [old.token_id, ...(old.retired ?? [])] : [];
+    await this.store.put<HeadcountKey>("headcount", { token_id: r.key_id!, value: value!, made_at: this.now(), retired: olds });
+    for (const id of olds) {
+      const gone = await master.call("DELETE", `/accounts/${account}/tokens/${id}`).then(
+        () => true,
+        (e: Error) => /^cf_404/.test(e.message) || (note(r, `old headcount key ${id} delete failed: ${e.message}`), false),
       );
+      if (gone) r.replaced.push(id);
     }
+    const now = (await this.store.get<HeadcountKey>("headcount"))!;
+    await this.store.put<HeadcountKey>("headcount", { ...now, retired: (now.retired ?? []).filter((id) => !r.replaced.includes(id)) });
+    r.ok = !r.error;
     return r;
   }
 
