@@ -14,7 +14,10 @@ const HEADERS = {
   "x-robots-tag": "noindex, nofollow",
   "cache-control": "no-store",
   "x-content-type-options": "nosniff",
-  "referrer-policy": "no-referrer",
+  // Not "no-referrer": under it Safari sends the form's Origin as "null", and the origin
+  // check below refuses Ben's own Save (seen live 2026-10-26). same-origin still sends
+  // nothing to other sites.
+  "referrer-policy": "same-origin",
   "x-frame-options": "DENY",
   "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
 };

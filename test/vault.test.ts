@@ -220,6 +220,8 @@ test("setup page: Ben gets the form, saves the token, sees the paper key once; t
   const get = await handleSetup(new Request(`${VAULT}/setup`), vault, "ben@example.com");
   assert.equal(get.status, 200);
   assert.match(get.headers.get("content-security-policy")!, /form-action 'self'/);
+  // With "no-referrer" the browser posts Origin: null and Ben's own Save is refused.
+  assert.equal(get.headers.get("referrer-policy"), "same-origin");
   assert.ok(!(await get.text()).includes("<script"), "no script on the page");
   const saved = await handleSetup(form(PARENT), vault, "ben@example.com");
   const html = await saved.text();
@@ -237,6 +239,7 @@ test("setup page refuses: no email (the agent or no login), another site's form,
   assert.equal((await handleSetup(new Request(`${VAULT}/setup`), vault, "")).status, 403);
   assert.equal((await handleSetup(form(PARENT), vault, "")).status, 403);
   assert.equal((await handleSetup(form(PARENT, "https://evil.example"), vault, "ben@example.com")).status, 403);
+  assert.equal((await handleSetup(form(PARENT, "null"), vault, "ben@example.com")).status, 403);
   assert.equal((await handleSetup(new Request(`${VAULT}/`), vault, "ben@example.com")).status, 404);
   const bad = await handleSetup(form("short"), vault, "ben@example.com");
   assert.equal(bad.status, 400);
