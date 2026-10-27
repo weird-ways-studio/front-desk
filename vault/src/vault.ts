@@ -201,6 +201,7 @@ export class VaultLogic {
     return { ...(await this.mintReadKey(master, m, params.zone, Number(params.minutes), params.ip)), master: facts };
   }
 
+  // Job cf.token.headcount.setup: opens the master with Ben's tap and makes the headcount key.
   private async runHeadcountSetup(prf: string): Promise<HeadcountSetupResult> {
     const m = await this.master();
     if (!m) throw new VaultError("no_master_key");
