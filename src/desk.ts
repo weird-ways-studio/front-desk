@@ -180,13 +180,21 @@ export class Desk {
     return g;
   }
 
-  async request(input: unknown, requester: string, now: number, clientIp?: string): Promise<Grant> {
+  async request(input: unknown, requester: string, now: number, clientIp?: string, cboxIp?: string): Promise<Grant> {
+    await this.eraseStaleSecrets(now);
     const body = (input ?? {}) as { job?: unknown; params?: unknown; reason?: unknown };
     if (typeof body.job !== "string" || !Object.hasOwn(JOBS, body.job)) {
       await this.log({ event: "refused", requester, detail: `job not offered: ${String(body.job).slice(0, 60)}` }, now);
       throw new DeskError("job_not_offered", 400);
     }
     const job = body.job as JobName;
+    // A key for the agent is made only for a request from the c-box's own address (Ben's CBOX_IP),
+    // so a stolen agent login used elsewhere gets nothing (Codex minted r1 #2).
+    if ((JOBS[job] as Job).pinIp && (!cboxIp || clientIp !== cboxIp)) {
+      const why = cboxIp ? `asked from ${String(clientIp).slice(0, 45)}, not the c-box` : "CBOX_IP is not set";
+      await this.log({ event: "refused", requester, job, detail: `${job}: ${why}` }, now);
+      throw new DeskError(cboxIp ? "not_from_cbox" : "cbox_ip_unset", 403);
+    }
     // Whatever ip the agent sent is replaced with the address Cloudflare saw.
     const asked = (JOBS[job] as Job).pinIp ? { ...((body.params ?? {}) as object), ip: clientIp } : body.params;
     const params = JOBS[job].validate(asked);
@@ -395,7 +403,10 @@ export class Desk {
     if (g.requester !== requester) throw new DeskError("not_your_grant", 403);
     if (g.status === "pending") throw new DeskError("not_approved", 403);
     if (g.status === "collected") throw new DeskError("already_collected", 409);
-    if (now > (g.approved_at ?? 0) + COLLECT_WINDOW_MS) throw new DeskError("collect_window_closed", 410);
+    if (now > (g.approved_at ?? 0) + COLLECT_WINDOW_MS) {
+      await this.eraseStaleSecrets(now);
+      throw new DeskError("collect_window_closed", 410);
+    }
     // A vault job is approved before the vault finishes; until its result is in, there is nothing to collect.
     if ((JOBS[g.job] as Job).vault && g.result === undefined) throw new DeskError("not_ready", 409);
     // The stored copy loses the key's secret: it is handed over this once.
@@ -405,6 +416,16 @@ export class Desk {
     const result = job.vault ? g.result : await job.run!(g.params);
     await this.log({ event: "collected", ...this.grantFacts(g) }, now);
     return { grant: collected, result };
+  }
+
+  // A minted key's secret not collected within the collect window is erased (Codex minted r1 #5).
+  // Run on every request and on a late collect, so it lives at most until the desk is next used.
+  private async eraseStaleSecrets(now: number): Promise<void> {
+    for (const [k, g] of await this.store.list<Grant>({ prefix: "grant:" })) {
+      if (g.status === "approved" && now > (g.approved_at ?? 0) + COLLECT_WINDOW_MS && withoutSecret(g.result) !== g.result) {
+        await this.store.put(k, { ...g, result: withoutSecret(g.result) });
+      }
+    }
   }
 
   // First passkey only. Adding or replacing passkeys comes with the recovery key (PR3b).

@@ -34,6 +34,9 @@ interface Master {
   stored_at: number;
   // Token ids in the account at setup: the audit's baseline (ids are not secrets).
   baseline: string[];
+  // Keys handed to the agent and not yet deleted. Cloudflare keeps expired keys listed, so the
+  // vault deletes these once expired, at its next job, and the audit expects them (Codex minted r1 #6).
+  issued?: { id: string; expires_on: string }[];
 }
 
 export interface ProbeResult {
@@ -156,6 +159,7 @@ export class VaultLogic {
     const { token, lockedNow } = await this.unlock(m, prf);
     const master = new Cloudflare(token, this.fetch);
     const facts = { token_id: m.token_id, locked_to_passkey_now: lockedNow };
+    m.issued = await this.sweepIssued(master, m);
     if (job === "cf.dns.txt.probe") return { ...(await this.probe(master, m, params.zone)), master: facts };
     return { ...(await this.mintReadKey(master, m, params.zone, Number(params.minutes), params.ip)), master: facts };
   }
@@ -219,6 +223,25 @@ export class VaultLogic {
     return r;
   }
 
+  // Deletes handed-out keys past their expiry and returns the ones still live. A failed delete
+  // keeps the key on the list, so the audit still expects it and the next job tries again.
+  private async sweepIssued(master: Cloudflare, m: Master): Promise<{ id: string; expires_on: string }[]> {
+    const live: { id: string; expires_on: string }[] = [];
+    for (const k of m.issued ?? []) {
+      const gone = Date.parse(k.expires_on) <= this.now() &&
+        (await master.call("DELETE", `/accounts/${m.account_id}/tokens/${k.id}`).then(() => true, (e: Error) => /^cf_404/.test(e.message)));
+      if (!gone) live.push(k);
+    }
+    await this.saveIssued(live);
+    return live;
+  }
+
+  // Storage calls only (get then put), which the Durable Object does not interleave.
+  private async saveIssued(issued: { id: string; expires_on: string }[]): Promise<void> {
+    const now = await this.store.get<Master | null>("master");
+    if (now) await this.store.put("master", { ...now, issued });
+  }
+
   // Looks up a zone's id by name with a read-only key for all zones, deleted straight after.
   private findZone(master: Cloudflare, account: string, r: Evidence, group: (name: string) => { id: string }, zoneName: string): Promise<string> {
     const allZones = { [`com.cloudflare.api.account.${account}`]: { "com.cloudflare.api.account.zone.*": "*" } };
@@ -268,7 +291,10 @@ export class VaultLogic {
     r.ok =
       !r.error && !r.audit.error && !!r.key && r.offbox_refused && r.minted.length === 1 && r.minted.every((t) => t.deleted) &&
       r.audit.minted_still_listed.length === 0 && r.audit.new_since_setup.length === 0;
-    if (r.ok) return { ...r, key: { ...r.key!, value } };
+    if (r.ok) {
+      await this.saveIssued([...(m.issued ?? []), { id: r.key!.id, expires_on: r.key!.expires_on }]);
+      return { ...r, key: { ...r.key!, value } };
+    }
     if (r.key) {
       // Fail closed: a key that did not pass every check is deleted, never handed over.
       await master.call("DELETE", `/accounts/${account}/tokens/${r.key.id}`).catch((e: Error) => note(r, `key delete failed: ${e.message}`));
@@ -297,7 +323,8 @@ async function audit(master: Cloudflare, m: Master, r: Evidence, expected: strin
     const ids = (await listTokens(master, m.account_id)).map((t) => t.id);
     r.audit.tokens = ids.length;
     r.audit.minted_still_listed = r.minted.map((t) => t.id).filter((id) => ids.includes(id));
-    r.audit.new_since_setup = ids.filter((id) => !m.baseline.includes(id) && !expected.includes(id));
+    const known = [...expected, ...(m.issued ?? []).map((k) => k.id)];
+    r.audit.new_since_setup = ids.filter((id) => !m.baseline.includes(id) && !known.includes(id));
     if (expected.some((id) => !ids.includes(id))) note(r, "minted key not listed");
   } catch (e) {
     r.audit.error = (e as Error).message.slice(0, 120);

@@ -38,7 +38,7 @@ export const JOBS = {
   },
   "cf.token.zone.read": {
     describe: (p) =>
-      `Cloudflare key for the agent: read-only on zone "${p.zone}" (it can look at settings and DNS, change nothing). It expires after ${p.minutes} minutes and works only from ${p.ip}, the address that asked. Given to the agent once.`,
+      `TEST key for the agent: it can read only the basic details of zone "${p.zone}" (name, status, plan) -- not its DNS, not its settings, and it can change nothing. It expires after ${p.minutes} minutes and works only from the c-box (${p.ip}). Given to the agent once.`,
     validate: (params) => {
       const { zone, minutes, ip } = (params ?? {}) as { zone?: unknown; minutes?: unknown; ip?: unknown };
       const okMinutes = typeof minutes === "string" && /^[1-9]\d?$/.test(minutes) && Number(minutes) <= MAX_KEY_MINUTES;

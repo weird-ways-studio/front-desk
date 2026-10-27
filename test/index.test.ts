@@ -326,12 +326,16 @@ test("vault job: a collect while the vault is still working is refused, and the 
 
 // Minted key for the agent (PR3b-2b step 3).
 const SECRET = "S".repeat(40);
-const askKey = (store: MemoryStore, vault: ReturnType<typeof fakeVault>, params: Record<string, string>, ip?: string) =>
-  callV(store, vault, "/request", {
-    method: "POST",
-    headers: ip ? { "cf-connecting-ip": ip } : {},
-    body: JSON.stringify({ job: "cf.token.zone.read", params, reason: "read the zone" }),
-  });
+const CBOX = "203.0.113.7";
+const askKey = (store: MemoryStore, vault: ReturnType<typeof fakeVault>, params: Record<string, string>, ip?: string, cboxIp: string | undefined = CBOX, now = Date.now()) =>
+  route(
+    new Request(base + "/request", {
+      method: "POST",
+      headers: ip ? { "cf-connecting-ip": ip } : {},
+      body: JSON.stringify({ job: "cf.token.zone.read", params, reason: "read the zone" }),
+    }),
+    store, { caller: "agent", requester: AGENT }, now, vault, cboxIp,
+  );
 
 test("minted key: pinned to the address Cloudflare saw, not one the agent names; Ben sees it on the approval screen", async () => {
   const { store } = await enrolled();
@@ -341,17 +345,17 @@ test("minted key: pinned to the address Cloudflare saw, not one the agent names;
   const g = await new Desk(store, { origin: base, rpID: "desk.example" }).grant(id);
   assert.deepEqual(g.params, { zone: ZONE, minutes: "10", ip: "203.0.113.7" });
   const page = await (await callV(store, fakeVault(true), `/approve/${id}`)).text();
-  assert.match(page, /expires after 10 minutes and works only from 203\.0\.113\.7/);
+  assert.match(page, /TEST key/);
+  assert.match(page, /not its DNS, not its settings/);
+  assert.match(page, /expires after 10 minutes and works only from the c-box \(203\.0\.113\.7\)/);
 });
 
-test("minted key: refused with no caller address, over 15 minutes, or another zone", async () => {
+test("minted key: refused over 15 minutes or for another zone", async () => {
   const { store } = await enrolled();
   for (const [params, ip] of [
-    [{ zone: ZONE, minutes: "10" }, undefined],
     [{ zone: ZONE, minutes: "16" }, "203.0.113.7"],
     [{ zone: ZONE, minutes: "015" }, "203.0.113.7"],
     [{ zone: "example.com", minutes: "5" }, "203.0.113.7"],
-    [{ zone: ZONE, minutes: "5" }, "2001:db8::1"],
   ] as const) {
     assert.deepEqual(await (await askKey(store, fakeVault(true), params, ip)).json(), { error: "bad_params" }, JSON.stringify([params, ip]));
   }
@@ -373,4 +377,32 @@ test("minted key: the secret reaches the agent once at collect, never Ben's scre
   assert.ok(!JSON.stringify(await desk.readLog()).includes(SECRET), "never logged");
   assert.ok(!JSON.stringify(await desk.grant(id)).includes(SECRET), "erased from storage after collect");
   assert.deepEqual(await (await callV(store, vault, `/collect/${id}`, { method: "POST" })).json(), { error: "already_collected" });
+});
+
+test("minted key: refused unless the request comes from the c-box address Ben set; refusals are logged", async () => {
+  const { store } = await enrolled();
+  assert.deepEqual(await (await askKey(store, fakeVault(true), { zone: ZONE, minutes: "5" }, "198.51.100.66")).json(), { error: "not_from_cbox" });
+  assert.deepEqual(await (await askKey(store, fakeVault(true), { zone: ZONE, minutes: "5" }, CBOX, "")).json(), { error: "cbox_ip_unset" });
+  const log = await new Desk(store, { origin: base, rpID: "desk.example" }).readLog();
+  assert.deepEqual(log.slice(-2).map((e) => e.detail), [
+    "cf.token.zone.read: asked from 198.51.100.66, not the c-box",
+    "cf.token.zone.read: CBOX_IP is not set",
+  ]);
+  // Other jobs do not need the c-box address.
+  assert.ok(await askProbe(store, fakeVault(true)));
+});
+
+test("minted key: a secret nobody collects is erased once the collect window has passed", async () => {
+  const { store, key } = await enrolled();
+  const vault = fakeVault(true);
+  vault.run = async () => ({ ok: true, zone: ZONE, key: { id: "k1", expires_on: "x", ip: CBOX, value: SECRET } }) as any;
+  const t0 = Date.now();
+  const { id } = (await (await askKey(store, vault, { zone: ZONE, minutes: "5" }, CBOX, CBOX, t0)).json()) as { id: string };
+  const opts = await optsIn(await callV(store, vault, `/approve/${id}`));
+  const answer = { ...(await key.assert(opts.challenge, "desk.example", base)), prf: prfOut(5) };
+  await callV(store, vault, `/approve/${id}`, { method: "POST", body: JSON.stringify(answer) });
+  const desk = new Desk(store, { origin: base, rpID: "desk.example" });
+  assert.ok(JSON.stringify(await desk.grant(id)).includes(SECRET), "held for the agent meanwhile");
+  await askKey(store, vault, { zone: ZONE, minutes: "5" }, CBOX, CBOX, Date.now() + 6 * 60_000);
+  assert.ok(!JSON.stringify(await desk.grant(id)).includes(SECRET), "erased at the next request after the window");
 });

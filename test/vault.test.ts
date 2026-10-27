@@ -246,6 +246,18 @@ test("minted key: read-only on one zone, expires in <=15 minutes, pinned to the 
   assert.ok(cf.tokens.some((t) => t.id === r.key!.id), "the key stays until it expires");
 });
 
+test("handed-out keys: a second mint is fine while the first is live; once expired, the next job deletes it", async () => {
+  const { vault, cf, clock } = await stored();
+  const first = await mint(vault, { zone: ZONE, minutes: "2", ip: CBOX });
+  const second = await mint(vault, { zone: ZONE, minutes: "2", ip: CBOX });
+  assert.equal(second.ok, true, JSON.stringify(second.audit));
+  assert.ok(cf.tokens.some((t) => t.id === first.key!.id), "not deleted while live");
+  clock.now += 3 * 60_000;
+  const p = await probe(vault);
+  assert.equal(p.ok, true, JSON.stringify(p));
+  assert.ok(!cf.tokens.some((t) => t.id === first.key!.id || t.id === second.key!.id), "both expired keys deleted");
+});
+
 test("minted key fails closed: if it worked off the pinned address, or anything else is off, it is deleted and not handed over", async () => {
   // offboxBroken: the off-box try failed for another reason, which proves nothing about the pin.
   for (const fail of ["offboxAllowed", "offboxBroken", "newToken"] as const) {

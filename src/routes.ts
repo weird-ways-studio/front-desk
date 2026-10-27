@@ -65,7 +65,7 @@ async function body<T>(request: Request, desk: Desk, what: string, now: number):
 }
 
 // The routes, kept apart from the Durable Object so tests can drive them.
-export async function route(request: Request, store: Store, who: Who, now = Date.now(), vault?: VaultApi): Promise<Response> {
+export async function route(request: Request, store: Store, who: Who, now = Date.now(), vault?: VaultApi, cboxIp?: string): Promise<Response> {
   const { caller, requester = "" } = who;
   const url = new URL(request.url);
   const desk = new Desk(store, { origin: url.origin, rpID: url.hostname }, { vault });
@@ -81,7 +81,7 @@ export async function route(request: Request, store: Store, who: Who, now = Date
     if (m === "GET" && url.pathname === "/health") return json({ ok: true, version: VERSION });
     if (m === "POST" && url.pathname === "/request") {
       // CF-Connecting-IP is set by Cloudflare's edge to the caller's address; a sent value is replaced.
-      const g = await desk.request(await request.json().catch(() => null), requester, now, request.headers.get("cf-connecting-ip") ?? undefined);
+      const g = await desk.request(await request.json().catch(() => null), requester, now, request.headers.get("cf-connecting-ip") ?? undefined, cboxIp);
       return json({ id: g.id, approve_url: `${url.origin}/approve/${g.id}`, expires_at: g.expires_at }, 201);
     }
     if (parts[0] === "approve" && parts.length === 2) {
