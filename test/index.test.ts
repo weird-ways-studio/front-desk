@@ -566,15 +566,25 @@ test("a request sends one push with its approve link; a failed push never fails 
   const push: Push = async (what, url) => { sent.push({ what, url }); };
   const ask = { method: "POST", body: JSON.stringify({ job: "test.echo", params: { word: "hi" }, reason: "x" }) };
   const res = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, push);
-  const out = (await res.json()) as { id: string; approve_url: string; pushed: boolean };
+  const out = (await res.json()) as { id: string; approve_url: string; pushed: boolean; push_error?: string };
   assert.equal(res.status, 201);
   assert.equal(out.pushed, true);
   assert.deepEqual(sent, [{ what: 'Test only: echo the word "hi". Touches nothing.', url: `${base}/approve/${out.id}` }]);
   const broken: Push = async () => { throw new Error("ntfy down"); };
   const res2 = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, broken);
   assert.equal(res2.status, 201);
-  assert.equal(((await res2.json()) as { pushed: boolean }).pushed, false, "the agent learns to send the link itself");
-  assert.equal(((await (await call(new MemoryStore(), "/request", ask)).json()) as { pushed: boolean }).pushed, false, "no topic set: pushed=false");
+  const out2 = (await res2.json()) as { pushed: boolean; push_error?: string };
+  assert.equal(out2.pushed, false, "the agent learns to send the link itself");
+  assert.equal(out2.push_error, "push failed", "and why, in fixed words only");
+  const leaky: Push = async () => { throw new Error("connect failed: https://ntfy.sh/secret-topic-name-here"); };
+  const res4 = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, leaky);
+  assert.ok(!(await res4.text()).includes("secret-topic"), "a thrown error never echoes the topic");
+  const refused: Push = async () => { throw new Error("ntfy answered 429"); };
+  const res5 = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, refused);
+  assert.equal(((await res5.json()) as { push_error?: string }).push_error, "ntfy answered 429");
+  const out3 = (await (await call(new MemoryStore(), "/request", ask)).json()) as { pushed: boolean; push_error?: string };
+  assert.deepEqual([out3.pushed, out3.push_error], [false, "no ntfy topic set"]);
+  assert.equal(out.push_error, undefined, "no error field when the push went");
 });
 
 test("a refused request sends no push", async () => {
