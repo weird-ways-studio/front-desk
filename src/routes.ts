@@ -1,9 +1,10 @@
 // The front desk's HTTP routes, kept apart from the Durable Object (index.ts)
 // so tests can drive them with an in-memory store.
 
-import { Desk, DeskError, withoutSecret, type Store } from "./desk.ts";
+import { Desk, DeskError, withoutSecret, type Source, type Store } from "./desk.ts";
+import { checkSignature } from "./cboxkey.ts";
 import type { VaultApi } from "../vault/src/api.ts";
-import { approvePage, enrollPage, logPage, prfCheckPage } from "./page.ts";
+import { approvePage, cboxKeyPage, enrollPage, logPage, prfCheckPage } from "./page.ts";
 
 export const VERSION = "0.7.0-minted-key";
 
@@ -30,7 +31,7 @@ export async function callerOf(access: ExecutionContext["access"], ownerEmail: s
 
 // Which caller each route needs. Ben enrolls, approves and reads the log; the agent asks and collects.
 function needs(m: string, parts: string[]): Caller | null {
-  if (parts[0] === "enroll" || parts[0] === "approve" || parts[0] === "log" || parts[0] === "prf-check") return "owner";
+  if (parts[0] === "enroll" || parts[0] === "approve" || parts[0] === "log" || parts[0] === "prf-check" || parts[0] === "cbox-key") return "owner";
   if ((m === "POST" && parts[0] === "request") || parts[0] === "collect") return "agent";
   return null;
 }
@@ -65,7 +66,7 @@ async function body<T>(request: Request, desk: Desk, what: string, now: number):
 }
 
 // The routes, kept apart from the Durable Object so tests can drive them.
-export async function route(request: Request, store: Store, who: Who, now = Date.now(), vault?: VaultApi, cboxIp?: string): Promise<Response> {
+export async function route(request: Request, store: Store, who: Who, now = Date.now(), vault?: VaultApi): Promise<Response> {
   const { caller, requester = "" } = who;
   const url = new URL(request.url);
   const desk = new Desk(store, { origin: url.origin, rpID: url.hostname }, { vault });
@@ -79,10 +80,17 @@ export async function route(request: Request, store: Store, who: Who, now = Date
       return json({ error: needed === "owner" ? "not_owner" : "not_agent" }, 403);
     }
     if (m === "GET" && url.pathname === "/health") return json({ ok: true, version: VERSION });
+    // Agent calls: the raw body is kept so the c-box signature can be checked over it. CF-Connecting-IP:
+    // for a direct request (not a Worker subrequest) Cloudflare's edge sets it to the caller's
+    // address; checked live by sending a forged value.
+    const text = m === "POST" && (parts[0] === "request" || parts[0] === "collect") ? await request.text() : "";
+    const source: Source = {
+      ip: request.headers.get("cf-connecting-ip") ?? undefined,
+      checkSignature: () => checkSignature(store, m, url.pathname, request.headers, text, now),
+    };
     if (m === "POST" && url.pathname === "/request") {
-      // CF-Connecting-IP: for a direct request (not a Worker subrequest) Cloudflare's edge sets it to the
-      // caller's address. Checked live by sending a forged value; desk.request compares it with CBOX_IP.
-      const g = await desk.request(await request.json().catch(() => null), requester, now, request.headers.get("cf-connecting-ip") ?? undefined, cboxIp);
+      const input = (() => { try { return JSON.parse(text); } catch { return null; } })();
+      const g = await desk.request(input, requester, now, source);
       return json({ id: g.id, approve_url: `${url.origin}/approve/${g.id}`, expires_at: g.expires_at }, 201);
     }
     if (parts[0] === "approve" && parts.length === 2) {
@@ -96,7 +104,7 @@ export async function route(request: Request, store: Store, who: Who, now = Date
       }
     }
     if (m === "POST" && parts[0] === "collect" && parts.length === 2) {
-      const { result } = await desk.collect(parts[1], requester, now);
+      const { result } = await desk.collect(parts[1], requester, now, source);
       return json({ ok: true, result });
     }
     if (url.pathname === "/enroll") {
@@ -109,6 +117,14 @@ export async function route(request: Request, store: Store, who: Who, now = Date
     if (url.pathname === "/prf-check") {
       if (m === "GET") return html(prfCheckPage(await desk.prfCheckOptions(now), nonce), nonce);
       if (m === "POST") return json({ ok: true, ...(await desk.prfCheck(await body(request, desk, "prf check", now), now)) });
+    }
+    if (url.pathname === "/cbox-key") {
+      if (m === "GET") return html(cboxKeyPage(await desk.cboxKey(), nonce), nonce);
+      // Removing only takes power away, so Ben's login is enough; the Origin check stops another site's form.
+      if (m === "POST") {
+        if (request.headers.get("origin") !== url.origin) return json({ error: "wrong_origin" }, 403);
+        return json({ ok: true, removed: await desk.removeCboxKey(now) });
+      }
     }
     if (m === "GET" && url.pathname === "/log") return html(logPage(await desk.readLog(), nonce), nonce);
     return json({ error: "not_found" }, 404);

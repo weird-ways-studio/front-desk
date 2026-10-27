@@ -19,16 +19,13 @@ interface Env extends AgentConfig {
   DESK: DurableObjectNamespace<FrontDesk>;
   // Set by Ben in the dashboard (kept across deploys by keep_vars). Unset = nobody is the owner.
   OWNER_EMAIL?: string;
-  // The c-box's public address, set by Ben in the dashboard (not secret, but kept out of this
-  // public repo). A key for the agent is made only for a request from this address. Unset = none.
-  CBOX_IP?: string;
   // The vault Worker (vault/), reached only through this service binding (wrangler.jsonc "services").
   VAULT: Service & VaultApi;
 }
 
 export class FrontDesk extends DurableObject<Env> {
   async handle(request: Request, who: Who): Promise<Response> {
-    return route(request, this.ctx.storage, who, Date.now(), this.env.VAULT, this.env.CBOX_IP?.trim());
+    return route(request, this.ctx.storage, who, Date.now(), this.env.VAULT);
   }
 }
 

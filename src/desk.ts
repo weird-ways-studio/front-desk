@@ -11,6 +11,7 @@ import {
   type RegistrationResponseJSON,
 } from "@simplewebauthn/server";
 import { JOBS, type Job, type JobName } from "./jobs.ts";
+import { currentKey, fingerprint, type CboxKey } from "./cboxkey.ts";
 import type { VaultApi } from "../vault/src/api.ts";
 
 export const APPROVE_WINDOW_MS = 10 * 60_000; // ask -> approve
@@ -27,9 +28,17 @@ export interface Store {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;
   list<T>(options: { prefix: string }): Promise<Map<string, T>>;
+  delete(key: string): Promise<boolean>;
 }
 
 export type GrantStatus = "pending" | "approved" | "collected";
+
+// Where an agent request came from: the address Cloudflare saw, and the route's check of the c-box
+// signature (cboxkey.ts), run only for jobs that hand out keys.
+export interface Source {
+  ip?: string;
+  checkSignature?: () => Promise<void>;
+}
 
 export interface Grant {
   id: string;
@@ -180,7 +189,7 @@ export class Desk {
     return g;
   }
 
-  async request(input: unknown, requester: string, now: number, clientIp?: string, cboxIp?: string): Promise<Grant> {
+  async request(input: unknown, requester: string, now: number, source: Source = {}): Promise<Grant> {
     await this.eraseStaleSecrets(now);
     const body = (input ?? {}) as { job?: unknown; params?: unknown; reason?: unknown };
     if (typeof body.job !== "string" || !Object.hasOwn(JOBS, body.job)) {
@@ -188,17 +197,18 @@ export class Desk {
       throw new DeskError("job_not_offered", 400);
     }
     const job = body.job as JobName;
-    // A key for the agent is made only for a request from the c-box's own address (Ben's CBOX_IP),
-    // so a stolen agent login used elsewhere gets nothing (Codex minted r1 #2).
-    if ((JOBS[job] as Job).pinIp && (!cboxIp || clientIp !== cboxIp)) {
-      const why = cboxIp ? `asked from ${String(clientIp).slice(0, 45)}, not the c-box` : "CBOX_IP is not set";
-      await this.log({ event: "refused", requester, job, detail: `${job}: ${why}` }, now);
-      throw new DeskError(cboxIp ? "not_from_cbox" : "cbox_ip_unset", 403);
-    }
+    // A key for the agent is made only for a request signed with the enrolled c-box key, so a
+    // stolen agent login used elsewhere gets nothing (Codex minted r1 #2, architecture review r1).
+    if ((JOBS[job] as Job).pinIp) await this.requireSigned(source, requester, job, now);
     // Whatever ip the agent sent is replaced with the address Cloudflare saw.
-    const asked = (JOBS[job] as Job).pinIp ? { ...((body.params ?? {}) as object), ip: clientIp } : body.params;
-    const params = JOBS[job].validate(asked);
+    const asked = (JOBS[job] as Job).pinIp ? { ...((body.params ?? {}) as object), ip: source.ip } : body.params;
+    const params: Record<string, string> | null = JOBS[job].validate(asked);
     if (!params) throw new DeskError("bad_params", 400);
+    if (job === "cbox.key.enroll") {
+      // Shown to Ben with what it replaces; approval is refused if that has changed since (stale request).
+      params.fingerprint = await fingerprint(params.key);
+      params.replaces = (await currentKey(this.store))?.fingerprint ?? "none";
+    }
     if (typeof body.reason !== "string" || !body.reason.trim() || body.reason.length > 200) {
       throw new DeskError("bad_reason", 400);
     }
@@ -308,6 +318,7 @@ export class Desk {
     const approved: Grant = { ...current, status: "approved", approved_at: now };
     await this.store.put(`grant:${g.id}`, approved);
     await this.log({ event: "approved", ...this.grantFacts(g) }, now);
+    if (g.job === "cbox.key.enroll") await this.enrollCboxKey(approved, now);
     if (!prf) return approved;
     // Committed as approved first, so a replay finds it not pending while the vault works.
     let result: unknown;
@@ -398,7 +409,7 @@ export class Desk {
   }
 
   // Marked collected before the job runs: two collects, or a crash mid-job, never run it twice.
-  async collect(id: string, requester: string, now: number): Promise<{ grant: Grant; result: unknown }> {
+  async collect(id: string, requester: string, now: number, source: Source = {}): Promise<{ grant: Grant; result: unknown }> {
     const g = await this.grant(id);
     if (g.requester !== requester) throw new DeskError("not_your_grant", 403);
     if (g.status === "pending") throw new DeskError("not_approved", 403);
@@ -409,6 +420,14 @@ export class Desk {
     }
     // A vault job is approved before the vault finishes; until its result is in, there is nothing to collect.
     if ((JOBS[g.job] as Job).vault && g.result === undefined) throw new DeskError("not_ready", 409);
+    // A key is handed only to a signed collect from the address it is pinned to (Codex architecture r1 #2).
+    if ((JOBS[g.job] as Job).pinIp) {
+      await this.requireSigned(source, requester, g.job, now);
+      if (source.ip !== g.params.ip) {
+        await this.log({ event: "refused", ...this.grantFacts(g), detail: `collect from ${String(source.ip).slice(0, 45)}, key is pinned to ${g.params.ip}` }, now);
+        throw new DeskError("address_changed", 409);
+      }
+    }
     // The stored copy loses the key's secret: it is handed over this once.
     const collected: Grant = { ...g, status: "collected", collected_at: now, result: withoutSecret(g.result) };
     await this.store.put(`grant:${g.id}`, collected);
@@ -418,10 +437,49 @@ export class Desk {
     return { grant: collected, result };
   }
 
+  // Runs the route's signature check; a failure is logged and refused.
+  private async requireSigned(source: Source, requester: string, job: string, now: number): Promise<void> {
+    try {
+      if (!source.checkSignature) throw new DeskError("not_signed", 401);
+      await source.checkSignature();
+    } catch (e) {
+      const code = e instanceof DeskError ? e.code : "bad_signature";
+      await this.log({ event: "refused", requester, job: job as JobName, detail: `${job}: ${code}` }, now);
+      throw e instanceof DeskError ? e : new DeskError(code, 401);
+    }
+  }
+
+  // At Ben's approval of cbox.key.enroll: stores the key, unless the key it was to replace has
+  // changed since the request (two enrollments approved out of order).
+  private async enrollCboxKey(g: Grant, now: number): Promise<void> {
+    const current = (await currentKey(this.store))?.fingerprint ?? "none";
+    if (current !== g.params.replaces) {
+      await this.log({ event: "refused", ...this.grantFacts(g), detail: `enroll: key changed since the request (now ${current})` }, now);
+      throw new DeskError("stale_enroll", 409);
+    }
+    await this.store.put<CboxKey>("cbox:key", { spki: g.params.key, fingerprint: g.params.fingerprint, enrolled_at: now, grant_id: g.id });
+    await this.log({ event: "cbox_key_enrolled", ...this.grantFacts(g), detail: `c-box key ${g.params.fingerprint}, replaces ${current}` }, now);
+  }
+
+  /** Ben removes the c-box key (lost or stolen box): every signed request is refused until a new one is enrolled. */
+  async removeCboxKey(now: number): Promise<string> {
+    const k = await currentKey(this.store);
+    if (!k) throw new DeskError("no_cbox_key", 404);
+    await this.store.put("cbox:key", null);
+    await this.log({ event: "cbox_key_removed", detail: `c-box key ${k.fingerprint} removed by Ben` }, now);
+    return k.fingerprint;
+  }
+
+  async cboxKey(): Promise<CboxKey | undefined> {
+    return currentKey(this.store);
+  }
+
   // A minted key's secret not collected within the collect window is erased (Codex minted r1 #5).
   // Runs at each new /request and at a late collect -- not on page views -- so with no further
   // requests it stays stored (the key itself still expires within 15 minutes).
   private async eraseStaleSecrets(now: number): Promise<void> {
+    // Remembered signed messages are dropped once their window is over (they can no longer pass anyway).
+    for (const [k, until] of await this.store.list<number>({ prefix: "sig:" })) if (until < now) await this.store.delete(k);
     for (const [k, g] of await this.store.list<Grant>({ prefix: "grant:" })) {
       if (g.status === "approved" && now > (g.approved_at ?? 0) + COLLECT_WINDOW_MS && withoutSecret(g.result) !== g.result) {
         await this.store.put(k, { ...g, result: withoutSecret(g.result) });
@@ -529,6 +587,9 @@ export class MemoryStore implements Store {
   }
   async put<T>(key: string, value: T) {
     this.data.set(key, structuredClone(value));
+  }
+  async delete(key: string) {
+    return this.data.delete(key);
   }
   async list<T>({ prefix }: { prefix: string }) {
     const keys = [...this.data.keys()].filter((k) => k.startsWith(prefix)).sort();

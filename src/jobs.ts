@@ -4,6 +4,7 @@
 
 import { STUDIO_ZONES } from "../vault/src/zones.ts";
 import { MAX_KEY_MINUTES, isIPv4 } from "../vault/src/vault.ts";
+import { isP256Spki } from "./cboxkey.ts";
 
 export interface Job {
   // What Ben sees on the approval screen, built from the stored grant.
@@ -35,6 +36,16 @@ export const JOBS = {
       return typeof zone === "string" && STUDIO_ZONES.includes(zone) ? { zone } : null;
     },
     vault: true,
+  },
+  // Ben's approval stores the key (Desk.enrollCboxKey); the front desk adds fingerprint and replaces.
+  "cbox.key.enroll": {
+    describe: (p) =>
+      `Enroll the c-box signing key with fingerprint ${p.fingerprint}${p.replaces === "none" ? "" : `, REPLACING key ${p.replaces}`}. Requests signed with it count as coming from the c-box. Only approve if the agent just showed you this same fingerprint in chat. A request you did not expect may mean the agent's login was stolen.`,
+    validate: (params) => {
+      const key = (params as { key?: unknown } | null)?.key;
+      return isP256Spki(key) ? ({ key } as Record<string, string>) : null;
+    },
+    run: async (p) => ({ enrolled: p.fingerprint }),
   },
   "cf.token.zone.read": {
     describe: (p) =>
