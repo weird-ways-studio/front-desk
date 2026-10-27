@@ -575,7 +575,13 @@ test("a request sends one push with its approve link; a failed push never fails 
   assert.equal(res2.status, 201);
   const out2 = (await res2.json()) as { pushed: boolean; push_error?: string };
   assert.equal(out2.pushed, false, "the agent learns to send the link itself");
-  assert.equal(out2.push_error, "ntfy down", "and why");
+  assert.equal(out2.push_error, "push failed", "and why, in fixed words only");
+  const leaky: Push = async () => { throw new Error("connect failed: https://ntfy.sh/secret-topic-name-here"); };
+  const res4 = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, leaky);
+  assert.ok(!(await res4.text()).includes("secret-topic"), "a thrown error never echoes the topic");
+  const refused: Push = async () => { throw new Error("ntfy answered 429"); };
+  const res5 = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, refused);
+  assert.equal(((await res5.json()) as { push_error?: string }).push_error, "ntfy answered 429");
   const out3 = (await (await call(new MemoryStore(), "/request", ask)).json()) as { pushed: boolean; push_error?: string };
   assert.deepEqual([out3.pushed, out3.push_error], [false, "no ntfy topic set"]);
   assert.equal(out.push_error, undefined, "no error field when the push went");
