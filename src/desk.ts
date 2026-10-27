@@ -12,7 +12,7 @@ import {
 } from "@simplewebauthn/server";
 import { JOBS, type Job, type JobName } from "./jobs.ts";
 import { currentKey, fingerprint, keyRev, type CboxKey } from "./cboxkey.ts";
-import type { VaultApi } from "../vault/src/api.ts";
+import type { Headcount, VaultApi } from "../vault/src/api.ts";
 
 export const APPROVE_WINDOW_MS = 10 * 60_000; // ask -> approve
 export const COLLECT_WINDOW_MS = 5 * 60_000; // approve -> collect
@@ -136,6 +136,19 @@ function canonical(value: unknown): string {
 export async function grantHash(g: Pick<Grant, "id" | "job" | "params" | "requester" | "expires_at">): Promise<string> {
   const fixed = { id: g.id, job: g.job, params: g.params, requester: g.requester, expires_at: g.expires_at };
   return hex(await sha256(enc.encode(canonical(fixed))));
+}
+
+// Tells the off-box alarm the night's result (headcountAlarm below: healthchecks.io).
+// Throws when the alarm did not take it.
+export type Alarm = (ok: boolean, detail: string) => Promise<void>;
+
+/** Pings healthchecks.io: the check URL for all-clear, its /fail with the detail otherwise. */
+export function headcountAlarm(url: string | undefined, fetchFn: typeof fetch = fetch): Alarm | undefined {
+  if (!url || !/^https:\/\/hc-ping\.com\/[0-9a-f-]{36}$/.test(url.trim())) return undefined;
+  return async (ok, detail) => {
+    const res = await fetchFn(ok ? url.trim() : `${url.trim()}/fail`, { method: "POST", body: detail });
+    if (!res.ok) throw new Error(`healthchecks answered ${res.status}`);
+  };
 }
 
 // Test seam: lets a test pause an approval between verification and commit.
@@ -359,6 +372,31 @@ export class Desk {
     const done: Grant = { ...latest, result };
     await this.store.put(`grant:${g.id}`, done);
     return done;
+  }
+
+  /**
+   * The nightly key count (cron, src/index.ts scheduled; card C5c-2 3baea7cc). Asks the vault to
+   * count, logs the answer for Ben's /log, then tells the alarm: all-clear only when the count is
+   * clean, a fail with the detail otherwise. A night with no all-clear -- a mismatch, an error, or
+   * no run at all -- is what alerts Ben's phone, from healthchecks.io, off the c-box.
+   */
+  async headcount(alarm: Alarm | undefined, now: number): Promise<Headcount> {
+    let r: Headcount;
+    try {
+      if (!this.hooks.vault) throw new Error("vault not connected");
+      r = await this.hooks.vault.headcount();
+    } catch (e) {
+      r = { ok: false, tokens: -1, unexpected: [], stretched: [], missing: [], error: (e as Error).message.slice(0, 120) };
+    }
+    const detail = r.ok ? `ok: ${r.tokens} keys, all expected` : `MISMATCH: ${JSON.stringify(r).slice(0, LOG_DETAIL_MAX)}`;
+    await this.log({ event: r.ok ? "headcount_ok" : "headcount_mismatch", detail }, now);
+    try {
+      if (!alarm) throw new Error("no alarm configured");
+      await alarm(r.ok, detail);
+    } catch (e) {
+      await this.log({ event: "headcount_alarm_failed", detail: (e as Error).message.slice(0, 120) }, now);
+    }
+    return r;
   }
 
   // Checks Ben's passkey answer against a challenge already taken. Every failure is logged through `fail`.

@@ -58,6 +58,13 @@ export const JOBS = {
     vault: true,
     pinIp: true,
   },
+  // The vault mints the nightly headcount's own key (vault/src/vault.ts setupHeadcount). Card C5c-2.
+  "cf.token.headcount.setup": {
+    describe: () =>
+      `Make the nightly headcount key: it can LIST the names of every Cloudflare key in the studio account, and nothing else -- it cannot make, change or delete keys, and cannot read their secrets. It does not expire and is kept inside the vault so the count can run each night without you. This is a new standing key, by your choice. Before keeping it, the vault checks that it is refused when it tries to make a key. Running this again replaces it.`,
+    validate: (params) => (params && typeof params === "object" && Object.keys(params).length === 0 ? {} : null),
+    vault: true,
+  },
 } satisfies Record<string, Job>;
 
 export type JobName = keyof typeof JOBS;

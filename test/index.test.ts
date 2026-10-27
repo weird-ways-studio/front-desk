@@ -243,6 +243,9 @@ function fakeVault(stored = false) {
       calls.push({ op: "run", args: [job, params, prf] });
       return { ok: true, zone: "example.com", after: 0 } as any;
     },
+    async headcount() {
+      return { ok: true, tokens: 0, unexpected: [], stretched: [], missing: [] };
+    },
   };
 }
 const callV = (store: MemoryStore, vault: ReturnType<typeof fakeVault>, path: string, init?: RequestInit, caller = callerFor(path, init)) =>

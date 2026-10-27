@@ -3,7 +3,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { APPROVE_WINDOW_MS, CHALLENGE_TTL_MS, COLLECT_WINDOW_MS, Desk, DeskError, MemoryStore, type DeskHooks } from "../src/desk.ts";
+import { APPROVE_WINDOW_MS, CHALLENGE_TTL_MS, COLLECT_WINDOW_MS, Desk, DeskError, MemoryStore, headcountAlarm, type DeskHooks } from "../src/desk.ts";
+import { JOBS } from "../src/jobs.ts";
+import type { Headcount } from "../vault/src/api.ts";
 import { SoftKey } from "./softkey.ts";
 
 const site = { origin: "https://desk.example", rpID: "desk.example" };
@@ -252,4 +254,72 @@ test("log detail stays valid JSON and says when it shortened a long token list",
   assert.equal(parsed.truncated, true);
   assert.deepEqual(parsed.audit.new_since_setup, { first: ids.slice(0, 10), total: 300 });
   assert.equal(parsed.ok, false);
+});
+
+// Nightly headcount (C5c-2 3baea7cc): the desk logs the vault's count and tells the alarm.
+const clean: Headcount = { ok: true, tokens: 5, unexpected: [], stretched: [], missing: [] };
+function headcountDesk(answer: () => Promise<Headcount>) {
+  const store = new MemoryStore();
+  const vault = { status: async () => ({ stored: true, pending: false }), run: async () => ({}) as any, headcount: answer };
+  const told: { ok: boolean; detail: string }[] = [];
+  const alarm = async (ok: boolean, detail: string) => void told.push({ ok, detail });
+  return { desk: new Desk(store, site, { vault }), told, alarm };
+}
+
+test("headcount: a clean night logs 'headcount_ok' and sends the all-clear", async () => {
+  const { desk, told, alarm } = headcountDesk(async () => clean);
+  await desk.headcount(alarm, T0);
+  assert.deepEqual(told, [{ ok: true, detail: "ok: 5 keys, all expected" }]);
+  const [row] = await desk.readLog();
+  assert.equal(row.event, "headcount_ok");
+});
+
+test("headcount: a planted key fails the alarm, naming the key, and is logged", async () => {
+  const { desk, told, alarm } = headcountDesk(async () => ({ ...clean, ok: false, unexpected: [{ id: "planted1", name: "x" }] }));
+  await desk.headcount(alarm, T0);
+  assert.equal(told[0].ok, false);
+  assert.match(told[0].detail, /planted1/);
+  assert.equal((await desk.readLog())[0].event, "headcount_mismatch");
+});
+
+test("headcount: a vault error is a fail, never an all-clear", async () => {
+  const { desk, told, alarm } = headcountDesk(async () => {
+    throw new Error("vault down");
+  });
+  await desk.headcount(alarm, T0);
+  assert.equal(told[0].ok, false);
+  assert.match(told[0].detail, /vault down/);
+});
+
+test("headcount: no alarm, or an alarm that fails, is logged", async () => {
+  const a = headcountDesk(async () => clean);
+  await a.desk.headcount(undefined, T0);
+  assert.deepEqual((await a.desk.readLog()).map((e) => e.event), ["headcount_ok", "headcount_alarm_failed"]);
+  const b = headcountDesk(async () => clean);
+  await b.desk.headcount(async () => {
+    throw new Error("healthchecks answered 503");
+  }, T0);
+  assert.match((await b.desk.readLog())[1].detail ?? "", /503/);
+});
+
+test("headcount alarm: pings the check URL for all-clear and /fail with the detail; refuses other URLs", async () => {
+  const hc = "https://hc-ping.com/0f2e8a4c-1b2d-4e5f-8a9b-0c1d2e3f4a5b";
+  const sent: { url: string; body: unknown }[] = [];
+  const fetchFn = (async (url: string, init?: RequestInit) => (sent.push({ url, body: init?.body }), new Response("OK"))) as typeof fetch;
+  await headcountAlarm(hc, fetchFn)!(true, "ok");
+  await headcountAlarm(hc, fetchFn)!(false, "MISMATCH planted1");
+  assert.deepEqual(sent, [{ url: hc, body: "ok" }, { url: `${hc}/fail`, body: "MISMATCH planted1" }]);
+  for (const bad of [undefined, "", "http://hc-ping.com/0f2e8a4c-1b2d-4e5f-8a9b-0c1d2e3f4a5b", "https://evil.example/0f2e8a4c-1b2d-4e5f-8a9b-0c1d2e3f4a5b"])
+    assert.equal(headcountAlarm(bad, fetchFn), undefined);
+  const down = (async () => new Response("", { status: 503 })) as unknown as typeof fetch;
+  await assert.rejects(headcountAlarm(hc, down)!(true, "ok"), /503/);
+});
+
+test("headcount setup job: takes no parameters and says it is a standing key", () => {
+  const job = JOBS["cf.token.headcount.setup"];
+  assert.deepEqual(job.validate({}), {});
+  assert.equal(job.validate({ zone: "benculbert.com" }), null);
+  assert.equal(job.validate(null), null);
+  assert.match(job.describe(), /standing key/);
+  assert.equal(job.vault, true);
 });

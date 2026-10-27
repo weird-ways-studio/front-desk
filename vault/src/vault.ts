@@ -40,6 +40,38 @@ interface Master {
   issued?: { id: string; expires_on: string }[];
 }
 
+// The nightly headcount's own key: it can list the account's keys and nothing else. Minted once by
+// the Ben-approved job cf.token.headcount.setup, then kept in vault storage UNSEALED, because the
+// nightly run has no Ben tap to open anything with (C5c-2 3baea7cc; C5c-1 retro learning 4).
+// A standing credential by Ben's choice on that job's screen; it holds no power to mint or change.
+interface HeadcountKey {
+  token_id: string;
+  value: string;
+  made_at: number;
+}
+
+export interface HeadcountSetupResult {
+  ok: boolean; // true only when the new key could list and was refused a mint
+  master: { token_id: string; locked_to_passkey_now: boolean };
+  key_id: string | null;
+  lists: boolean;
+  mint_refused: boolean;
+  mint_error?: string;
+  replaced: string | null; // the previous headcount key, deleted
+  error?: string;
+}
+
+export interface Headcount {
+  ok: boolean; // true only when every listed key is expected, none outlives its recorded expiry, none is missing
+  tokens: number;
+  unexpected: { id: string; name: string }[];
+  // Handed-out keys whose listed expiry is later than the one the vault recorded when it made them.
+  stretched: { id: string; expires_on: string }[];
+  // The master and the headcount key must be on the list; a list without them is not the account's.
+  missing: string[];
+  error?: string;
+}
+
 export interface ProbeResult {
   ok: boolean; // true only when every step below checked out
   master: { token_id: string; locked_to_passkey_now: boolean };
@@ -150,8 +182,9 @@ export class VaultLogic {
   }
 
   /** Runs one job from the fixed list with the master key opened by Ben's passkey secret. */
-  async run(job: string, params: Record<string, string>, prf: string): Promise<ProbeResult | MintResult> {
-    if (job !== "cf.dns.txt.probe" && job !== "cf.token.zone.read") throw new VaultError("job_not_offered");
+  async run(job: string, params: Record<string, string>, prf: string): Promise<ProbeResult | MintResult | HeadcountSetupResult> {
+    if (job !== "cf.dns.txt.probe" && job !== "cf.token.zone.read" && job !== "cf.token.headcount.setup") throw new VaultError("job_not_offered");
+    if (job === "cf.token.headcount.setup") return this.runHeadcountSetup(prf);
     if (!STUDIO_ZONES.includes(params?.zone ?? "")) throw new VaultError("zone_not_offered");
     // Checked here too, not only at the front desk: the vault is the last word on what it mints.
     if (job === "cf.token.zone.read" && (!isMinutes(params.minutes) || !isIPv4(params.ip))) throw new VaultError("bad_params");
@@ -163,6 +196,98 @@ export class VaultLogic {
     m.issued = await this.sweepIssued(master, m);
     if (job === "cf.dns.txt.probe") return { ...(await this.probe(master, m, params.zone)), master: facts };
     return { ...(await this.mintReadKey(master, m, params.zone, Number(params.minutes), params.ip)), master: facts };
+  }
+
+  private async runHeadcountSetup(prf: string): Promise<HeadcountSetupResult> {
+    const m = await this.master();
+    if (!m) throw new VaultError("no_master_key");
+    const { token, lockedNow } = await this.unlock(m, prf);
+    const master = new Cloudflare(token, this.fetch);
+    m.issued = await this.sweepIssued(master, m);
+    return { ...(await this.setupHeadcount(master, m)), master: { token_id: m.token_id, locked_to_passkey_now: lockedNow } };
+  }
+
+  // Makes the headcount key: account-wide "API Tokens Read", no expiry, no address pin (the nightly
+  // run leaves from Cloudflare's network, whose address varies). Before keeping it, the vault needs
+  // it to list keys and to be refused a mint; otherwise it is deleted and the old one kept.
+  private async setupHeadcount(master: Cloudflare, m: Master): Promise<Omit<HeadcountSetupResult, "master">> {
+    const account = m.account_id;
+    const r: Omit<HeadcountSetupResult, "master"> = { ok: false, key_id: null, lists: false, mint_refused: false, replaced: null };
+    let value: string | undefined;
+    try {
+      const groups = await master.call<{ id: string; name: string; scopes: string[] }[]>("GET", `/accounts/${account}/tokens/permission_groups`);
+      const read = groups.filter((g) => TOKENS_READ.test(g.name) && g.scopes.includes("com.cloudflare.api.account"));
+      if (read.length !== 1) throw new VaultError("permission_group_unclear: API Tokens Read");
+      const made = await master.call<{ id: string; value: string }>("POST", `/accounts/${account}/tokens`, {
+        name: `front-desk headcount ${isoSeconds(this.now())}`,
+        policies: [{ effect: "allow", resources: { [`com.cloudflare.api.account.${account}`]: "*" }, permission_groups: [{ id: read[0].id }] }],
+      });
+      r.key_id = made.id;
+      value = made.value;
+      const cf = new Cloudflare(made.value, this.fetch);
+      r.lists = (await listTokens(cf, account)).some((t) => t.id === made.id);
+      try {
+        const leaked = await cf.call<{ id: string }>("POST", `/accounts/${account}/tokens`, {
+          name: "front-desk headcount must-fail", policies: [], expires_on: isoSeconds(this.now() + PROBE_TOKEN_MS),
+        });
+        r.mint_error = "headcount key could mint";
+        await master.call("DELETE", `/accounts/${account}/tokens/${leaked.id}`).catch((e: Error) => note(r, `leaked key delete failed: ${e.message}`));
+      } catch (e) {
+        // Only Cloudflare's permission refusal counts; an outage proves nothing about the key.
+        r.mint_error = (e as Error).message.slice(0, 120);
+        r.mint_refused = /^cf_403\b/.test(r.mint_error);
+      }
+    } catch (e) {
+      note(r, (e as Error).message);
+    }
+    r.ok = !r.error && !!r.key_id && r.lists && r.mint_refused;
+    if (!r.ok) {
+      if (r.key_id) await master.call("DELETE", `/accounts/${account}/tokens/${r.key_id}`).catch((e: Error) => note(r, `key delete failed: ${e.message}`));
+      return r;
+    }
+    const old = await this.store.get<HeadcountKey | null>("headcount");
+    await this.store.put<HeadcountKey>("headcount", { token_id: r.key_id!, value: value!, made_at: this.now() });
+    if (old) {
+      await master.call("DELETE", `/accounts/${account}/tokens/${old.token_id}`).then(
+        () => (r.replaced = old.token_id),
+        (e: Error) => note(r, `old headcount key delete failed: ${e.message}`),
+      );
+    }
+    return r;
+  }
+
+  // The headcount key is known to every job's audit, so making it does not stop later jobs.
+  private async headcountId(): Promise<string[]> {
+    const hc = await this.store.get<HeadcountKey | null>("headcount");
+    return hc ? [hc.token_id] : [];
+  }
+
+  /**
+   * The nightly count (no Ben tap): lists every key with the headcount key and compares with what
+   * the vault expects -- the setup baseline, the master, the headcount key itself, and keys handed
+   * out and not yet deleted (Cloudflare keeps expired keys listed). Reads only; changes nothing.
+   */
+  async headcount(): Promise<Headcount> {
+    const r: Headcount = { ok: false, tokens: -1, unexpected: [], stretched: [], missing: [] };
+    try {
+      const m = await this.master();
+      if (!m?.by_passkey) throw new VaultError("no_master_key");
+      const hc = await this.store.get<HeadcountKey | null>("headcount");
+      if (!hc) throw new VaultError("headcount_not_set_up");
+      const listed = await listTokens(new Cloudflare(hc.value, this.fetch), m.account_id);
+      r.tokens = listed.length;
+      const issued = new Map((m.issued ?? []).map((k) => [k.id, k.expires_on]));
+      const known = new Set([...m.baseline, m.token_id, hc.token_id, ...issued.keys()]);
+      r.unexpected = listed.filter((t) => !known.has(t.id)).map((t) => ({ id: t.id, name: String(t.name ?? "").slice(0, 60) }));
+      r.stretched = listed
+        .filter((t) => issued.has(t.id) && (!t.expires_on || Date.parse(t.expires_on) > Date.parse(issued.get(t.id)!)))
+        .map((t) => ({ id: t.id, expires_on: t.expires_on ?? "never" }));
+      r.missing = [m.token_id, hc.token_id].filter((id) => !listed.some((t) => t.id === id));
+      r.ok = r.unexpected.length === 0 && r.stretched.length === 0 && r.missing.length === 0;
+    } catch (e) {
+      note(r, (e as Error).message);
+    }
+    return r;
   }
 
   // Mints a short key, uses it, and always deletes it (its expiry is the backstop).
@@ -217,7 +342,7 @@ export class VaultLogic {
     } catch (e) {
       note(r, (e as Error).message);
     }
-    await audit(master, m, r);
+    await audit(master, m, r, [], await this.headcountId());
     r.ok =
       !r.error && !r.audit.error && r.before === 0 && r.added && r.seen_after_add && r.removed && r.after === 0 &&
       r.minted.length === 2 && r.minted.every((t) => t.deleted) && r.audit.minted_still_listed.length === 0 && r.audit.new_since_setup.length === 0;
@@ -292,7 +417,7 @@ export class VaultLogic {
     } catch (e) {
       note(r, (e as Error).message);
     }
-    await audit(master, m, r, r.key ? [r.key.id] : []);
+    await audit(master, m, r, r.key ? [r.key.id] : [], await this.headcountId());
     r.ok =
       !r.error && !r.audit.error && !!r.key && r.offbox_refused && r.minted.length === 1 && r.minted.every((t) => t.deleted) &&
       r.audit.minted_still_listed.length === 0 && r.audit.new_since_setup.length === 0;
@@ -323,13 +448,14 @@ async function zoneGroups(master: Cloudflare, account: string): Promise<(name: s
 }
 
 // Lists every token in the account and compares with the setup baseline (Ben's QB check).
-// `expected` are ids that should be new: the key just handed over, if any.
-async function audit(master: Cloudflare, m: Master, r: Evidence, expected: string[] = []): Promise<void> {
+// `expected` are ids that should be new: the key just handed over, if any. `standing` are other keys
+// the vault made on purpose (the headcount key).
+async function audit(master: Cloudflare, m: Master, r: Evidence, expected: string[] = [], standing: string[] = []): Promise<void> {
   try {
     const ids = (await listTokens(master, m.account_id)).map((t) => t.id);
     r.audit.tokens = ids.length;
     r.audit.minted_still_listed = r.minted.map((t) => t.id).filter((id) => ids.includes(id));
-    const known = [...expected, ...(m.issued ?? []).map((k) => k.id)];
+    const known = [...expected, ...standing, ...(m.issued ?? []).map((k) => k.id)];
     r.audit.new_since_setup = ids.filter((id) => !m.baseline.includes(id) && !known.includes(id));
     if (expected.some((id) => !ids.includes(id))) note(r, "minted key not listed");
   } catch (e) {
@@ -341,11 +467,17 @@ function note(r: { error?: string }, message: string): void {
   r.error = `${r.error ? `${r.error}; ` : ""}${message.slice(0, 120)}`;
 }
 
+// The account-level permission group the headcount key gets (FROM MEMORY: "Account API Tokens Read";
+// the first live setup records the exact name, and this is narrowed to it).
+export const TOKENS_READ = /^(Account )?API Tokens Read$/;
+
+type Listed = { id: string; name?: string; expires_on?: string };
+
 // Every token in the account, all pages.
-async function listTokens(cf: Cloudflare, account: string): Promise<{ id: string }[]> {
-  const all: { id: string }[] = [];
+async function listTokens(cf: Cloudflare, account: string): Promise<Listed[]> {
+  const all: Listed[] = [];
   for (let page = 1; page <= 20; page++) {
-    const batch = await cf.call<{ id: string }[]>("GET", `/accounts/${account}/tokens?per_page=50&page=${page}`);
+    const batch = await cf.call<Listed[]>("GET", `/accounts/${account}/tokens?per_page=50&page=${page}`);
     all.push(...batch);
     if (batch.length < 50) return all;
   }
