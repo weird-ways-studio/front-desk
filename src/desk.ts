@@ -149,7 +149,7 @@ export type Alarm = (ok: boolean, detail: string) => Promise<void>;
  */
 export function headcountAlarm(url: string | undefined, ntfyUrl?: string, fetchFn: typeof fetch = fetch): Alarm | undefined {
   if (!url || !/^https:\/\/hc-ping\.com\/[0-9a-f-]{36}$/.test(url.trim())) return undefined;
-  const ntfy = ntfyUrl && /^https:\/\/ntfy\.sh\/[A-Za-z0-9_-]{16,64}$/.test(ntfyUrl.trim()) ? ntfyUrl.trim() : undefined;
+  const ntfy = ntfyTopic(ntfyUrl);
   return async (ok, detail) => {
     const res = await fetchFn(ok ? url.trim() : `${url.trim()}/fail`, { method: "POST", body: detail });
     if (!res.ok) throw new Error(`healthchecks answered ${res.status}`);
@@ -157,6 +157,27 @@ export function headcountAlarm(url: string | undefined, ntfyUrl?: string, fetchF
     if (!ntfy) throw new Error("no ntfy topic set: the phone alert will not name the keys");
     const push = await fetchFn(ntfy, { method: "POST", body: detail.slice(0, 3000), headers: { Title: "Front desk: key headcount MISMATCH", Priority: "high" } });
     if (!push.ok) throw new Error(`ntfy answered ${push.status}`);
+  };
+}
+
+/** The ntfy topic URL if it is a well-formed ntfy.sh topic, else undefined. */
+function ntfyTopic(ntfyUrl: string | undefined): string | undefined {
+  return ntfyUrl && /^https:\/\/ntfy\.sh\/[A-Za-z0-9_-]{16,64}$/.test(ntfyUrl.trim()) ? ntfyUrl.trim() : undefined;
+}
+
+// Tells Ben's phone a request is waiting; a tap opens its approve page. Throws when ntfy did not take it.
+export type Push = (what: string, approveUrl: string) => Promise<void>;
+
+/**
+ * One ntfy push per request (card a830d543). It carries what is asked and the approve link, never a
+ * secret: the link still needs Ben's Access login and his passkey. MAX_PENDING bounds how many can arrive.
+ */
+export function approvalPush(ntfyUrl: string | undefined, fetchFn: typeof fetch = fetch): Push | undefined {
+  const ntfy = ntfyTopic(ntfyUrl);
+  if (!ntfy) return undefined;
+  return async (what, approveUrl) => {
+    const res = await fetchFn(ntfy, { method: "POST", body: what.slice(0, 300), headers: { Title: "Front desk: approve?", Click: approveUrl, Priority: "high" } });
+    if (!res.ok) throw new Error(`ntfy answered ${res.status}`);
   };
 }
 

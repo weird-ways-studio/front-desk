@@ -4,7 +4,7 @@ import { signRequest } from "../scripts/agent.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { callerOf, route, VERSION, type Caller } from "../src/routes.ts";
-import { Desk, MemoryStore } from "../src/desk.ts";
+import { Desk, MemoryStore, approvalPush, type Push } from "../src/desk.ts";
 import { SoftKey } from "./softkey.ts";
 
 const base = "https://desk.example";
@@ -56,6 +56,7 @@ test("over HTTP: enroll, ask, approve, collect; page shows stored grant, quotes 
   assert.ok(pageHtml.includes('Test only: echo the word &quot;hi&quot;'));
   assert.ok(pageHtml.includes("&lt;script&gt;alert(1)&lt;/script&gt; please"));
   assert.ok(!pageHtml.includes("<script>alert(1)"));
+  assert.ok(pageHtml.includes("Login: your <strong>front desk passkey</strong>"), "the screen names the login it wants (a830d543)");
   const opts = JSON.parse(pageHtml.match(/const opts=(\{.*?\});\n/)![1]);
   const ok = await call(store, `/approve/${id}`, { method: "POST", body: JSON.stringify(await key.assert(opts.challenge, "desk.example", base)) });
   assert.equal(ok.status, 200);
@@ -557,4 +558,46 @@ test("c-box key: removed while a signature is being checked -- the request is st
   racing.get = async <T,>(k: string) => (k === "cbox:key" && ++reads > 1 ? (null as T) : store.get<T>(k));
   const res = await askKey(racing, fakeVault(true), { zone: ZONE, minutes: "5" }, { ip: CBOX, pem: cbox.pem });
   assert.deepEqual(await res.json(), { error: "no_cbox_key" });
+});
+
+// Card a830d543: every request reaches Ben's phone as one push whose tap opens its approve page.
+test("a request sends one push with its approve link; a failed push never fails the request", async () => {
+  const sent: { what: string; url: string }[] = [];
+  const push: Push = async (what, url) => { sent.push({ what, url }); };
+  const ask = { method: "POST", body: JSON.stringify({ job: "test.echo", params: { word: "hi" }, reason: "x" }) };
+  const res = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, push);
+  const out = (await res.json()) as { id: string; approve_url: string; pushed: boolean };
+  assert.equal(res.status, 201);
+  assert.equal(out.pushed, true);
+  assert.deepEqual(sent, [{ what: 'Test only: echo the word "hi". Touches nothing.', url: `${base}/approve/${out.id}` }]);
+  const broken: Push = async () => { throw new Error("ntfy down"); };
+  const res2 = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, broken);
+  assert.equal(res2.status, 201);
+  assert.equal(((await res2.json()) as { pushed: boolean }).pushed, false, "the agent learns to send the link itself");
+  assert.equal(((await (await call(new MemoryStore(), "/request", ask)).json()) as { pushed: boolean }).pushed, false, "no topic set: pushed=false");
+});
+
+test("a refused request sends no push", async () => {
+  let pushes = 0;
+  const push: Push = async () => { pushes++; };
+  const res = await route(new Request(base + "/request", { method: "POST", body: JSON.stringify({ job: "no.such.job", reason: "x" }) }), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, push);
+  assert.equal(res.status, 400);
+  const owner = await route(new Request(base + "/request", { method: "POST", body: "{}" }), new MemoryStore(), { caller: "owner" }, Date.now(), undefined, push);
+  assert.equal(owner.status, 403);
+  assert.equal(pushes, 0);
+});
+
+test("approvalPush posts to a real ntfy topic only, with the link as the tap target and no secret", async () => {
+  const sent: { url: string; body: string; headers: Record<string, string> }[] = [];
+  const fetchFn = (async (url: string, init: RequestInit) => {
+    sent.push({ url, body: String(init.body), headers: init.headers as Record<string, string> });
+    return new Response("", { status: 200 });
+  }) as unknown as typeof fetch;
+  const topic = "https://ntfy.sh/topic-name-long-enough";
+  await approvalPush(topic, fetchFn)!("Echo the word \"hi\"", `${base}/approve/abc`);
+  assert.deepEqual(sent, [{ url: topic, body: 'Echo the word "hi"', headers: { Title: "Front desk: approve?", Click: `${base}/approve/abc`, Priority: "high" } }]);
+  for (const bad of [undefined, "", "http://ntfy.sh/topic-name-long-enough", "https://evil.example/topic-name-long-enough", "https://ntfy.sh/short"])
+    assert.equal(approvalPush(bad, fetchFn), undefined);
+  const down = (async () => new Response("", { status: 502 })) as unknown as typeof fetch;
+  await assert.rejects(approvalPush(topic, down)!("x", "y"), /ntfy answered 502/);
 });

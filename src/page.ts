@@ -50,6 +50,7 @@ export function approvePage(g: Grant, options: unknown, nonce: string): string {
 <p><strong>${esc(describe)}</strong></p>
 <p class="muted">Job <code>${esc(g.job)}</code> · asked by ${esc(g.requester)} · expires ${new Date(g.expires_at).toISOString().slice(11, 16)} UTC</p>
 <p class="muted">The agent's words:</p><blockquote>${esc(g.reason)}</blockquote>
+<p class="muted">Login: your <strong>front desk passkey</strong>. Face ID offers only that one.</p>
 <button id="go">Next: approve with Face ID</button><pre id="after" class="muted" style="white-space:pre-wrap"></pre>`,
     `const opts=${JSON.stringify(options)};
 document.getElementById('go').onclick=async e=>{e.target.disabled=true;

@@ -1,12 +1,13 @@
 // The front desk's HTTP routes, kept apart from the Durable Object (index.ts)
 // so tests can drive them with an in-memory store.
 
-import { Desk, DeskError, withoutSecret, type Source, type Store } from "./desk.ts";
+import { Desk, DeskError, withoutSecret, type Push, type Source, type Store } from "./desk.ts";
+import { JOBS } from "./jobs.ts";
 import { checkSignature } from "./cboxkey.ts";
 import type { VaultApi } from "../vault/src/api.ts";
 import { approvePage, cboxKeyPage, enrollPage, logPage, prfCheckPage } from "./page.ts";
 
-export const VERSION = "0.8.0-headcount";
+export const VERSION = "0.9.0-approval-push";
 
 // Who is calling, worked out by the Worker from Cloudflare Access (index.ts):
 // owner from Ben's email (callerOf), agent from the service-token ticket (agent.ts).
@@ -66,7 +67,7 @@ async function body<T>(request: Request, desk: Desk, what: string, now: number):
 }
 
 // The routes, kept apart from the Durable Object so tests can drive them.
-export async function route(request: Request, store: Store, who: Who, now = Date.now(), vault?: VaultApi): Promise<Response> {
+export async function route(request: Request, store: Store, who: Who, now = Date.now(), vault?: VaultApi, push?: Push): Promise<Response> {
   const { caller, requester = "" } = who;
   const url = new URL(request.url);
   const desk = new Desk(store, { origin: url.origin, rpID: url.hostname }, { vault });
@@ -91,7 +92,10 @@ export async function route(request: Request, store: Store, who: Who, now = Date
     if (m === "POST" && url.pathname === "/request") {
       const input = (() => { try { return JSON.parse(text); } catch { return null; } })();
       const g = await desk.request(input, requester, now, source);
-      return json({ id: g.id, approve_url: `${url.origin}/approve/${g.id}`, expires_at: g.expires_at }, 201);
+      const approveUrl = `${url.origin}/approve/${g.id}`;
+      // A failed push never fails the request: the agent sees pushed=false and sends Ben the link itself.
+      const pushed = push ? await push(JOBS[g.job].describe(g.params), approveUrl).then(() => true, () => false) : false;
+      return json({ id: g.id, approve_url: approveUrl, expires_at: g.expires_at, pushed }, 201);
     }
     if (parts[0] === "approve" && parts.length === 2) {
       if (m === "GET") {
