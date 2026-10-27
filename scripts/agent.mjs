@@ -4,6 +4,7 @@
 //
 //   node scripts/agent.mjs keygen                 makes the key (once), prints its public half + fingerprint
 //   node scripts/agent.mjs post <url> [json]      POST with the Access login and the c-box signature
+//   node scripts/agent.mjs wait <collect-url> [minutes]  collects as soon as Ben approves (default 15 min)
 //
 // The private key file (default ~/.config/front-desk/cbox-key.pem, mode 0600) stays on the c-box and is
 // never put in 1Password or a repo. The Access login comes from CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET
@@ -33,6 +34,16 @@ export function signRequest(keyPem, method, path, body, time = Date.now()) {
   return { "x-cbox-time": String(time), "x-cbox-signature": b64url(sig) };
 }
 
+/** POST with the Access login and a fresh c-box signature (a new one each call, so waits can re-send). */
+async function post(url, body) {
+  const id = process.env.CF_ACCESS_CLIENT_ID, secret = process.env.CF_ACCESS_CLIENT_SECRET;
+  if (!id || !secret) throw new Error("CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET must be set");
+  const u = new URL(url);
+  const headers = { "content-type": "application/json", "cf-access-client-id": id, "cf-access-client-secret": secret,
+    ...signRequest(readFileSync(KEY), "POST", u.pathname, body) };
+  return fetch(u, { method: "POST", headers, body });
+}
+
 async function main([cmd, url, body = ""]) {
   if (cmd === "keygen") {
     if (existsSync(KEY)) throw new Error(`${KEY} exists; remove it first to make a new key`);
@@ -43,17 +54,27 @@ async function main([cmd, url, body = ""]) {
     console.log(JSON.stringify({ key: b64url(spki), fingerprint: fingerprint(spki) }));
     return;
   }
+  if (cmd === "wait" && url) {
+    // Ben approves on his phone; the agent learns it here, no relay, inside the 5-minute collect window.
+    const until = Date.now() + Number(body || 15) * 60_000;
+    for (;;) {
+      const res = await post(url, "");
+      const text = await res.text();
+      const waiting = (res.status === 403 && text.includes("not_approved")) || (res.status === 409 && text.includes("not_ready"));
+      if (!waiting || Date.now() > until) {
+        console.log(res.status, waiting ? `still waiting after ${body || 15} min` : text);
+        if (!res.ok) process.exit(1);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 5_000));
+    }
+  }
   if (cmd === "post" && url) {
-    const id = process.env.CF_ACCESS_CLIENT_ID, secret = process.env.CF_ACCESS_CLIENT_SECRET;
-    if (!id || !secret) throw new Error("CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET must be set");
-    const u = new URL(url);
-    const headers = { "content-type": "application/json", "cf-access-client-id": id, "cf-access-client-secret": secret,
-      ...signRequest(readFileSync(KEY), "POST", u.pathname, body) };
-    const res = await fetch(u, { method: "POST", headers, body });
+    const res = await post(url, body);
     console.log(res.status, await res.text());
     return;
   }
-  throw new Error("usage: agent.mjs keygen | agent.mjs post <url> [json]");
+  throw new Error("usage: agent.mjs keygen | agent.mjs post <url> [json] | agent.mjs wait <collect-url> [minutes]");
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) main(process.argv.slice(2)).catch((e) => { console.error(e.message); process.exit(1); });
