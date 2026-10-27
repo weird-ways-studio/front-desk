@@ -7,7 +7,7 @@ import { checkSignature } from "./cboxkey.ts";
 import type { VaultApi } from "../vault/src/api.ts";
 import { approvePage, cboxKeyPage, enrollPage, logPage, prfCheckPage } from "./page.ts";
 
-export const VERSION = "0.9.0-approval-push";
+export const VERSION = "0.9.1-push-reason";
 
 // Who is calling, worked out by the Worker from Cloudflare Access (index.ts):
 // owner from Ben's email (callerOf), agent from the service-token ticket (agent.ts).
@@ -93,9 +93,9 @@ export async function route(request: Request, store: Store, who: Who, now = Date
       const input = (() => { try { return JSON.parse(text); } catch { return null; } })();
       const g = await desk.request(input, requester, now, source);
       const approveUrl = `${url.origin}/approve/${g.id}`;
-      // A failed push never fails the request: the agent sees pushed=false and sends Ben the link itself.
-      const pushed = push ? await push(JOBS[g.job].describe(g.params), approveUrl).then(() => true, () => false) : false;
-      return json({ id: g.id, approve_url: approveUrl, expires_at: g.expires_at, pushed }, 201);
+      // A failed push never fails the request: the agent sees pushed=false, and why, and sends Ben the link itself.
+      const why = push ? await push(JOBS[g.job].describe(g.params), approveUrl).then(() => "", (e: Error) => e.message.slice(0, 80)) : "no ntfy topic set";
+      return json({ id: g.id, approve_url: approveUrl, expires_at: g.expires_at, pushed: !why, ...(why ? { push_error: why } : {}) }, 201);
     }
     if (parts[0] === "approve" && parts.length === 2) {
       if (m === "GET") {
