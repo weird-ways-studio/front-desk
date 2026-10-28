@@ -246,7 +246,7 @@ function fakeVault(stored = false) {
       return { ok: true, zone: "example.com", after: 0 } as any;
     },
     async headcount() {
-      return { ok: true, tokens: 0, unexpected: [], stretched: [], missing: [] };
+      return { ok: true, tokens: 0, unexpected: [], stretched: [], missing: [], github: { ok: true, changes: [] } };
     },
   };
 }

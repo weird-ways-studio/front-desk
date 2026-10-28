@@ -5,6 +5,7 @@
 
 import { Cloudflare, type Fetch } from "./cloudflare.ts";
 import { STUDIO_ZONES } from "./zones.ts";
+import { GitHub, appJwt, checkInstallation, convert, diff, installationKey, pkcs8FromPem, snapshot, type AppKind, type GhSnapshot } from "./github.ts";
 import { MASTER_LABEL, RECOVERY_LABEL, VaultError, b64url, fromB64url, open, seal, secretBytes, type Sealed } from "./seal.ts";
 
 export const PROBE_TOKEN_MS = 5 * 60_000;
@@ -18,6 +19,18 @@ export const PROBE_RECORD = "_front-desk-probe";
 // Setup waits this long for Ben's first Face ID tap to lock the key to his passkey.
 export const PENDING_MS = 30 * 60_000;
 const PENDING_LABEL = "front-desk pending-key v1";
+// GitHub (card C6a-1): the main App's key is locked to Ben's passkey under its own label, so a
+// box sealed for the Cloudflare master never opens as the GitHub key, or the reverse.
+export const GH_LABEL = "github-app-key v1";
+// Creating and installing two Apps, then the agent's request and Ben's tap, take longer than the
+// Cloudflare paste; the main key waits sealed under a one-time key for at most this long.
+export const GH_PENDING_MS = 60 * 60_000;
+// GitHub's manifest code is good for one hour; the vault's matching `state` lasts as long.
+export const GH_STATE_MS = 60 * 60_000;
+// How GitHub refuses an installation key with permissions the App was not given (FROM MEMORY:
+// 422 "The permissions requested are not granted to this installation."; the first live run records
+// the exact text, and this is narrowed to it). Anything else -- an outage -- proves nothing.
+export const GH_ESCALATION_REFUSAL = /^gh_(422|403): .*permission/i;
 
 export interface VaultStore {
   get<T>(key: string): Promise<T | undefined>;
@@ -64,14 +77,40 @@ export interface HeadcountSetupResult {
   error?: string;
 }
 
+// The GitHub Apps. Ids and names are not secrets. The headcount App's key is kept unsealed for the
+// nightly run (no Ben tap), and it only reads; the main App's key is sealed like the master.
+interface GhApp {
+  id: number;
+  slug: string;
+  installation?: number;
+}
+interface GhHeadcountApp extends GhApp {
+  key: string; // PKCS#8, base64url
+}
+interface GhMainApp extends GhApp {
+  by_passkey?: Sealed;
+  pending?: { key: string; box: Sealed; until: number };
+}
+
+export interface GhBaselineResult {
+  ok: boolean; // true only when both Apps work, the read-only App was refused write, and the list was taken
+  main: { app_id: number; locked_to_passkey_now: boolean; key_works: boolean };
+  headcount: { app_id: number; write_refused: boolean; write_error?: string };
+  counts: Record<string, number>;
+  changes: string[]; // against the previous expected list ("first list" the first time)
+  error?: string;
+}
+
 export interface Headcount {
-  ok: boolean; // true only when every listed key is expected, none outlives its recorded expiry, none is missing
+  ok: boolean; // true only when every listed key is expected, none outlives its recorded expiry, none is missing, and GitHub matches
   tokens: number;
   unexpected: { id: string; name: string }[];
   // Handed-out keys whose listed expiry is later than the one the vault recorded when it made them.
   stretched: { id: string; expires_on: string }[];
   // The master and the headcount key must be on the list; a list without them is not the account's.
   missing: string[];
+  // GitHub against the list Ben accepted with job gh.app.baseline: every addition or removal.
+  github: { ok: boolean; changes: string[]; error?: string };
   error?: string;
 }
 
@@ -185,9 +224,10 @@ export class VaultLogic {
   }
 
   /** Runs one job from the fixed list with the master key opened by Ben's passkey secret. */
-  async run(job: string, params: Record<string, string>, prf: string): Promise<ProbeResult | MintResult | HeadcountSetupResult> {
-    if (job !== "cf.dns.txt.probe" && job !== "cf.token.zone.read" && job !== "cf.token.headcount.setup") throw new VaultError("job_not_offered");
+  async run(job: string, params: Record<string, string>, prf: string): Promise<ProbeResult | MintResult | HeadcountSetupResult | GhBaselineResult> {
+    if (job !== "cf.dns.txt.probe" && job !== "cf.token.zone.read" && job !== "cf.token.headcount.setup" && job !== "gh.app.baseline") throw new VaultError("job_not_offered");
     if (job === "cf.token.headcount.setup") return this.runHeadcountSetup(prf);
+    if (job === "gh.app.baseline") return this.ghBaseline(prf);
     if (!STUDIO_ZONES.includes(params?.zone ?? "")) throw new VaultError("zone_not_offered");
     // Checked here too, not only at the front desk: the vault is the last word on what it mints.
     if (job === "cf.token.zone.read" && (!isMinutes(params.minutes) || !isIPv4(params.ip))) throw new VaultError("bad_params");
@@ -284,7 +324,7 @@ export class VaultLogic {
    * out and not yet deleted (Cloudflare keeps expired keys listed). Reads only; changes nothing.
    */
   async headcount(): Promise<Headcount> {
-    const r: Headcount = { ok: false, tokens: -1, unexpected: [], stretched: [], missing: [] };
+    const r: Headcount = { ok: false, tokens: -1, unexpected: [], stretched: [], missing: [], github: await this.ghHeadcount() };
     try {
       const m = await this.master();
       if (!m?.by_passkey) throw new VaultError("no_master_key");
@@ -299,7 +339,158 @@ export class VaultLogic {
         .filter((t) => issued.has(t.id) && (!t.expires_on || Date.parse(t.expires_on) > Date.parse(issued.get(t.id)!)))
         .map((t) => ({ id: t.id, expires_on: t.expires_on ?? "never" }));
       r.missing = [m.token_id, hc.token_id].filter((id) => !listed.some((t) => t.id === id));
-      r.ok = r.unexpected.length === 0 && r.stretched.length === 0 && r.missing.length === 0;
+      r.ok = r.unexpected.length === 0 && r.stretched.length === 0 && r.missing.length === 0 && r.github.ok;
+    } catch (e) {
+      note(r, (e as Error).message);
+    }
+    return r;
+  }
+
+  // ---- GitHub (card C6a-1). Setup runs on the vault's own page (ghsetup.ts); the rest at Ben's tap or nightly. ----
+
+  /** Which Apps exist, are installed, and whether the main key is locked to Ben's passkey (for the setup page). */
+  async ghStatus(): Promise<{ headcount: { created: boolean; installed: boolean }; main: { created: boolean; installed: boolean; locked: boolean } }> {
+    const hc = await this.store.get<GhHeadcountApp | null>("gh.app.headcount");
+    const main = await this.ghMain();
+    return {
+      headcount: { created: !!hc, installed: !!hc?.installation },
+      main: { created: !!main, installed: !!main?.installation, locked: !!main?.by_passkey },
+    };
+  }
+
+  // The main App, or nothing if its one-time hold lapsed before Ben's tap (then erased, as for the master).
+  private async ghMain(): Promise<GhMainApp | undefined> {
+    const m = await this.store.get<GhMainApp | null>("gh.app.main");
+    if (!m) return undefined;
+    if (!m.by_passkey && (!m.pending || this.now() > m.pending.until)) {
+      await this.store.put("gh.app.main", null);
+      return undefined;
+    }
+    return m;
+  }
+
+  /** Starts making one App: a one-hour `state` the redirect must bring back. Refused once that App exists. */
+  async ghStart(kind: AppKind): Promise<string> {
+    if ((await this.ghStatus())[kind].created) throw new VaultError("app_exists");
+    const state = b64url(crypto.getRandomValues(new Uint8Array(24)));
+    await this.store.put(`gh.state.${kind}`, { state, until: this.now() + GH_STATE_MS });
+    return state;
+  }
+
+  /**
+   * GitHub's redirect after Ben tapped Create: the vault trades the code for the App and its key at once,
+   * so the key goes GitHub -> vault and nowhere else. Only the `state` this vault issued is accepted.
+   */
+  async ghCreated(kind: AppKind, code: string, state: string): Promise<{ slug: string }> {
+    const issued = await this.store.get<{ state: string; until: number } | null>(`gh.state.${kind}`);
+    if (!issued || issued.state !== state || this.now() > issued.until) throw new VaultError("bad_state");
+    await this.store.put(`gh.state.${kind}`, null);
+    if ((await this.ghStatus())[kind].created) throw new VaultError("app_exists");
+    const app = await convert(code, this.fetch);
+    const key = pkcs8FromPem(app.pem);
+    await appJwt(app.id, key, this.now()); // refuses a key WebCrypto cannot use, before anything is stored
+    if (kind === "headcount") {
+      await this.store.put<GhHeadcountApp>("gh.app.headcount", { id: app.id, slug: app.slug, key });
+    } else {
+      const once = crypto.getRandomValues(new Uint8Array(32));
+      const pending = { key: b64url(once), box: await seal(once, GH_LABEL, key), until: this.now() + GH_PENDING_MS };
+      await this.store.put<GhMainApp>("gh.app.main", { id: app.id, slug: app.slug, pending });
+    }
+    return { slug: app.slug };
+  }
+
+  /** GitHub's redirect after Ben tapped Install: checked with the App's own sign-in, never taken on trust. */
+  async ghInstalled(kind: AppKind, installationId: string): Promise<void> {
+    if (!/^\d{1,12}$/.test(installationId)) throw new VaultError("bad_installation");
+    const app = kind === "headcount" ? await this.store.get<GhHeadcountApp | null>("gh.app.headcount") : await this.ghMain();
+    if (!app) throw new VaultError("no_app");
+    if (app.installation) throw new VaultError("already_installed");
+    let key: string;
+    if (kind === "headcount") key = (app as GhHeadcountApp).key;
+    else {
+      const p = (app as GhMainApp).pending;
+      if (!p) throw new VaultError("already_locked");
+      key = await open(fromB64url(p.key), GH_LABEL, p.box);
+    }
+    await checkInstallation(new GitHub(await appJwt(app.id, key, this.now()), this.fetch), Number(installationId));
+    const now = await this.store.get<GhApp | null>(`gh.app.${kind}`);
+    if (!now || now.id !== app.id) throw new VaultError("no_app");
+    await this.store.put(`gh.app.${kind}`, { ...now, installation: Number(installationId) });
+  }
+
+  // A one-hour read key from the headcount App, used, then revoked (expiry is the backstop).
+  private async ghRead<T>(hc: GhHeadcountApp, use: (gh: GitHub) => Promise<T>): Promise<T> {
+    const app = new GitHub(await appJwt(hc.id, hc.key, this.now()), this.fetch);
+    const k = await installationKey(app, hc.installation!);
+    const gh = new GitHub(k.token, this.fetch);
+    try {
+      return await use(gh);
+    } finally {
+      await gh.call("DELETE", "/installation/token").catch(() => undefined);
+    }
+  }
+
+  /**
+   * Job gh.app.baseline, at Ben's tap. First time: locks the main App's key to his passkey and forgets
+   * the one-time key. Every time: proves the main key works (a one-hour key, revoked at once), proves the
+   * headcount App is refused write, and records what can reach the org as the list the nightly count expects.
+   */
+  private async ghBaseline(prf: string): Promise<GhBaselineResult> {
+    const secret = secretBytes(prf);
+    const hc = await this.store.get<GhHeadcountApp | null>("gh.app.headcount");
+    const main = await this.ghMain();
+    if (!hc?.installation || !main?.installation) throw new VaultError("github_not_set_up");
+    const r: GhBaselineResult = {
+      ok: false, main: { app_id: main.id, locked_to_passkey_now: false, key_works: false },
+      headcount: { app_id: hc.id, write_refused: false }, counts: {}, changes: [],
+    };
+    let key: string;
+    if (main.by_passkey) key = await open(secret, GH_LABEL, main.by_passkey);
+    else {
+      key = await open(fromB64url(main.pending!.key), GH_LABEL, main.pending!.box);
+      const locked: GhMainApp = { ...main, by_passkey: await seal(secret, GH_LABEL, key) };
+      delete locked.pending;
+      const now = await this.store.get<GhMainApp | null>("gh.app.main");
+      if (!now?.pending || now.pending.key !== main.pending!.key) throw new VaultError("already_locked");
+      await this.store.put("gh.app.main", locked);
+      r.main.locked_to_passkey_now = true;
+    }
+    try {
+      const app = new GitHub(await appJwt(main.id, key, this.now()), this.fetch);
+      const k = await installationKey(app, main.installation, { permissions: { metadata: "read" } });
+      await new GitHub(k.token, this.fetch).call("DELETE", "/installation/token");
+      r.main.key_works = true;
+      const hcApp = new GitHub(await appJwt(hc.id, hc.key, this.now()), this.fetch);
+      try {
+        const leaked = await installationKey(hcApp, hc.installation, { permissions: { administration: "write" } });
+        r.headcount.write_error = "headcount App was given write";
+        await new GitHub(leaked.token, this.fetch).call("DELETE", "/installation/token").catch(() => undefined);
+      } catch (e) {
+        r.headcount.write_error = (e as Error).message.slice(0, 120);
+        r.headcount.write_refused = GH_ESCALATION_REFUSAL.test(r.headcount.write_error);
+      }
+      if (!r.headcount.write_refused) throw new VaultError("headcount App not refused write: list not recorded");
+      const snap = await this.ghRead(hc, snapshot);
+      const old = await this.store.get<GhSnapshot | null>("gh.baseline");
+      r.changes = old ? diff(old, snap) : ["first list"];
+      r.counts = Object.fromEntries(Object.entries(snap).map(([k, v]) => [k, v.length]));
+      await this.store.put("gh.baseline", snap);
+      r.ok = true;
+    } catch (e) {
+      note(r, (e as Error).message);
+    }
+    return r;
+  }
+
+  // The nightly GitHub count: what can reach the org now, against the list Ben accepted. Reads only.
+  private async ghHeadcount(): Promise<Headcount["github"]> {
+    const r: Headcount["github"] = { ok: false, changes: [] };
+    try {
+      const base = await this.store.get<GhSnapshot | null>("gh.baseline");
+      const hc = await this.store.get<GhHeadcountApp | null>("gh.app.headcount");
+      if (!base || !hc?.installation) throw new VaultError("github_not_set_up");
+      r.changes = diff(base, await this.ghRead(hc, snapshot));
+      r.ok = r.changes.length === 0;
     } catch (e) {
       note(r, (e as Error).message);
     }

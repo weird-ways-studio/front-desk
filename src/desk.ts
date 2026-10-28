@@ -437,7 +437,7 @@ export class Desk {
       if (!this.hooks.vault) throw new Error("vault not connected");
       r = await this.hooks.vault.headcount();
     } catch (e) {
-      r = { ok: false, tokens: -1, unexpected: [], stretched: [], missing: [], error: (e as Error).message.slice(0, 120) };
+      r = { ok: false, tokens: -1, unexpected: [], stretched: [], missing: [], github: { ok: false, changes: [] }, error: (e as Error).message.slice(0, 120) };
     }
     const detail = r.ok ? `ok: ${r.tokens} keys, all expected` : `MISMATCH: ${JSON.stringify(r).slice(0, LOG_DETAIL_MAX)}`;
     await this.log({ event: r.ok ? "headcount_ok" : "headcount_mismatch", detail }, now);

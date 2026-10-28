@@ -8,6 +8,7 @@
 // ticket carries no email, so "has an email" means Ben. Read from ctx.access (runtime, no library).
 
 import type { VaultLogic } from "./vault.ts";
+import { handleGithub } from "./ghsetup.ts";
 
 const HEADERS = {
   "content-type": "text/html; charset=utf-8",
@@ -27,14 +28,15 @@ h1{font-size:26px}.big{font-size:28px;font-weight:700}.pass{color:#4ade80}.fail{
 textarea{width:100%;font-size:16px;box-sizing:border-box}button{width:100%;font-size:20px;padding:16px;border:0;border-radius:12px;background:#3b82f6;color:#fff;margin-top:16px}
 .key{font:20px/1.6 ui-monospace,monospace;word-break:break-all}`;
 
-const esc = (t: string) => t.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+export const esc = (t: string) => t.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 
-function page(body: string, status = 200): Response {
+export function page(body: string, status = 200, title = "Store the master key", formAction = "'self'"): Response {
+  const headers = { ...HEADERS, "content-security-policy": HEADERS["content-security-policy"].replace("form-action 'self'", `form-action ${formAction}`) };
   return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex,nofollow"><title>Store the master key</title><style>${STYLE}</style></head><body>${body}</body></html>`, { status, headers: HEADERS });
+<meta name="robots" content="noindex,nofollow"><title>${title}</title><style>${STYLE}</style></head><body>${body}</body></html>`, { status, headers });
 }
 
-const notFound = () => new Response("not found", { status: 404, headers: { "x-robots-tag": "noindex, nofollow", "cache-control": "no-store" } });
+export const notFound = () => new Response("not found", { status: 404, headers: { "x-robots-tag": "noindex, nofollow", "cache-control": "no-store" } });
 
 /** Ben's email from the Access login, or "" for the agent, a failed lookup, or no login. */
 export async function emailOf(access: ExecutionContext["access"]): Promise<string> {
@@ -48,6 +50,7 @@ export async function emailOf(access: ExecutionContext["access"]): Promise<strin
 /** Handles every request to the vault's address. */
 export async function handleSetup(request: Request, logic: VaultLogic, email: string): Promise<Response> {
   const url = new URL(request.url);
+  if (url.pathname === "/github" || url.pathname.startsWith("/github/")) return handleGithub(request, logic, email);
   if (url.pathname !== "/setup") return notFound();
   const status = await logic.status();
   if (status.stored || status.pending) return notFound();
