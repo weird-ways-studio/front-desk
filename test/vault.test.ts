@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { MemoryStore } from "../src/desk.ts";
 import { MASTER_LABEL, RECOVERY_LABEL, open, seal, b64url, fromB64url } from "../vault/src/seal.ts";
-import { PENDING_MS, PROBE_TOKEN_MS, VaultLogic, type HeadcountSetupResult, type MintResult, type ProbeResult } from "../vault/src/vault.ts";
+import { PENDING_MS, PROBE_TOKEN_MS, VaultLogic, type Headcount, type HeadcountSetupResult, type MintResult, type ProbeResult } from "../vault/src/vault.ts";
 import { handleSetup } from "../vault/src/setup.ts";
 
 const ACCOUNT = "a".repeat(32);
@@ -150,7 +150,7 @@ test("first Face ID tap locks the key to the passkey and forgets the one-time ke
 test("two first taps at once: only one locks the key, and the other cannot replace it", async () => {
   const { store, vault } = await stored();
   const results = await Promise.allSettled([vault.run("cf.dns.txt.probe", { zone: ZONE }, prf(1)), vault.run("cf.dns.txt.probe", { zone: ZONE }, prf(2))]);
-  const won = results.filter((r) => r.status === "fulfilled" && r.value.master.locked_to_passkey_now);
+  const won = results.filter((r) => r.status === "fulfilled" && (r.value as ProbeResult).master.locked_to_passkey_now);
   const lost = results.filter((r) => r.status === "rejected" && /already_locked/.test(String(r.reason)));
   assert.equal(won.length, 1);
   assert.equal(lost.length, 1);
@@ -380,6 +380,8 @@ test("deploy-vault.sh deploys the vault only in Workers Builds, on a real deploy
 });
 
 // Nightly headcount (C5c-2 3baea7cc): its own list-only key, then a count with no tap.
+// The Cloudflare half of a night is clean (the GitHub half has its own tests: github.test.ts).
+const cfClean = (r: Headcount) => !r.error && r.unexpected.length === 0 && r.stretched.length === 0 && r.missing.length === 0;
 const hcSetup = (vault: VaultLogic) => vault.run("cf.token.headcount.setup", {}, prf(7)) as Promise<HeadcountSetupResult>;
 
 test("headcount setup: keeps a key that lists and is refused a mint; account-wide read only, no expiry", async () => {
@@ -424,7 +426,8 @@ test("headcount: a clean account counts ok, using only the list-only key", async
   await hcSetup(vault);
   cf.calls.length = 0;
   const r = await vault.headcount();
-  assert.deepEqual(r, { ok: true, tokens: 4, unexpected: [], stretched: [], missing: [] });
+  // Cloudflare is clean; GitHub is not set up in these tests, so the night as a whole fails closed.
+  assert.deepEqual(r, { ok: false, tokens: 4, unexpected: [], stretched: [], missing: [], github: { ok: false, changes: [], error: "github_not_set_up" } });
   assert.ok(cf.calls.every((c) => cf.listOnly.has(c.token) && c.method === "GET"), "reads only, never with the master");
 });
 
@@ -443,7 +446,7 @@ test("headcount: a handed-out key is expected even after expiry, until its expir
   const minted = (await vault.run("cf.token.zone.read", { zone: ZONE, minutes: "5", ip: "198.51.100.7" }, prf(7))) as MintResult;
   assert.equal(minted.ok, true, JSON.stringify(minted).slice(0, 400));
   clock.now += 60 * 60_000; // expired, still listed: Cloudflare keeps it until the next job sweeps it
-  assert.equal((await vault.headcount()).ok, true);
+  assert.ok(cfClean(await vault.headcount()));
   cf.tokens.find((t) => t.id === minted.key!.id)!.expires_on = "2027-01-01T00:00:00Z";
   const r = await vault.headcount();
   assert.equal(r.ok, false);
@@ -493,5 +496,5 @@ test("headcount setup again: an old key that will not delete makes the result no
   assert.equal(third.ok, true);
   assert.ok(third.replaced.includes(first.key_id!));
   assert.deepEqual((await store.get<any>("headcount")).retired, []);
-  assert.equal((await vault.headcount()).ok, true);
+  assert.ok(cfClean(await vault.headcount()));
 });

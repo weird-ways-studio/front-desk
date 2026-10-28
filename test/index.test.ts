@@ -246,7 +246,10 @@ function fakeVault(stored = false) {
       return { ok: true, zone: "example.com", after: 0 } as any;
     },
     async headcount() {
-      return { ok: true, tokens: 0, unexpected: [], stretched: [], missing: [] };
+      return { ok: true, tokens: 0, unexpected: [], stretched: [], missing: [], github: { ok: true, changes: [] } };
+    },
+    async ghPreview() {
+      return { changes: ["members +someone"], snapshot: "s".repeat(64), base: "b".repeat(64) };
     },
   };
 }
@@ -643,4 +646,26 @@ test("a request's push_error passes both services' refusals through", async () =
   const both: Push = async () => { throw new Error("pushover answered 429; ntfy answered 429"); };
   const res = await route(new Request(base + "/request", { method: "POST", body: JSON.stringify({ job: "test.echo", params: { word: "hi" }, reason: "x" }) }), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, both);
   assert.equal(((await res.json()) as { push_error?: string }).push_error, "pushover answered 429; ntfy answered 429");
+});
+
+// C6a-1 (Codex r1 #4): the GitHub list job shows Ben exactly what his tap accepts.
+test("gh.app.baseline: the front desk adds the vault's changes and snapshot; Ben's screen lists every change", async () => {
+  const { store } = await enrolled();
+  const vault = fakeVault(true);
+  const res = await agentPost(store, vault, "/request", { job: "gh.app.baseline", params: {}, reason: "record the GitHub list" });
+  assert.equal(res.status, 201);
+  const { id } = (await res.json()) as { id: string };
+  const g = await store.get<any>(`grant:${id}`);
+  assert.deepEqual(g.params, { changes: "members +someone", snapshot: "s".repeat(64), base: "b".repeat(64) });
+  assert.match(await (await callV(store, vault, `/approve/${id}`)).text(), /members \+someone/);
+  const forged = await agentPost(store, vault, "/request", { job: "gh.app.baseline", params: { snapshot: "x" }, reason: "x" });
+  assert.equal(forged.status, 400, "the agent cannot choose the snapshot");
+});
+
+test("gh.app.baseline: refused at request when the vault cannot read GitHub", async () => {
+  const { store } = await enrolled();
+  const vault = { ...fakeVault(true), ghPreview: async () => Promise.reject(new Error("github_not_set_up")) };
+  const res = await agentPost(store, vault, "/request", { job: "gh.app.baseline", params: {}, reason: "x" });
+  assert.equal(res.status, 502);
+  assert.match(await res.text(), /github_preview_failed: github_not_set_up/);
 });

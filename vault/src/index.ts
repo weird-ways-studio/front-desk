@@ -31,6 +31,9 @@ export class VaultBox extends DurableObject<Env> {
   headcount() {
     return this.logic().headcount();
   }
+  ghPreview() {
+    return this.logic().ghPreview();
+  }
 }
 
 /** What the front desk calls (types: vault/src/api.ts), plus the setup page. */
@@ -50,5 +53,9 @@ export default class Vault extends WorkerEntrypoint<Env> {
   // The nightly count, called by the front desk's cron (../../src/index.ts scheduled). No tap; reads only.
   headcount() {
     return this.box().headcount();
+  }
+  // What job gh.app.baseline would accept, for Ben's approval screen (called at /request). Reads only.
+  ghPreview() {
+    return this.box().ghPreview();
   }
 }

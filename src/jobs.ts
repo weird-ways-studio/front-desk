@@ -65,6 +65,14 @@ export const JOBS = {
     validate: (params) => (params && typeof params === "object" && Object.keys(params).length === 0 ? {} : null),
     vault: true,
   },
+  // The vault locks the GitHub App key and records the nightly count's expected list (vault/src/vault.ts ghBaseline). Card C6a-1.
+  "gh.app.baseline": {
+    describe: (p) =>
+      `GitHub: the first time, lock the main GitHub App's key to your passkey. Then accept what can reach the weird-ways-studio organization right now as what the nightly headcount expects. Approving accepts EXACTLY these changes since the last accepted list (+ added, - gone):\n${p.changes}\nIf you do not recognise every line, do not approve: it may be someone else's access. If GitHub changes before you tap, nothing is accepted.`,
+    // The agent sends no params; the front desk adds `changes` and `snapshot` from the vault (desk.ts request).
+    validate: (params) => (params && typeof params === "object" && Object.keys(params).length === 0 ? {} : null),
+    vault: true,
+  },
 } satisfies Record<string, Job>;
 
 export type JobName = keyof typeof JOBS;
