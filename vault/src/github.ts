@@ -152,7 +152,7 @@ export interface GhSnapshot {
   apps: string[]; // installed Apps, "slug#installation id:repository selection:permissions"
   pats: string[]; // fine-grained tokens with org access, "owner:id"
   deploy_keys: string[]; // "repo:key id"
-  // Public repos only (the free plan has none on private ones): "repo:id:enforcement:<hash of the whole rule>",
+  // Public repos only (the free plan has none on private ones): "repo:id:enforcement:<the whole rule as JSON>",
   // so an in-place edit (a removed approval, a new target) changes the entry (Codex C6a-1 r1 #2).
   rulesets: string[];
 }
@@ -188,7 +188,8 @@ export async function snapshot(gh: GitHub): Promise<GhSnapshot> {
       // Everything that decides what the rule does. bypass_actors is hashed when GitHub shows it to a
       // read-only App (FROM MEMORY: it may not; the first live run records which).
       const what = { target: rule.target, enforcement: rule.enforcement, conditions: rule.conditions, rules: rule.rules, bypass_actors: rule.bypass_actors ?? null };
-      s.rulesets.push(`${r.name}:${x.id}:${rule.enforcement}:${(await sha256Hex(canonical(what))).slice(0, 16)}`);
+      // Written out in full, so Ben's screen shows what protection changed, not a code (Codex C6a-1 r2 #11).
+      s.rulesets.push(`${r.name}:${x.id}:${rule.enforcement}:${canonical(what)}`);
     }
   }
   for (const list of Object.values(s)) list.sort();

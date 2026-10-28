@@ -249,7 +249,7 @@ function fakeVault(stored = false) {
       return { ok: true, tokens: 0, unexpected: [], stretched: [], missing: [], github: { ok: true, changes: [] } };
     },
     async ghPreview() {
-      return { changes: ["members +someone"], snapshot: "s".repeat(64) };
+      return { changes: ["members +someone"], snapshot: "s".repeat(64), base: "b".repeat(64) };
     },
   };
 }
@@ -656,7 +656,7 @@ test("gh.app.baseline: the front desk adds the vault's changes and snapshot; Ben
   assert.equal(res.status, 201);
   const { id } = (await res.json()) as { id: string };
   const g = await store.get<any>(`grant:${id}`);
-  assert.deepEqual(g.params, { changes: "members +someone", snapshot: "s".repeat(64) });
+  assert.deepEqual(g.params, { changes: "members +someone", snapshot: "s".repeat(64), base: "b".repeat(64) });
   assert.match(await (await callV(store, vault, `/approve/${id}`)).text(), /members \+someone/);
   const forged = await agentPost(store, vault, "/request", { job: "gh.app.baseline", params: { snapshot: "x" }, reason: "x" });
   assert.equal(forged.status, 400, "the agent cannot choose the snapshot");

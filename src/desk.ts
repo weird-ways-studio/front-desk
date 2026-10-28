@@ -299,6 +299,7 @@ export class Desk {
       params.changes = seen.changes.length ? seen.changes.join("\n") : "none";
       if (params.changes.length > 4000) throw new DeskError("too_many_changes", 400);
       params.snapshot = seen.snapshot;
+      params.base = seen.base;
     }
     if (typeof body.reason !== "string" || !body.reason.trim() || body.reason.length > 200) {
       throw new DeskError("bad_reason", 400);

@@ -8,5 +8,5 @@ export interface VaultApi {
   status(): Promise<{ stored: boolean; pending: boolean; token_id?: string }>;
   run(job: string, params: Record<string, string>, prf: string): Promise<ProbeResult | MintResult | HeadcountSetupResult | GhBaselineResult>;
   headcount(): Promise<Headcount>;
-  ghPreview(): Promise<{ changes: string[]; snapshot: string }>;
+  ghPreview(): Promise<{ changes: string[]; snapshot: string; base: string }>;
 }

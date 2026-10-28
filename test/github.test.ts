@@ -134,8 +134,10 @@ async function connected(fail?: Fail) {
 // Everything the store holds, as text, to show what is (not) in it.
 const dump = (store: MemoryStore) => JSON.stringify([...(store as unknown as { data: Map<string, unknown> }).data]);
 // Ben's tap on the job, with the state the front desk showed him (ghPreview at /request).
-const baseline = async (vault: VaultLogic, fill = 7, seen?: string) =>
-  vault.run("gh.app.baseline", { snapshot: seen ?? (await vault.ghPreview()).snapshot }, prf(fill)) as Promise<GhBaselineResult>;
+const baseline = async (vault: VaultLogic, fill = 7, seen?: { snapshot: string; base: string }) => {
+  const shown = seen ?? (await vault.ghPreview());
+  return vault.run("gh.app.baseline", { snapshot: shown.snapshot, base: shown.base }, prf(fill)) as Promise<GhBaselineResult>;
+};
 
 test("App key: GitHub's PKCS#1 key is wrapped for WebCrypto and signs App sign-ins GitHub can check", async () => {
   const jwt = await appJwt(202, pkcs8FromPem(KEYS.main.pem), NOW);
@@ -196,7 +198,7 @@ test("nightly GitHub count: clean, then a planted deploy key and a removed branc
   const night = await (vault as any).ghHeadcount();
   assert.equal(night.ok, false);
   assert.equal(night.changes[0], "deploy_keys +studio-os:99");
-  assert.match(night.changes[1], /^rulesets -front-desk:5:active:[0-9a-f]{16}$/);
+  assert.match(night.changes[1], /^rulesets -front-desk:5:active:\{.*"required_approving_review_count":1/, "the rule is shown, not a code");
   // Ben accepts the changes with another tap; the list now matches.
   const again = await baseline(vault);
   assert.deepEqual(again.changes, night.changes);
@@ -238,13 +240,28 @@ test("baseline accepts only the state Ben was shown: a key added after his scree
   const { vault, gh, store } = await connected();
   assert.equal((await baseline(vault)).ok, true);
   const before = await store.get("gh.baseline");
-  const shown = (await vault.ghPreview()).snapshot;
+  const shown = await vault.ghPreview();
   gh.org.keys["front-desk"].push(55);
   const r = await baseline(vault, 7, shown);
   assert.equal(r.ok, false);
   assert.match(r.error ?? "", /github_changed_since_request/);
   assert.deepEqual(await store.get("gh.baseline"), before, "nothing recorded");
   assert.deepEqual((await (vault as any).ghHeadcount()).changes, ["deploy_keys +front-desk:55"], "still alarms");
+});
+
+test("an older approval cannot undo a newer one: bound to the accepted list it was counted from", async () => {
+  const { vault, gh, store } = await connected();
+  assert.equal((await baseline(vault)).ok, true);
+  const a = await vault.ghPreview(); // request A: "no changes" against list X
+  const strong = { ...gh.org.rule, rules: [{ type: "pull_request", parameters: { required_approving_review_count: 2 } }] };
+  const weak = gh.org.rule;
+  gh.org.rule = strong;
+  assert.equal((await baseline(vault)).ok, true); // request B accepts the stronger rule (list Y)
+  gh.org.rule = weak; // the rule is quietly reverted
+  const r = await baseline(vault, 7, a); // A, approved late: its live snapshot matches again
+  assert.equal(r.ok, false);
+  assert.match(r.error ?? "", /baseline_changed_since_request/);
+  assert.match((await store.get<any>("gh.baseline")).rulesets[0], /"required_approving_review_count":2/, "Y stays accepted");
 });
 
 for (const fail of ["wideApp", "wideInstall"] as const) {

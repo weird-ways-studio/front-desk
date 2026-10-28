@@ -227,7 +227,7 @@ export class VaultLogic {
   async run(job: string, params: Record<string, string>, prf: string): Promise<ProbeResult | MintResult | HeadcountSetupResult | GhBaselineResult> {
     if (job !== "cf.dns.txt.probe" && job !== "cf.token.zone.read" && job !== "cf.token.headcount.setup" && job !== "gh.app.baseline") throw new VaultError("job_not_offered");
     if (job === "cf.token.headcount.setup") return this.runHeadcountSetup(prf);
-    if (job === "gh.app.baseline") return this.ghBaseline(prf, params?.snapshot ?? "");
+    if (job === "gh.app.baseline") return this.ghBaseline(prf, params?.snapshot ?? "", params?.base ?? "");
     if (!STUDIO_ZONES.includes(params?.zone ?? "")) throw new VaultError("zone_not_offered");
     // Checked here too, not only at the front desk: the vault is the last word on what it mints.
     if (job === "cf.token.zone.read" && (!isMinutes(params.minutes) || !isIPv4(params.ip))) throw new VaultError("bad_params");
@@ -439,12 +439,13 @@ export class VaultLogic {
    * What job gh.app.baseline would accept, read at request time (no tap; the read-only App only), so
    * Ben's approval screen shows every change and his tap is bound to exactly that state (Codex C6a-1 r1 #4).
    */
-  async ghPreview(): Promise<{ changes: string[]; snapshot: string }> {
+  async ghPreview(): Promise<{ changes: string[]; snapshot: string; base: string }> {
     const hc = await this.store.get<GhHeadcountApp | null>("gh.app.headcount");
     if (!hc?.installation) throw new VaultError("github_not_set_up");
     const snap = await this.ghRead(hc, snapshot);
     const old = await this.store.get<GhSnapshot | null>("gh.baseline");
-    return { changes: diff(old ?? ({} as GhSnapshot), snap), snapshot: await sha256Hex(canonical(snap)) };
+    // `base` names the accepted list the changes were counted from, so an older screen cannot undo a newer approval (Codex C6a-1 r2 #10).
+    return { changes: diff(old ?? ({} as GhSnapshot), snap), snapshot: await sha256Hex(canonical(snap)), base: await sha256Hex(canonical(old ?? null)) };
   }
 
   /**
@@ -452,7 +453,7 @@ export class VaultLogic {
    * the one-time key. Every time: proves the main key works (a one-hour key, revoked at once), proves the
    * headcount App is refused write, and records what can reach the org as the list the nightly count expects.
    */
-  private async ghBaseline(prf: string, approved: string): Promise<GhBaselineResult> {
+  private async ghBaseline(prf: string, approved: string, approvedBase: string): Promise<GhBaselineResult> {
     const secret = secretBytes(prf);
     const hc = await this.store.get<GhHeadcountApp | null>("gh.app.headcount");
     const main = await this.ghMain();
@@ -491,6 +492,7 @@ export class VaultLogic {
       const old = await this.store.get<GhSnapshot | null>("gh.baseline");
       r.changes = diff(old ?? ({} as GhSnapshot), snap);
       // Only the state Ben saw on his screen is accepted; anything added since stays an alarm.
+      if ((await sha256Hex(canonical(old ?? null))) !== approvedBase) throw new VaultError("baseline_changed_since_request: nothing recorded, ask again");
       if ((await sha256Hex(canonical(snap))) !== approved) throw new VaultError("github_changed_since_request: nothing recorded, ask again");
       r.counts = Object.fromEntries(Object.entries(snap).map(([k, v]) => [k, v.length]));
       await this.store.put("gh.baseline", snap);
