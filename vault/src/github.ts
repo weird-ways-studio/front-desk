@@ -103,7 +103,9 @@ const LEVEL: Record<string, number> = { read: 1, write: 2, admin: 3 };
 
 /** Refuses unless every permission GitHub reports is in `allowed` at the same or a lower level. */
 export function checkPermissions(reported: unknown, allowed: Record<string, string>, what: string): void {
-  const extra = Object.entries((reported ?? {}) as Record<string, string>).filter(([k, v]) => !allowed[k] || !(LEVEL[v] <= LEVEL[allowed[k]]));
+  // No permissions shown is not "nothing too wide": the check cannot run, so it refuses (fail closed).
+  if (!reported || typeof reported !== "object" || Array.isArray(reported) || !Object.keys(reported).length) throw new VaultError(`${what}_permissions_unknown`);
+  const extra = Object.entries(reported as Record<string, string>).filter(([k, v]) => !allowed[k] || !(LEVEL[v] <= LEVEL[allowed[k]]));
   if (extra.length) throw new VaultError(`${what}_permissions_too_wide: ${extra.map(([k, v]) => `${k}=${v}`).join(",").slice(0, 80)}`);
 }
 
@@ -144,6 +146,7 @@ export function installationKey(app: GitHub, installationId: number, narrow?: { 
 export interface GhSnapshot {
   repos: string[]; // "name:private|public" -- a repo leaving the watcher's view shows here
   members: string[];
+  owners: string[]; // members with the org owner role -- a promotion keeps the member list unchanged
   outside: string[];
   invites: string[];
   apps: string[]; // installed Apps, "slug#installation id:repository selection:permissions"
@@ -169,6 +172,7 @@ export async function snapshot(gh: GitHub): Promise<GhSnapshot> {
   const s: GhSnapshot = {
     repos: repos.map((r) => `${r.name}:${r.private ? "private" : "public"}`),
     members: (await page<{ login: string }>(`/orgs/${ORG}/members`)).map(login),
+    owners: (await page<{ login: string }>(`/orgs/${ORG}/members?role=admin`)).map(login),
     outside: (await page<{ login: string }>(`/orgs/${ORG}/outside_collaborators`)).map(login),
     invites: (await page<{ login: string | null; email: string | null }>(`/orgs/${ORG}/invitations`)).map((i) => i.login ?? i.email ?? "?"),
     apps: installs.installations.map((i) => `${i.app_slug}#${i.id}:${i.repository_selection}:${perms(i.permissions)}`),

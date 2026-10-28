@@ -7,7 +7,7 @@ import { createVerify, generateKeyPairSync, type KeyObject } from "node:crypto";
 import { MemoryStore } from "../src/desk.ts";
 import { b64url } from "../vault/src/seal.ts";
 import { GH_PENDING_MS, GH_STATE_MS, VaultLogic, type GhBaselineResult } from "../vault/src/vault.ts";
-import { ORG, PERMISSIONS, appJwt, manifest, pkcs8FromPem } from "../vault/src/github.ts";
+import { ORG, PERMISSIONS, appJwt, checkPermissions, manifest, pkcs8FromPem } from "../vault/src/github.ts";
 import { handleSetup } from "../vault/src/setup.ts";
 
 const NOW = Date.UTC(2026, 9, 28, 20, 0, 0);
@@ -33,6 +33,7 @@ function fakeGitHub(fail?: Fail) {
   const org = {
     repos: [{ name: "front-desk", private: false }, { name: "studio-os", private: true }],
     members: ["benculbert", "weird-ways"],
+    owners: ["benculbert", "weird-ways"],
     keys: { "front-desk": [] as number[], "studio-os": [7] } as Record<string, number[]>,
     rulesets: [{ id: 5, enforcement: "active" }],
     rule: { target: "branch", enforcement: "active", conditions: { ref_name: { include: ["~DEFAULT_BRANCH"] } }, rules: [{ type: "pull_request", parameters: { required_approving_review_count: 1 } }] } as Record<string, unknown>,
@@ -94,7 +95,7 @@ function fakeGitHub(fail?: Fail) {
     if (method === "GET" && by === "token:headcount") {
       const list = (items: unknown[]) => json(fail === "fullPage" ? Array.from({ length: 100 }, (_, i) => ({ login: `u${i}` })) : items);
       if (url.pathname === `/orgs/${ORG}/repos`) return json(org.repos);
-      if (url.pathname === `/orgs/${ORG}/members`) return list(org.members.map((login) => ({ login })));
+      if (url.pathname === `/orgs/${ORG}/members`) return list((url.searchParams.get("role") === "admin" ? org.owners : org.members).map((login) => ({ login })));
       if (url.pathname === `/orgs/${ORG}/outside_collaborators`) return json([]);
       if (url.pathname === `/orgs/${ORG}/invitations`) return json([]);
       if (url.pathname === `/orgs/${ORG}/installations`)
@@ -143,6 +144,12 @@ test("App key: GitHub's PKCS#1 key is wrapped for WebCrypto and signs App sign-i
   const claims = JSON.parse(Buffer.from(p, "base64url").toString());
   assert.deepEqual(claims, { iat: NOW / 1000 - 60, exp: NOW / 1000 + 540, iss: "202" });
   assert.throws(() => pkcs8FromPem("not a key"), /bad_app_key/);
+});
+
+test("permission check fails closed when GitHub shows no permissions, or an unknown level", () => {
+  for (const shown of [undefined, null, {}, [], "read"]) assert.throws(() => checkPermissions(shown, PERMISSIONS.headcount, "app"), /app_permissions_unknown/);
+  assert.throws(() => checkPermissions({ metadata: "maintain" }, PERMISSIONS.headcount, "app"), /too_wide/);
+  assert.doesNotThrow(() => checkPermissions({ metadata: "read" }, PERMISSIONS.headcount, "app"));
 });
 
 test("manifest: the headcount App can only read; no webhooks; it comes back to the vault", () => {
@@ -201,6 +208,7 @@ for (const [what, change, expect] of [
   ["a branch rule weakened in place (same id, same enforcement)", (o: any) => (o.rule = { ...o.rule, rules: [{ type: "pull_request", parameters: { required_approving_review_count: 0 } }] }), /^rulesets [+-]front-desk:5:active:/],
   ["a branch rule retargeted in place", (o: any) => (o.rule = { ...o.rule, conditions: { ref_name: { include: ["refs/heads/nothing"] } } }), /^rulesets [+-]front-desk:5:active:/],
   ["a repo hidden from the watcher", (o: any) => o.repos.pop(), /^repos -studio-os:private$/],
+  ["a member promoted to owner", (o: any) => (o.members.push("newbie"), o.owners.push("newbie")), /^owners \+newbie$/],
 ] as const) {
   test(`nightly count names ${what}`, async () => {
     const { vault, gh } = await connected();
