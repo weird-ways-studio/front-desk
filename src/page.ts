@@ -28,6 +28,8 @@ const CLIENT = `
 const b2u=b=>btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');
 const u2b=s=>Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0));
 const show=(ok,text)=>{const s=document.getElementById('status');s.className=ok?'pass':'fail';s.textContent=text};
+// The browser's own words and the seconds since the tap tell a cancel, a timeout and an instant refusal apart.
+const failed=(err,t0)=>show(false,'FAIL: '+err.name+(err.message?' -- '+String(err.message).slice(0,160):'')+' ('+((Date.now()-t0)/1000).toFixed(1)+'s after tap)');
 function cred(c){const r=c.response,o={id:c.id,rawId:b2u(c.rawId),type:c.type,clientExtensionResults:{},response:{clientDataJSON:b2u(r.clientDataJSON)}};
  if(r.attestationObject){o.response.attestationObject=b2u(r.attestationObject)}else{o.response.authenticatorData=b2u(r.authenticatorData);o.response.signature=b2u(r.signature);if(r.userHandle)o.response.userHandle=b2u(r.userHandle)}return o}
 async function finish(path,c){const res=await fetch(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(cred(c))});
@@ -53,10 +55,10 @@ export function approvePage(g: Grant, options: unknown, nonce: string): string {
 <p class="muted">Login: your <strong>front desk passkey</strong>. Face ID offers only that one.</p>
 <button id="go">Next: approve with Face ID</button><pre id="after" class="muted" style="white-space:pre-wrap"></pre>`,
     `const opts=${JSON.stringify(options)};
-document.getElementById('go').onclick=async e=>{e.target.disabled=true;
+document.getElementById('go').onclick=async e=>{const t0=Date.now();e.target.disabled=true;
  let c;try{c=await navigator.credentials.get({publicKey:{challenge:u2b(opts.challenge),rpId:opts.rpId,timeout:opts.timeout,userVerification:'required',
   allowCredentials:(opts.allowCredentials||[]).map(a=>({type:'public-key',id:u2b(a.id)})),...(opts.prfSalt?{extensions:{prf:{eval:{first:u2b(opts.prfSalt)}}}}:{})}})}
- catch(err){show(false,'FAIL: '+err.name);e.target.disabled=false;return}
+ catch(err){failed(err,t0);e.target.disabled=false;return}
  const x=(c.getClientExtensionResults&&c.getClientExtensionResults().prf)||{};const first=x.results&&x.results.first;
  const res=await fetch(location.pathname,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...cred(c),prf:first?b2u(first):null})});
  const j=await res.json().catch(()=>({}));const bad=j.result&&j.result.ok!==true;show(res.ok&&!bad,res.ok?(bad?'FAIL: '+(j.result.error||'a check did not pass, see below'):'PASS'):'FAIL: '+(j.error||res.status));
@@ -71,10 +73,10 @@ export function enrollPage(options: unknown, nonce: string): string {
     `<div id="status"></div><h1>Set up your passkey</h1>
 <p>One time only. After this, approvals need this passkey.</p><button id="go">Next: create passkey</button>`,
     `const opts=${JSON.stringify(options)};
-document.getElementById('go').onclick=async e=>{e.target.disabled=true;
+document.getElementById('go').onclick=async e=>{const t0=Date.now();e.target.disabled=true;
  let c;try{c=await navigator.credentials.create({publicKey:{challenge:u2b(opts.challenge),rp:opts.rp,user:{...opts.user,id:u2b(opts.user.id)},
   pubKeyCredParams:opts.pubKeyCredParams,timeout:opts.timeout,authenticatorSelection:opts.authenticatorSelection,attestation:'none',extensions:{prf:{}}}})}
- catch(err){show(false,'FAIL: '+err.name);e.target.disabled=false;return}
+ catch(err){failed(err,t0);e.target.disabled=false;return}
  await finish(location.pathname,c)};`,
   );
 }
@@ -89,10 +91,10 @@ export function prfCheckPage(options: unknown, nonce: string): string {
 <p>Tests whether your passkey can unlock the master key later. Nothing is stored or changed.</p>
 <button id="go">Next: check with Face ID</button><p id="after" class="muted"></p>`,
     `const opts=${JSON.stringify(options)};
-document.getElementById('go').onclick=async e=>{e.target.disabled=true;
+document.getElementById('go').onclick=async e=>{const t0=Date.now();e.target.disabled=true;
  let c;try{c=await navigator.credentials.get({publicKey:{challenge:u2b(opts.challenge),rpId:opts.rpId,timeout:opts.timeout,userVerification:'required',
   allowCredentials:(opts.allowCredentials||[]).map(a=>({type:'public-key',id:u2b(a.id)})),extensions:{prf:{eval:{first:u2b(opts.prfSalt)}}}}})}
- catch(err){show(false,'FAIL: '+err.name);e.target.disabled=false;return}
+ catch(err){failed(err,t0);e.target.disabled=false;return}
  const x=(c.getClientExtensionResults&&c.getClientExtensionResults().prf)||{};const first=x.results&&x.results.first;
  const res=await fetch(location.pathname,{method:'POST',headers:{'content-type':'application/json'},
   body:JSON.stringify({credential:cred(c),prf:first?b2u(first):null,prf_info:JSON.stringify(Object.keys(x))})});
@@ -112,7 +114,7 @@ export function cboxKeyPage(key: CboxKey | undefined, nonce: string): string {
 <p>Enrolled key: <strong>${esc(key.fingerprint)}</strong>, since ${when(key.enrolled_at)} UTC.</p>
 <p>If the c-box is lost or stolen, remove it. Every key request is then refused until you approve a new one.</p>
 <button id="go">Remove c-box key</button>`,
-    `document.getElementById('go').onclick=async e=>{e.target.disabled=true;
+    `document.getElementById('go').onclick=async e=>{const t0=Date.now();e.target.disabled=true;
  const res=await fetch(location.pathname,{method:'POST'});const j=await res.json().catch(()=>({}));
  show(res.ok,res.ok?'PASS: removed '+j.removed:'FAIL: '+(j.error||res.status))};`,
   );

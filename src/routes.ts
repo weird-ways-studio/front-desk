@@ -7,7 +7,7 @@ import { checkSignature } from "./cboxkey.ts";
 import type { VaultApi } from "../vault/src/api.ts";
 import { approvePage, cboxKeyPage, enrollPage, logPage, prfCheckPage } from "./page.ts";
 
-export const VERSION = "0.10.0-pushover";
+export const VERSION = "0.10.1";
 
 // Who is calling, worked out by the Worker from Cloudflare Access (index.ts):
 // owner from Ben's email (callerOf), agent from the service-token ticket (agent.ts).

@@ -57,6 +57,7 @@ test("over HTTP: enroll, ask, approve, collect; page shows stored grant, quotes 
   assert.ok(pageHtml.includes("&lt;script&gt;alert(1)&lt;/script&gt; please"));
   assert.ok(!pageHtml.includes("<script>alert(1)"));
   assert.ok(pageHtml.includes("Login: your <strong>front desk passkey</strong>"), "the screen names the login it wants (a830d543)");
+  assert.ok(pageHtml.includes("catch(err){failed(err,t0);"), "a Face ID failure shows the browser's words and timing (a830d543)");
   const opts = JSON.parse(pageHtml.match(/const opts=(\{.*?\});\n/)![1]);
   const ok = await call(store, `/approve/${id}`, { method: "POST", body: JSON.stringify(await key.assert(opts.challenge, "desk.example", base)) });
   assert.equal(ok.status, 200);
