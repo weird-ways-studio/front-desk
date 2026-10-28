@@ -7,7 +7,7 @@ import { checkSignature } from "./cboxkey.ts";
 import type { VaultApi } from "../vault/src/api.ts";
 import { approvePage, cboxKeyPage, enrollPage, logPage, prfCheckPage } from "./page.ts";
 
-export const VERSION = "0.9.1-push-reason";
+export const VERSION = "0.10.0-pushover";
 
 // Who is calling, worked out by the Worker from Cloudflare Access (index.ts):
 // owner from Ben's email (callerOf), agent from the service-token ticket (agent.ts).
@@ -68,7 +68,8 @@ async function body<T>(request: Request, desk: Desk, what: string, now: number):
 
 /** A push failure as fixed words only: a thrown fetch error could carry the topic URL, which is a secret. */
 function pushError(e: unknown): string {
-  const m = e instanceof Error ? /^ntfy answered \d{3}$/.exec(e.message) : null;
+  const part = "(?:pushover|ntfy) (?:answered \\d{3}|unreachable)";
+  const m = e instanceof Error ? new RegExp(`^${part}(?:; ${part})?$`).exec(e.message) : null;
   return m ? m[0] : "push failed";
 }
 
