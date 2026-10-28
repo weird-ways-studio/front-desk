@@ -168,16 +168,37 @@ function ntfyTopic(ntfyUrl: string | undefined): string | undefined {
 // Tells Ben's phone a request is waiting; a tap opens its approve page. Throws when ntfy did not take it.
 export type Push = (what: string, approveUrl: string) => Promise<void>;
 
+/** Pushover's user key and app token (dashboard secrets), each 30 letters and digits. */
+export interface PushoverKeys {
+  user?: string;
+  token?: string;
+}
+
 /**
- * One ntfy push per request (card a830d543). It carries what is asked and the approve link, never a
- * secret: the link still needs Ben's Access login and his passkey. MAX_PENDING bounds how many can arrive.
+ * One push per request (card a830d543): Pushover first, then ntfy. It carries what is asked and the
+ * approve link, never a secret: the link still needs Ben's Access login and his passkey. MAX_PENDING
+ * bounds how many can arrive. ntfy.sh refuses Cloudflare Workers' shared addresses (429, ntfy issues
+ * #1963/#1726), hence Pushover, which counts per account. Throws "<service> answered NNN; ..." when none took it.
  */
-export function approvalPush(ntfyUrl: string | undefined, fetchFn: typeof fetch = fetch): Push | undefined {
+export function approvalPush(ntfyUrl: string | undefined, pushover: PushoverKeys = {}, fetchFn: typeof fetch = fetch): Push | undefined {
   const ntfy = ntfyTopic(ntfyUrl);
-  if (!ntfy) return undefined;
+  const key = /^[A-Za-z0-9]{30}$/;
+  const po = pushover.user && pushover.token && key.test(pushover.user.trim()) && key.test(pushover.token.trim())
+    ? { user: pushover.user.trim(), token: pushover.token.trim() } : undefined;
+  const senders: [string, (what: string, url: string) => Promise<Response>][] = [];
+  if (po) senders.push(["pushover", (what, url) => fetchFn("https://api.pushover.net/1/messages.json", { method: "POST",
+    body: new URLSearchParams({ token: po.token, user: po.user, title: "Front desk: approve?", message: what.slice(0, 300), url, url_title: "Open to approve" }) })]);
+  if (ntfy) senders.push(["ntfy", (what, url) => fetchFn(ntfy, { method: "POST", body: what.slice(0, 300), headers: { Title: "Front desk: approve?", Click: url, Priority: "high" } })]);
+  if (!senders.length) return undefined;
   return async (what, approveUrl) => {
-    const res = await fetchFn(ntfy, { method: "POST", body: what.slice(0, 300), headers: { Title: "Front desk: approve?", Click: approveUrl, Priority: "high" } });
-    if (!res.ok) throw new Error(`ntfy answered ${res.status}`);
+    const failed: string[] = [];
+    for (const [name, send] of senders) {
+      // A thrown fetch error is reduced to fixed words: its message could carry the topic or a key.
+      const status = await send(what, approveUrl).then((r) => r.status, () => 0);
+      if (status >= 200 && status < 300) return;
+      failed.push(status ? `${name} answered ${status}` : `${name} unreachable`);
+    }
+    throw new Error(failed.join("; "));
   };
 }
 

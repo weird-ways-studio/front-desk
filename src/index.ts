@@ -25,13 +25,16 @@ interface Env extends AgentConfig {
   HC_HEADCOUNT_URL?: string;
   // ntfy topic URL (dashboard secret): the mismatch detail push, and one push per request (approvalPush).
   NTFY_TOPIC_URL?: string;
+  // Pushover user key and app token (dashboard secrets, card a830d543): the request push tries Pushover first.
+  PUSHOVER_USER?: string;
+  PUSHOVER_TOKEN?: string;
   // The vault Worker (vault/), reached only through this service binding (wrangler.jsonc "services").
   VAULT: Service & VaultApi;
 }
 
 export class FrontDesk extends DurableObject<Env> {
   async handle(request: Request, who: Who): Promise<Response> {
-    return route(request, this.ctx.storage, who, Date.now(), this.env.VAULT, approvalPush(this.env.NTFY_TOPIC_URL));
+    return route(request, this.ctx.storage, who, Date.now(), this.env.VAULT, approvalPush(this.env.NTFY_TOPIC_URL, { user: this.env.PUSHOVER_USER, token: this.env.PUSHOVER_TOKEN }));
   }
   // The nightly count runs in here too, so its log rows join the one log.
   async headcount(): Promise<void> {

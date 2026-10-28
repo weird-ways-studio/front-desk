@@ -604,10 +604,42 @@ test("approvalPush posts to a real ntfy topic only, with the link as the tap tar
     return new Response("", { status: 200 });
   }) as unknown as typeof fetch;
   const topic = "https://ntfy.sh/topic-name-long-enough";
-  await approvalPush(topic, fetchFn)!("Echo the word \"hi\"", `${base}/approve/abc`);
+  await approvalPush(topic, {}, fetchFn)!("Echo the word \"hi\"", `${base}/approve/abc`);
   assert.deepEqual(sent, [{ url: topic, body: 'Echo the word "hi"', headers: { Title: "Front desk: approve?", Click: `${base}/approve/abc`, Priority: "high" } }]);
   for (const bad of [undefined, "", "http://ntfy.sh/topic-name-long-enough", "https://evil.example/topic-name-long-enough", "https://ntfy.sh/short"])
-    assert.equal(approvalPush(bad, fetchFn), undefined);
+    assert.equal(approvalPush(bad, {}, fetchFn), undefined);
   const down = (async () => new Response("", { status: 502 })) as unknown as typeof fetch;
-  await assert.rejects(approvalPush(topic, down)!("x", "y"), /ntfy answered 502/);
+  await assert.rejects(approvalPush(topic, {}, down)!("x", "y"), /^Error: ntfy answered 502$/);
+});
+
+test("approvalPush tries Pushover first, falls back to ntfy, and names each refusal in fixed words", async () => {
+  const U = "u".repeat(30), T = "a".repeat(30), topic = "https://ntfy.sh/topic-name-long-enough";
+  const calls: string[] = [];
+  const answer = (status: Record<string, number | "throw">) => (async (url: string, init: RequestInit) => {
+    const host = new URL(url).hostname;
+    calls.push(host);
+    if (host === "api.pushover.net") {
+      const form = init.body as URLSearchParams;
+      assert.deepEqual([form.get("token"), form.get("user"), form.get("url"), form.get("message")], [T, U, `${base}/approve/abc`, "Echo"]);
+    }
+    if (status[host] === "throw") throw new Error(`connect failed ${url} ${T}`);
+    return new Response("", { status: (status[host] as number) ?? 200 });
+  }) as unknown as typeof fetch;
+  await approvalPush(topic, { user: U, token: T }, answer({}))!("Echo", `${base}/approve/abc`);
+  assert.deepEqual(calls, ["api.pushover.net"], "Pushover took it: ntfy is not tried");
+  calls.length = 0;
+  await approvalPush(topic, { user: U, token: T }, answer({ "api.pushover.net": 500 }))!("Echo", `${base}/approve/abc`);
+  assert.deepEqual(calls, ["api.pushover.net", "ntfy.sh"], "Pushover refused: ntfy is tried");
+  await assert.rejects(approvalPush(topic, { user: U, token: T }, answer({ "api.pushover.net": 429, "ntfy.sh": 429 }))!("Echo", `${base}/approve/abc`),
+    /^Error: pushover answered 429; ntfy answered 429$/);
+  await assert.rejects(approvalPush(undefined, { user: U, token: T }, answer({ "api.pushover.net": "throw" }))!("Echo", `${base}/approve/abc`),
+    (e: Error) => e.message === "pushover unreachable", "a thrown error never carries the URL or key");
+  for (const bad of [{ user: U }, { user: "short", token: T }, { user: U, token: "has spaces in it 1234567890abcd" }])
+    assert.equal(approvalPush(undefined, bad, answer({})), undefined, "malformed keys are ignored");
+});
+
+test("a request's push_error passes both services' refusals through", async () => {
+  const both: Push = async () => { throw new Error("pushover answered 429; ntfy answered 429"); };
+  const res = await route(new Request(base + "/request", { method: "POST", body: JSON.stringify({ job: "test.echo", params: { word: "hi" }, reason: "x" }) }), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, both);
+  assert.equal(((await res.json()) as { push_error?: string }).push_error, "pushover answered 429; ntfy answered 429");
 });
