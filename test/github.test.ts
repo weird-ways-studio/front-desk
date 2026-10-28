@@ -32,7 +32,7 @@ function fakeGitHub(fail?: Fail) {
   const revoked = new Set<string>();
   const org = {
     repos: [{ name: "front-desk", private: false }, { name: "studio-os", private: true }],
-    members: ["benculbert", "weird-ways"],
+    members: ["benculbert", "helper", "weird-ways"],
     owners: ["benculbert", "weird-ways"],
     keys: { "front-desk": [] as number[], "studio-os": [7] } as Record<string, number[]>,
     rulesets: [{ id: 5, enforcement: "active" }],
@@ -210,7 +210,8 @@ for (const [what, change, expect] of [
   ["a branch rule weakened in place (same id, same enforcement)", (o: any) => (o.rule = { ...o.rule, rules: [{ type: "pull_request", parameters: { required_approving_review_count: 0 } }] }), /^rulesets [+-]front-desk:5:active:/],
   ["a branch rule retargeted in place", (o: any) => (o.rule = { ...o.rule, conditions: { ref_name: { include: ["refs/heads/nothing"] } } }), /^rulesets [+-]front-desk:5:active:/],
   ["a repo hidden from the watcher", (o: any) => o.repos.pop(), /^repos -studio-os:private$/],
-  ["a member promoted to owner", (o: any) => (o.members.push("newbie"), o.owners.push("newbie")), /^owners \+newbie$/],
+  // Only the role changes; the member list stays the same (Codex C6a-1 r3, later #1).
+  ["an existing member promoted to owner", (o: any) => o.owners.push("helper"), /^owners \+helper$/],
 ] as const) {
   test(`nightly count names ${what}`, async () => {
     const { vault, gh } = await connected();
