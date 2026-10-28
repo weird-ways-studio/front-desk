@@ -260,7 +260,7 @@ test("log detail stays valid JSON and says when it shortened a long token list",
 const clean: Headcount = { ok: true, tokens: 5, unexpected: [], stretched: [], missing: [], github: { ok: true, changes: [] } };
 function headcountDesk(answer: () => Promise<Headcount>) {
   const store = new MemoryStore();
-  const vault = { status: async () => ({ stored: true, pending: false }), run: async () => ({}) as any, headcount: answer };
+  const vault = { status: async () => ({ stored: true, pending: false }), run: async () => ({}) as any, headcount: answer, ghPreview: async () => ({ changes: [], snapshot: "" }) };
   const told: { ok: boolean; detail: string }[] = [];
   const alarm = async (ok: boolean, detail: string) => void told.push({ ok, detail });
   return { desk: new Desk(store, site, { vault }), told, alarm };

@@ -5,7 +5,7 @@
 
 import { Cloudflare, type Fetch } from "./cloudflare.ts";
 import { STUDIO_ZONES } from "./zones.ts";
-import { GitHub, appJwt, checkInstallation, convert, diff, installationKey, pkcs8FromPem, snapshot, type AppKind, type GhSnapshot } from "./github.ts";
+import { GitHub, appJwt, canonical, checkApp, checkInstallation, convert, diff, installationKey, pkcs8FromPem, sha256Hex, snapshot, type AppKind, type GhSnapshot } from "./github.ts";
 import { MASTER_LABEL, RECOVERY_LABEL, VaultError, b64url, fromB64url, open, seal, secretBytes, type Sealed } from "./seal.ts";
 
 export const PROBE_TOKEN_MS = 5 * 60_000;
@@ -227,7 +227,7 @@ export class VaultLogic {
   async run(job: string, params: Record<string, string>, prf: string): Promise<ProbeResult | MintResult | HeadcountSetupResult | GhBaselineResult> {
     if (job !== "cf.dns.txt.probe" && job !== "cf.token.zone.read" && job !== "cf.token.headcount.setup" && job !== "gh.app.baseline") throw new VaultError("job_not_offered");
     if (job === "cf.token.headcount.setup") return this.runHeadcountSetup(prf);
-    if (job === "gh.app.baseline") return this.ghBaseline(prf);
+    if (job === "gh.app.baseline") return this.ghBaseline(prf, params?.snapshot ?? "");
     if (!STUDIO_ZONES.includes(params?.zone ?? "")) throw new VaultError("zone_not_offered");
     // Checked here too, not only at the front desk: the vault is the last word on what it mints.
     if (job === "cf.token.zone.read" && (!isMinutes(params.minutes) || !isIPv4(params.ip))) throw new VaultError("bad_params");
@@ -388,7 +388,9 @@ export class VaultLogic {
     if ((await this.ghStatus())[kind].created) throw new VaultError("app_exists");
     const app = await convert(code, this.fetch);
     const key = pkcs8FromPem(app.pem);
-    await appJwt(app.id, key, this.now()); // refuses a key WebCrypto cannot use, before anything is stored
+    // Refuses a key WebCrypto cannot use, or an App GitHub registered with wider permissions than
+    // this kind allows, before anything is stored.
+    await checkApp(new GitHub(await appJwt(app.id, key, this.now()), this.fetch), kind);
     if (kind === "headcount") {
       await this.store.put<GhHeadcountApp>("gh.app.headcount", { id: app.id, slug: app.slug, key });
     } else {
@@ -412,15 +414,18 @@ export class VaultLogic {
       if (!p) throw new VaultError("already_locked");
       key = await open(fromB64url(p.key), GH_LABEL, p.box);
     }
-    await checkInstallation(new GitHub(await appJwt(app.id, key, this.now()), this.fetch), Number(installationId));
+    await checkInstallation(new GitHub(await appJwt(app.id, key, this.now()), this.fetch), Number(installationId), kind);
     const now = await this.store.get<GhApp | null>(`gh.app.${kind}`);
     if (!now || now.id !== app.id) throw new VaultError("no_app");
     await this.store.put(`gh.app.${kind}`, { ...now, installation: Number(installationId) });
   }
 
-  // A one-hour read key from the headcount App, used, then revoked (expiry is the backstop).
+  // A one-hour read key from the headcount App, used, then revoked (expiry is the backstop). First the
+  // watcher checks itself: still read-only, still on all repositories (Codex C6a-1 r1 #1, #3).
   private async ghRead<T>(hc: GhHeadcountApp, use: (gh: GitHub) => Promise<T>): Promise<T> {
     const app = new GitHub(await appJwt(hc.id, hc.key, this.now()), this.fetch);
+    await checkApp(app, "headcount");
+    await checkInstallation(app, hc.installation!, "headcount");
     const k = await installationKey(app, hc.installation!);
     const gh = new GitHub(k.token, this.fetch);
     try {
@@ -431,11 +436,23 @@ export class VaultLogic {
   }
 
   /**
+   * What job gh.app.baseline would accept, read at request time (no tap; the read-only App only), so
+   * Ben's approval screen shows every change and his tap is bound to exactly that state (Codex C6a-1 r1 #4).
+   */
+  async ghPreview(): Promise<{ changes: string[]; snapshot: string }> {
+    const hc = await this.store.get<GhHeadcountApp | null>("gh.app.headcount");
+    if (!hc?.installation) throw new VaultError("github_not_set_up");
+    const snap = await this.ghRead(hc, snapshot);
+    const old = await this.store.get<GhSnapshot | null>("gh.baseline");
+    return { changes: diff(old ?? ({} as GhSnapshot), snap), snapshot: await sha256Hex(canonical(snap)) };
+  }
+
+  /**
    * Job gh.app.baseline, at Ben's tap. First time: locks the main App's key to his passkey and forgets
    * the one-time key. Every time: proves the main key works (a one-hour key, revoked at once), proves the
    * headcount App is refused write, and records what can reach the org as the list the nightly count expects.
    */
-  private async ghBaseline(prf: string): Promise<GhBaselineResult> {
+  private async ghBaseline(prf: string, approved: string): Promise<GhBaselineResult> {
     const secret = secretBytes(prf);
     const hc = await this.store.get<GhHeadcountApp | null>("gh.app.headcount");
     const main = await this.ghMain();
@@ -472,7 +489,9 @@ export class VaultLogic {
       if (!r.headcount.write_refused) throw new VaultError("headcount App not refused write: list not recorded");
       const snap = await this.ghRead(hc, snapshot);
       const old = await this.store.get<GhSnapshot | null>("gh.baseline");
-      r.changes = old ? diff(old, snap) : ["first list"];
+      r.changes = diff(old ?? ({} as GhSnapshot), snap);
+      // Only the state Ben saw on his screen is accepted; anything added since stays an alarm.
+      if ((await sha256Hex(canonical(snap))) !== approved) throw new VaultError("github_changed_since_request: nothing recorded, ask again");
       r.counts = Object.fromEntries(Object.entries(snap).map(([k, v]) => [k, v.length]));
       await this.store.put("gh.baseline", snap);
       r.ok = true;

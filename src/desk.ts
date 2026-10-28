@@ -286,6 +286,20 @@ export class Desk {
       params.replaces = (await currentKey(this.store))?.fingerprint ?? "none";
       params.rev = String(await keyRev(this.store));
     }
+    if (job === "gh.app.baseline") {
+      // Ben's screen lists exactly what his tap accepts; the vault refuses if GitHub changed since (Codex C6a-1 r1 #4).
+      const seen = await Promise.resolve()
+        .then(() => {
+          if (!this.hooks.vault) throw new Error("vault not connected");
+          return this.hooks.vault.ghPreview();
+        })
+        .catch((e: Error) => {
+          throw new DeskError(`github_preview_failed: ${e.message.slice(0, 100)}`, 502);
+        });
+      params.changes = seen.changes.length ? seen.changes.join("\n") : "none";
+      if (params.changes.length > 4000) throw new DeskError("too_many_changes", 400);
+      params.snapshot = seen.snapshot;
+    }
     if (typeof body.reason !== "string" || !body.reason.trim() || body.reason.length > 200) {
       throw new DeskError("bad_reason", 400);
     }

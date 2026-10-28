@@ -99,6 +99,20 @@ export class GitHub {
   }
 }
 
+const LEVEL: Record<string, number> = { read: 1, write: 2, admin: 3 };
+
+/** Refuses unless every permission GitHub reports is in `allowed` at the same or a lower level. */
+export function checkPermissions(reported: unknown, allowed: Record<string, string>, what: string): void {
+  const extra = Object.entries((reported ?? {}) as Record<string, string>).filter(([k, v]) => !allowed[k] || !(LEVEL[v] <= LEVEL[allowed[k]]));
+  if (extra.length) throw new VaultError(`${what}_permissions_too_wide: ${extra.map(([k, v]) => `${k}=${v}`).join(",").slice(0, 80)}`);
+}
+
+/** The App as GitHub registered it: refused if its permissions are wider than the kind allows (Codex C6a-1 r1 #1). */
+export async function checkApp(app: GitHub, kind: AppKind): Promise<void> {
+  const me = await app.call<{ permissions?: unknown }>("GET", "/app");
+  checkPermissions(me.permissions, PERMISSIONS[kind], "app");
+}
+
 /** Trades the one-hour code from GitHub's redirect for the new App (no sign-in needed; the code is the proof). */
 export async function convert(code: string, fetchFn: Fetch): Promise<{ id: number; slug: string; pem: string }> {
   if (!/^[A-Za-z0-9]{10,64}$/.test(code)) throw new VaultError("bad_code");
@@ -109,10 +123,13 @@ export async function convert(code: string, fetchFn: Fetch): Promise<{ id: numbe
 }
 
 /** The App's installation in the org, checked through the App's own sign-in: on all repositories, nowhere else. */
-export async function checkInstallation(app: GitHub, installationId: number): Promise<void> {
-  const inst = await app.call<{ account?: { login?: string }; repository_selection?: string }>("GET", `/app/installations/${installationId}`);
+// Run at install and again before every headcount read, so the watcher cannot lose sight of a repo
+// or gain power without the count failing (Codex C6a-1 r1 #1, #3).
+export async function checkInstallation(app: GitHub, installationId: number, kind: AppKind): Promise<void> {
+  const inst = await app.call<{ account?: { login?: string }; repository_selection?: string; permissions?: unknown }>("GET", `/app/installations/${installationId}`);
   if (inst.account?.login !== ORG) throw new VaultError("installation_not_in_org");
   if (inst.repository_selection !== "all") throw new VaultError("installation_not_all_repositories");
+  checkPermissions(inst.permissions, PERMISSIONS[kind], "installation");
   const all = await app.call<{ id: number }[]>("GET", "/app/installations");
   if (all.length !== 1) throw new VaultError("app_installed_elsewhere");
 }
@@ -125,13 +142,16 @@ export function installationKey(app: GitHub, installationId: number, narrow?: { 
 // What can reach the org, as names and ids only (no secrets). Each list is one page of 100; a full
 // page fails closed rather than counting half (the org has 2 members and 23 repos today).
 export interface GhSnapshot {
+  repos: string[]; // "name:private|public" -- a repo leaving the watcher's view shows here
   members: string[];
   outside: string[];
   invites: string[];
-  apps: string[]; // installed Apps, "slug#installation id"
+  apps: string[]; // installed Apps, "slug#installation id:repository selection:permissions"
   pats: string[]; // fine-grained tokens with org access, "owner:id"
   deploy_keys: string[]; // "repo:key id"
-  rulesets: string[]; // public repos only (the free plan has none on private ones): "repo:id:enforcement"
+  // Public repos only (the free plan has none on private ones): "repo:id:enforcement:<hash of the whole rule>",
+  // so an in-place edit (a removed approval, a new target) changes the entry (Codex C6a-1 r1 #2).
+  rulesets: string[];
 }
 
 /** Lists everything in GhSnapshot with one read-only installation key (about 8 calls plus one per repo). */
@@ -143,31 +163,52 @@ export async function snapshot(gh: GitHub): Promise<GhSnapshot> {
   };
   const login = (u: { login: string }) => u.login;
   const repos = await page<{ name: string; private: boolean }>(`/orgs/${ORG}/repos?type=all`);
-  const installs = await gh.call<{ installations: { id: number; app_slug: string }[] }>("GET", `/orgs/${ORG}/installations?per_page=100`);
+  const installs = await gh.call<{ installations: { id: number; app_slug: string; repository_selection: string; permissions: Record<string, string> }[] }>("GET", `/orgs/${ORG}/installations?per_page=100`);
   if (installs.installations.length >= 100) throw new VaultError("too_many: installations");
+  const perms = (p: Record<string, string>) => Object.keys(p ?? {}).sort().map((k) => `${k}=${p[k]}`).join(",");
   const s: GhSnapshot = {
+    repos: repos.map((r) => `${r.name}:${r.private ? "private" : "public"}`),
     members: (await page<{ login: string }>(`/orgs/${ORG}/members`)).map(login),
     outside: (await page<{ login: string }>(`/orgs/${ORG}/outside_collaborators`)).map(login),
     invites: (await page<{ login: string | null; email: string | null }>(`/orgs/${ORG}/invitations`)).map((i) => i.login ?? i.email ?? "?"),
-    apps: installs.installations.map((i) => `${i.app_slug}#${i.id}`),
+    apps: installs.installations.map((i) => `${i.app_slug}#${i.id}:${i.repository_selection}:${perms(i.permissions)}`),
     pats: (await page<{ id: number; owner: { login: string } }>(`/orgs/${ORG}/personal-access-tokens`)).map((t) => `${t.owner.login}:${t.id}`),
     deploy_keys: [],
     rulesets: [],
   };
   for (const r of repos) {
     s.deploy_keys.push(...(await page<{ id: number }>(`/repos/${ORG}/${r.name}/keys`)).map((k) => `${r.name}:${k.id}`));
-    if (!r.private) s.rulesets.push(...(await page<{ id: number; enforcement: string }>(`/repos/${ORG}/${r.name}/rulesets`)).map((x) => `${r.name}:${x.id}:${x.enforcement}`));
+    if (r.private) continue;
+    for (const x of await page<{ id: number }>(`/repos/${ORG}/${r.name}/rulesets`)) {
+      const rule = await gh.call<Record<string, unknown>>("GET", `/repos/${ORG}/${r.name}/rulesets/${x.id}`);
+      // Everything that decides what the rule does. bypass_actors is hashed when GitHub shows it to a
+      // read-only App (FROM MEMORY: it may not; the first live run records which).
+      const what = { target: rule.target, enforcement: rule.enforcement, conditions: rule.conditions, rules: rule.rules, bypass_actors: rule.bypass_actors ?? null };
+      s.rulesets.push(`${r.name}:${x.id}:${rule.enforcement}:${(await sha256Hex(canonical(what))).slice(0, 16)}`);
+    }
   }
   for (const list of Object.values(s)) list.sort();
   return s;
 }
 
+/** JSON with object keys sorted, so the same content always hashes the same. */
+export function canonical(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
+  if (v && typeof v === "object") return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical((v as Record<string, unknown>)[k])}`).join(",")}}`;
+  return JSON.stringify(v ?? null);
+}
+
+export async function sha256Hex(text: string): Promise<string> {
+  return [...new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(text)))].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /** Every entry added or gone since the baseline, as "kind +entry" / "kind -entry". */
 export function diff(base: GhSnapshot, now: GhSnapshot): string[] {
   const out: string[] = [];
-  for (const kind of Object.keys(base) as (keyof GhSnapshot)[]) {
-    for (const x of now[kind]) if (!base[kind].includes(x)) out.push(`${kind} +${x}`);
-    for (const x of base[kind]) if (!now[kind].includes(x)) out.push(`${kind} -${x}`);
+  for (const kind of Object.keys(now) as (keyof GhSnapshot)[]) {
+    const was = base[kind] ?? [];
+    for (const x of now[kind]) if (!was.includes(x)) out.push(`${kind} +${x}`);
+    for (const x of was) if (!now[kind].includes(x)) out.push(`${kind} -${x}`);
   }
   return out;
 }

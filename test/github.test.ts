@@ -22,7 +22,7 @@ function rsa() {
 const KEYS = { headcount: rsa(), main: rsa() };
 const APP_ID = { headcount: 101, main: 202 } as const;
 
-type Fail = "otherOwner" | "notAll" | "elsewhere" | "otherAccount" | "hcGetsWrite" | "hcMint500" | "fullPage";
+type Fail = "otherOwner" | "notAll" | "elsewhere" | "otherAccount" | "hcGetsWrite" | "hcMint500" | "fullPage" | "wideApp" | "wideInstall";
 
 // A fake GitHub: the two Apps, their org installations, and the org's lists. Records each call with
 // what signed it ("jwt:<app>" or "token:<app>").
@@ -35,6 +35,9 @@ function fakeGitHub(fail?: Fail) {
     members: ["benculbert", "weird-ways"],
     keys: { "front-desk": [] as number[], "studio-os": [7] } as Record<string, number[]>,
     rulesets: [{ id: 5, enforcement: "active" }],
+    rule: { target: "branch", enforcement: "active", conditions: { ref_name: { include: ["~DEFAULT_BRANCH"] } }, rules: [{ type: "pull_request", parameters: { required_approving_review_count: 1 } }] } as Record<string, unknown>,
+    selection: "all", // the headcount App's installation; "selected" hides repos from it
+    hcPerms: { ...PERMISSIONS.headcount } as Record<string, string>,
   };
   let n = 0;
   const json = (body: unknown, status = 200) => Response.json(body, { status });
@@ -67,7 +70,9 @@ function fakeGitHub(fail?: Fail) {
     if (by.startsWith("jwt:") && inst) {
       const app = by.slice(4) as keyof typeof APP_ID;
       if (Number(inst[1]) !== APP_ID[app] * 10) return json({ message: "Not Found" }, 404);
-      if (!inst[2]) return json({ account: { login: fail === "otherAccount" ? "someone-else" : ORG }, repository_selection: fail === "notAll" ? "selected" : "all" });
+      const perms = app === "headcount" ? { ...org.hcPerms, ...(fail === "wideInstall" ? { contents: "write" } : {}) } : PERMISSIONS.main;
+      const selection = fail === "notAll" ? "selected" : app === "headcount" ? org.selection : "all";
+      if (!inst[2]) return json({ account: { login: fail === "otherAccount" ? "someone-else" : ORG }, repository_selection: selection, permissions: perms });
       const asked = JSON.parse(String(init?.body ?? "{}")).permissions ?? PERMISSIONS[app];
       const granted = PERMISSIONS[app] as Record<string, string>;
       const over = Object.entries(asked as Record<string, string>).some(([k, v]) => !granted[k] || level[v] > level[granted[k]]);
@@ -76,6 +81,10 @@ function fakeGitHub(fail?: Fail) {
       const t = `ghs_${app}_${++n}`;
       tokens.set(t, { app, perms: asked });
       return json({ token: t, expires_at: new Date(NOW + 3600_000).toISOString() }, 201);
+    }
+    if (by.startsWith("jwt:") && path === "/app") {
+      const app = by.slice(4) as keyof typeof APP_ID;
+      return json({ id: APP_ID[app], permissions: { ...PERMISSIONS[app], ...(fail === "wideApp" && app === "headcount" ? { contents: "write" } : {}) } });
     }
     if (by.startsWith("jwt:") && path === "/app/installations") return json(fail === "elsewhere" ? [{ id: 1 }, { id: 2 }] : [{ id: 1 }]);
     if (method === "DELETE" && path === "/installation/token" && by.startsWith("token:")) {
@@ -88,7 +97,9 @@ function fakeGitHub(fail?: Fail) {
       if (url.pathname === `/orgs/${ORG}/members`) return list(org.members.map((login) => ({ login })));
       if (url.pathname === `/orgs/${ORG}/outside_collaborators`) return json([]);
       if (url.pathname === `/orgs/${ORG}/invitations`) return json([]);
-      if (url.pathname === `/orgs/${ORG}/installations`) return json({ installations: [{ id: 1010, app_slug: "wws-headcount" }, { id: 2020, app_slug: "wws-main" }] });
+      if (url.pathname === `/orgs/${ORG}/installations`)
+        return json({ installations: [{ id: 1010, app_slug: "wws-headcount", repository_selection: org.selection, permissions: org.hcPerms }, { id: 2020, app_slug: "wws-main", repository_selection: "all", permissions: PERMISSIONS.main }] });
+      if (url.pathname === `/repos/${ORG}/front-desk/rulesets/5`) return json({ id: 5, ...org.rule });
       if (url.pathname === `/orgs/${ORG}/personal-access-tokens`) return json([{ id: 9, owner: { login: "weird-ways" } }]);
       const keys = url.pathname.match(new RegExp(`^/repos/${ORG}/([\\w-]+)/keys$`));
       if (keys) return json((org.keys[keys[1]] ?? []).map((id) => ({ id })));
@@ -121,7 +132,9 @@ async function connected(fail?: Fail) {
 }
 // Everything the store holds, as text, to show what is (not) in it.
 const dump = (store: MemoryStore) => JSON.stringify([...(store as unknown as { data: Map<string, unknown> }).data]);
-const baseline = (vault: VaultLogic, fill = 7) => vault.run("gh.app.baseline", {}, prf(fill)) as Promise<GhBaselineResult>;
+// Ben's tap on the job, with the state the front desk showed him (ghPreview at /request).
+const baseline = async (vault: VaultLogic, fill = 7, seen?: string) =>
+  vault.run("gh.app.baseline", { snapshot: seen ?? (await vault.ghPreview()).snapshot }, prf(fill)) as Promise<GhBaselineResult>;
 
 test("App key: GitHub's PKCS#1 key is wrapped for WebCrypto and signs App sign-ins GitHub can check", async () => {
   const jwt = await appJwt(202, pkcs8FromPem(KEYS.main.pem), NOW);
@@ -153,7 +166,7 @@ test("setup, then Ben's tap: main key locked to his passkey, headcount App refus
   assert.equal(r.main.key_works, true);
   assert.equal(r.headcount.write_refused, true);
   assert.match(r.headcount.write_error ?? "", /not granted/);
-  assert.deepEqual(r.changes, ["first list"]);
+  assert.ok(r.changes.includes("deploy_keys +studio-os:7") && r.changes.every((c) => c.includes(" +")), "the first list shows every entry as added");
   assert.equal(r.counts.deploy_keys, 1);
   assert.ok(!dump(store).includes(main), "after the tap only the passkey-sealed box remains");
   assert.equal((await store.get<any>("gh.app.main")).pending, undefined, "the one-time hold is forgotten");
@@ -175,20 +188,70 @@ test("nightly GitHub count: clean, then a planted deploy key and a removed branc
   gh.org.rulesets = [];
   const night = await (vault as any).ghHeadcount();
   assert.equal(night.ok, false);
-  assert.deepEqual(night.changes, ["deploy_keys +studio-os:99", "rulesets -front-desk:5:active"]);
+  assert.equal(night.changes[0], "deploy_keys +studio-os:99");
+  assert.match(night.changes[1], /^rulesets -front-desk:5:active:[0-9a-f]{16}$/);
   // Ben accepts the changes with another tap; the list now matches.
   const again = await baseline(vault);
-  assert.deepEqual(again.changes, ["deploy_keys +studio-os:99", "rulesets -front-desk:5:active"]);
+  assert.deepEqual(again.changes, night.changes);
   assert.deepEqual(await (vault as any).ghHeadcount(), { ok: true, changes: [] });
 });
+
+// Codex C6a-1 r1 #2, #3: changes that keep every id the same must still show.
+for (const [what, change, expect] of [
+  ["a branch rule weakened in place (same id, same enforcement)", (o: any) => (o.rule = { ...o.rule, rules: [{ type: "pull_request", parameters: { required_approving_review_count: 0 } }] }), /^rulesets [+-]front-desk:5:active:/],
+  ["a branch rule retargeted in place", (o: any) => (o.rule = { ...o.rule, conditions: { ref_name: { include: ["refs/heads/nothing"] } } }), /^rulesets [+-]front-desk:5:active:/],
+  ["a repo hidden from the watcher", (o: any) => o.repos.pop(), /^repos -studio-os:private$/],
+] as const) {
+  test(`nightly count names ${what}`, async () => {
+    const { vault, gh } = await connected();
+    assert.equal((await baseline(vault)).ok, true);
+    change(gh.org);
+    const night = await (vault as any).ghHeadcount();
+    assert.equal(night.ok, false);
+    assert.ok(night.changes.some((c: string) => expect.test(c)), JSON.stringify(night.changes));
+  });
+}
+
+for (const [what, change, why] of [
+  ["narrowed to selected repositories", (o: any) => (o.selection = "selected"), /installation_not_all_repositories/],
+  ["given write", (o: any) => (o.hcPerms = { ...o.hcPerms, contents: "write" }), /installation_permissions_too_wide/],
+] as const) {
+  test(`nightly count fails when the watcher itself is ${what}`, async () => {
+    const { vault, gh } = await connected();
+    assert.equal((await baseline(vault)).ok, true);
+    change(gh.org);
+    const night = await (vault as any).ghHeadcount();
+    assert.equal(night.ok, false);
+    assert.match(night.error ?? "", why);
+  });
+}
+
+test("baseline accepts only the state Ben was shown: a key added after his screen is not blessed", async () => {
+  const { vault, gh, store } = await connected();
+  assert.equal((await baseline(vault)).ok, true);
+  const before = await store.get("gh.baseline");
+  const shown = (await vault.ghPreview()).snapshot;
+  gh.org.keys["front-desk"].push(55);
+  const r = await baseline(vault, 7, shown);
+  assert.equal(r.ok, false);
+  assert.match(r.error ?? "", /github_changed_since_request/);
+  assert.deepEqual(await store.get("gh.baseline"), before, "nothing recorded");
+  assert.deepEqual((await (vault as any).ghHeadcount()).changes, ["deploy_keys +front-desk:55"], "still alarms");
+});
+
+for (const fail of ["wideApp", "wideInstall"] as const) {
+  test(`setup refuses a headcount App GitHub reports with write (${fail})`, async () => {
+    const { vault } = setupVault(fail);
+    await assert.rejects(makeApp(vault, "headcount"), /permissions_too_wide/);
+    assert.equal((await vault.ghStatus()).headcount.installed, false);
+  });
+}
 
 test("nightly count fails closed: not set up, and a list too long to read in one page", async () => {
   const { vault } = setupVault();
   assert.deepEqual((await vault.headcount()).github, { ok: false, changes: [], error: "github_not_set_up" });
   const full = await connected("fullPage");
-  const r = await baseline(full.vault);
-  assert.equal(r.ok, false);
-  assert.match(r.error ?? "", /too_many/);
+  await assert.rejects(full.vault.ghPreview(), /too_many/, "a full page is refused, not counted as the whole list");
 });
 
 for (const fail of ["hcGetsWrite", "hcMint500"] as const) {
