@@ -30,14 +30,17 @@ const COUNTS: Record<string, [string, string]> = {
 };
 
 /**
- * A name someone else chose (a key's name, a repo's) as inert text: no line breaks, control or
- * invisible characters, no quotes to close, at most 60 characters. It can never read as the page's own words.
+ * A name someone else chose (a key's name, a repo's) as inert text: plain ASCII, no quotes to close,
+ * at most 60 characters, flagged when anything was replaced. It can never pass as the page's own words.
  */
 export function name(raw: string): string {
-  // Allow-list: letters, digits, spaces and a few plain symbols. Everything else -- line breaks,
-  // control and invisible characters, text-direction overrides, straight or curly quotes -- is a space.
-  const flat = raw.replace(/[^\p{L}\p{M}\p{N} ._\-@/()+,:#]/gu, " ").replace(/\s+/g, " ").trim();
-  return `"${flat.length > 60 ? `${flat.slice(0, 57)}...` : flat}"`;
+  // Plain ASCII letters, digits, spaces and a few symbols only (GitHub's own names are all ASCII).
+  // Anything else -- look-alike letters, accents stacked on letters, invisible or text-direction
+  // characters, quotes, line breaks -- becomes "?" and the name is flagged, so a disguise stands out.
+  const kept = raw.replace(/[^A-Za-z0-9 ._\-@/()+,:#]/g, "?");
+  const flat = kept.replace(/\s+/g, " ").trim();
+  const short = flat.length > 60 ? `${flat.slice(0, 57)}...` : flat;
+  return `"${short}"${kept === raw ? "" : " (has unusual characters)"}`;
 }
 
 /** "administration=write,metadata=read" -> "can change: administration; can read: metadata". */
