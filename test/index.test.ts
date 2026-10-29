@@ -378,7 +378,7 @@ test("c-box key: Ben enrolls it by Face ID; the screen shows its fingerprint and
   assert.match(fp, /^([0-9a-f]{4}-){3}[0-9a-f]{4}$/);
   const page = await (await callV(store, fakeVault(true), `/approve/${id}`)).text();
   assert.match(page, new RegExp(`Fingerprint ${fp}`));
-  assert.match(page, /Only approve if the agent just showed you this same fingerprint/);
+  assert.match(page, /the agent must have just shown you this same fingerprint in chat: /);
   assert.equal((await approveAs(store, fakeVault(true), key, id)).status, 200);
   assert.equal((await desk(store).cboxKey())!.fingerprint, fp);
   assert.ok(!(await (await callV(store, fakeVault(true), "/cbox-key")).text()).includes("No c-box key"));

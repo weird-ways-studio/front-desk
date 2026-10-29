@@ -43,6 +43,20 @@ function page(title: string, nonce: string, body: string, script = ""): string {
 <body>${body}${script ? `<script nonce="${nonce}">${CLIENT}${script}</script>` : ""}</body></html>`;
 }
 
+/**
+ * What the phone shows after the tap, from the HTTP status (null: no answer arrived) and the parsed
+ * body (null: unreadable). Runs in the browser as written (approvePage embeds its source) and in tests.
+ * Done only when the front desk says so; anything unclear says so and asks Ben not to tap again.
+ */
+export function outcomeView(status: number | null, j: unknown): { ok: boolean; head: string; text: string } {
+  const b = (j && typeof j === "object" ? j : {}) as { outcome?: unknown; summary?: unknown; error?: unknown };
+  const again = "Do not tap again; tell the agent";
+  if (status === null) return { ok: false, head: "Unclear", text: `The connection failed before the front desk answered, so it is unknown whether your tap arrived. ${again}: [no answer]` };
+  if (status >= 400 && status < 500 && typeof b.error === "string") return { ok: false, head: "Not approved", text: `The front desk refused the tap, so this request is not approved. Tell the agent the words in brackets: [${b.error}]` };
+  if (status !== 200 || typeof b.summary !== "string" || (b.outcome !== "done" && b.outcome !== "not_done")) return { ok: false, head: "Unclear", text: `No clear answer came back (status ${status}), so it is unknown what happened. ${again}: [unclear answer]` };
+  return { ok: b.outcome === "done", head: b.outcome === "done" ? "Done" : "Not done", text: b.summary };
+}
+
 // Step 1 of 2 is reading what approving does; step 2 is the plain result after the tap. The exact
 // technical text is there, folded, never instead of the plain words (instruction.orient-the-person).
 export function approvePage(g: Grant, options: unknown, nonce: string): string {
@@ -73,12 +87,12 @@ document.getElementById('go').onclick=async e=>{const t0=Date.now();e.target.dis
   allowCredentials:(opts.allowCredentials||[]).map(a=>({type:'public-key',id:u2b(a.id)})),...(opts.prfSalt?{extensions:{prf:{eval:{first:u2b(opts.prfSalt)}}}}:{})}})}
  catch(err){failed(err,t0);e.target.disabled=false;return}
  const x=(c.getClientExtensionResults&&c.getClientExtensionResults().prf)||{};const first=x.results&&x.results.first;
- const res=await fetch(location.pathname,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...cred(c),prf:first?b2u(first):null})});
- const j=await res.json().catch(()=>({}));const bad=j.result&&j.result.ok!==true;
- document.getElementById('step').textContent='Step 2 of 2 · Result';e.target.hidden=true;
- show(res.ok&&!bad,res.ok&&!bad?'Done':'Not done');
- document.getElementById('after').textContent=res.ok?(j.summary||''):'Your tap was not accepted, so nothing happened. Send the agent the words in brackets: ['+(j.error||res.status)+']';
- if(j.result)document.getElementById('exact').textContent+='\\n\\nResult:\\n'+JSON.stringify(j.result,null,1)};`,
+ let res=null,j=null;try{res=await fetch(location.pathname,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...cred(c),prf:first?b2u(first):null})});j=await res.json().catch(()=>null)}catch(_){}
+ const v=outcomeView(res?res.status:null,j);
+ document.getElementById('step').textContent='Step 2 of 2 · Result';e.target.hidden=true;show(v.ok,v.head);
+ document.getElementById('after').textContent=v.text;
+ if(j&&j.result)document.getElementById('exact').textContent+='\\n\\nResult:\\n'+JSON.stringify(j.result,null,1)};
+${outcomeView.toString()}`,
   );
 }
 

@@ -93,6 +93,40 @@ function ruleset(repo: string, enforcement: string, raw: string): string {
   return `${repo}, ${branch} (${state}): ${rules.join("; ") || "no rules"}; ${skip}`;
 }
 
+/** Every setting of a ruleset as "where: value", rules keyed by their type, so two versions compare. */
+function settings(raw: string): Map<string, string> | null {
+  let r: unknown;
+  try {
+    r = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const out = new Map<string, string>();
+  const walk = (v: unknown, at: string) => {
+    if (Array.isArray(v) && at.endsWith("rules")) for (const rule of v as { type?: string }[]) walk(rule, `${at} > ${String(rule?.type ?? "?")}`);
+    else if (v && typeof v === "object" && !Array.isArray(v)) for (const [k, x] of Object.entries(v)) walk(x, at ? `${at} > ${k}` : k);
+    else out.set(at, v === true ? "yes" : v === false ? "no" : v === null ? "not visible" : JSON.stringify(v));
+  };
+  walk(r, "");
+  return out;
+}
+
+/** What differs between two versions of a ruleset, setting by setting, in words. */
+function settingChanges(before: string, after: string): string[] {
+  const a = settings(before), b = settings(after);
+  if (!a || !b) return ["a setting the page cannot read"];
+  const keys = [...new Set([...a.keys(), ...b.keys()])].filter((k) => a.get(k) !== b.get(k));
+  return keys.map((k) => `${k.replace(/_/g, " ")}: ${a.get(k) ?? "not set"} -> ${b.get(k) ?? "not set"}`);
+}
+
+/** How many of a ruleset's settings the plain sentence does not put in words. */
+function unshown(raw: string): number {
+  const all = settings(raw);
+  if (!all) return 1;
+  const said = /^(target|enforcement|bypass_actors|conditions > ref_name > (include|exclude)|rules > (deletion|non_fast_forward|pull_request|required_status_checks|required_signatures) > type|rules > pull_request > parameters > (required_approving_review_count|require_last_push_approval))$/;
+  return [...all.keys()].filter((k) => !said.test(k)).length;
+}
+
 /** One vault line's item ("Shelflip:private") in words, by kind. */
 function item(kind: string, raw: string): string {
   if (kind === "repos") {
@@ -124,9 +158,27 @@ export function plainChanges(lines: string[]): { heading: string; items: string[
     else (g.gone++, g.items.push(`Gone: ${item(kind, m[3]!)}`));
     groups.set(kind, g);
   }
-  // A change the plain words cannot show (e.g. a rule setting they do not name) would read the same
-  // as New and Gone: say so, and point at the exact lines, so it is never read as "no change".
-  for (const g of groups.values()) {
+  // A changed ruleset arrives as Gone + New with the same repo and id: say, setting by setting, what
+  // changed, so no weakening hides behind words that only cover some settings (Codex readable r1 #1).
+  // A new ruleset says how many of its settings the words leave out.
+  const rules = lines.filter((l) => /^rulesets [+-]/.test(l)).map((l) => /^rulesets ([+-])([^:]+:\d+):\w+:(.*)$/.exec(l));
+  const rg = groups.get("rulesets");
+  if (rg) {
+    rg.items = rg.items.map((i, n) => {
+      const m = rules[n];
+      if (!m || m[1] !== "+") return i;
+      const old = rules.find((o) => o?.[1] === "-" && o[2] === m[2]);
+      if (old) {
+        const diff = settingChanges(old[3]!, m[3]!);
+        return `${i}. CHANGED: ${diff.join("; ") || "nothing the page can see"} (exact lines under Exact details)`;
+      }
+      const extra = unshown(m[3]!);
+      return extra ? `${i}; plus ${extra} more setting${extra === 1 ? "" : "s"} these words leave out (see Exact details)` : i;
+    });
+  }
+  // Any other change the words cannot show reads the same as New and Gone: flag it, never "no change".
+  for (const [kind, g] of groups) {
+    if (kind === "rulesets") continue;
     const said = (i: string) => i.replace(/^(New|Gone): /, "");
     const both = new Set(g.items.filter((i) => i.startsWith("New: ")).map(said).filter((t) => g.items.includes(`Gone: ${t}`)));
     g.items = g.items.map((i) => (both.has(said(i)) ? `${i} (CHANGED in a way these words do not show: read Exact details before approving)` : i));

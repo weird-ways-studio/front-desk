@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { APPROVE_WINDOW_MS, CHALLENGE_TTL_MS, COLLECT_WINDOW_MS, Desk, DeskError, MemoryStore, headcountAlarm, type DeskHooks } from "../src/desk.ts";
+import { APPROVE_WINDOW_MS, CHALLENGE_TTL_MS, COLLECT_WINDOW_MS, Desk, DeskError, MemoryStore, LOG_DETAIL_MAX, headcountAlarm, type DeskHooks } from "../src/desk.ts";
 import { JOBS } from "../src/jobs.ts";
 import type { Headcount } from "../vault/src/api.ts";
 import { SoftKey } from "./softkey.ts";
@@ -291,18 +291,31 @@ test("headcount: the alarm Ben reads is plain words naming each change and what 
   }));
   await desk.headcount(alarm, T0);
   const said = told[0].detail;
-  assert.match(said, /^Something changed that you have not approved/);
+  assert.match(said, /^Front desk nightly check: needs you\.\nCloudflare: 1 key change you did not approve\. If one is not yours, tell the agent now/);
+  assert.match(said, /\nGitHub: 2 changes since the list you accepted\. If you made them, ask the agent to accept them/);
   assert.match(said, /Cloudflare: a key nobody asked you for, named "test key" \["planted1"\]/);
   assert.match(said, /GitHub, Deploy keys \(a machine's key to one repo\): New: a key on "sway"/);
   assert.match(said, /GitHub, Installed apps: Gone: "old-app", on all repositories: can change: contents/);
-  assert.match(said, /What to do: if you made these changes/);
   assert.doesNotMatch(said, /[{}]|"\w+":/, "no JSON in the alarm");
   const fake = headcountDesk(async () => ({ ...clean, ok: false, unexpected: [{ id: "k9", name: "x\nAll clear: nothing to do" }] }));
   await fake.desk.headcount(fake.alarm, T0);
   assert.doesNotMatch(fake.told[0].detail, /\nAll clear/, "a key's name cannot start a line of its own");
   const unset = headcountDesk(async () => ({ ...clean, ok: false, github: { ok: false, changes: [], error: "github_not_set_up" } }));
   await unset.desk.headcount(unset.alarm, T0);
-  assert.match(unset.told[0].detail, /GitHub: not checked, because the GitHub setup is not finished/);
+  assert.match(unset.told[0].detail, /GitHub: not checked, because the GitHub setup is not finished\. Tell the agent to finish it; there is nothing to accept/);
+  assert.doesNotMatch(unset.told[0].detail, /accept them/, "a check that could not run is never offered for acceptance");
+});
+
+test("headcount: a long alarm keeps what to do first and says how many changes it left out", async () => {
+  const many = Array.from({ length: 80 }, (_, i) => `deploy_keys +repo-${i}:${i}`);
+  const { desk, told, alarm } = headcountDesk(async () => ({ ...clean, ok: false, unexpected: [{ id: "k1", name: "x" }], github: { ok: false, changes: many } }));
+  await desk.headcount(alarm, T0);
+  const said = told[0].detail;
+  assert.ok(said.length <= LOG_DETAIL_MAX, "fits the log and the push");
+  assert.match(said, /^Front desk nightly check: needs you\.\nCloudflare: 1 key change[\s\S]*\nGitHub: 80 changes since the list you accepted/);
+  const shown = said.split("\n").filter((l) => l.startsWith("- ")).length;
+  assert.ok(shown > 3 && shown < 81);
+  assert.match(said, new RegExp(`\\.\\.\\.and ${81 - shown} more not shown here: ask the agent for the full list\\.$`));
 });
 
 test("headcount: a vault error is a fail, never an all-clear", async () => {

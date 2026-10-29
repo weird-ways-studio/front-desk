@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { JOBS, type Guide } from "../src/jobs.ts";
-import { approvePage } from "../src/page.ts";
+import { approvePage, outcomeView } from "../src/page.ts";
 import { plainChanges } from "../src/ghplain.ts";
 import type { Grant } from "../src/desk.ts";
 
@@ -76,8 +76,8 @@ test("every job's result sentence is plain: Done, Not done or Approved, with no 
     for (const result of [ok, { ok: false, error: "github_changed_since_request" }, undefined]) {
       const said = JOBS[job].done(result);
       assert.match(said, /^(Done|Not done|Approved)\b/, `${job}: ${said}`);
-      if (result?.ok === false && "vault" in JOBS[job]) assert.match(said, /nothing was handed over or accepted/);
-      if (result === undefined && "vault" in JOBS[job]) assert.match(said, /^Not done/);
+      if (result?.ok === false && "vault" in JOBS[job]) assert.match(said, /^Not done\. .+ Tell the agent the words in brackets: \[github_changed_since_request\]$/);
+      if (result === undefined && "vault" in JOBS[job]) assert.match(said, /^Not done: no answer came back from the vault, so it is unknown what ran\. Do not tap again/);
       assert.doesNotMatch(said.replace(/\[[^\]]*\]$/, ""), /[{}]|"\w+":/, `${job}: raw data in the result sentence`);
     }
   }
@@ -102,10 +102,15 @@ test("the GitHub list reads as grouped plain lines, marking new and gone, and sa
   // A branch left out of a rule is said, never hidden.
   const except = JSON.stringify({ ...JSON.parse(RULESET), conditions: { ref_name: { include: ["~ALL"], exclude: ["~DEFAULT_BRANCH"] } } });
   assert.match(plainChanges([`rulesets +front-desk:666:active:${except}`])[0]!.items[0]!, /EXCEPT the main branch/);
-  // A change the words cannot show (a setting they do not name) is flagged, never read as no change.
-  const weaker = JSON.stringify({ ...JSON.parse(RULESET), rules: [...JSON.parse(RULESET).rules.slice(0, 2), { type: "pull_request", parameters: { required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews_on_push: false } }] });
-  const pair = plainChanges([`rulesets -front-desk:666:active:${RULESET}`, `rulesets +front-desk:666:active:${weaker}`])[0]!;
-  for (const i of pair.items) assert.match(i, /CHANGED in a way these words do not show: read Exact details/);
+  // Every changed setting is listed, even when another visible one changed too (Codex readable r1 #1).
+  const rs = (count: number, dismiss: boolean) => JSON.stringify({ ...JSON.parse(RULESET), rules: [...JSON.parse(RULESET).rules.slice(0, 2), { type: "pull_request", parameters: { required_approving_review_count: count, require_last_push_approval: true, dismiss_stale_reviews_on_push: dismiss } }] });
+  const both = plainChanges([`rulesets -front-desk:666:active:${rs(2, true)}`, `rulesets +front-desk:666:active:${rs(1, false)}`])[0]!;
+  assert.match(both.items[1]!, /CHANGED: rules > pull request > parameters > required approving review count: 2 -> 1; rules > pull request > parameters > dismiss stale reviews on push: yes -> no/);
+  // A new rule says how many of its settings the words leave out.
+  assert.match(plainChanges([`rulesets +front-desk:666:active:${rs(1, false)}`])[0]!.items[0]!, /; plus 1 more setting these words leave out \(see Exact details\)$/);
+  // Anything else that reads the same before and after is flagged, never read as no change.
+  const twin = plainChanges(["apps -x#1:all:contents=write", "apps +x#2:all:contents=write"])[0]!;
+  for (const i of twin.items) assert.match(i, /CHANGED in a way these words do not show/);
 });
 
 test("the exact lines stay available, folded under Exact details", () => {
@@ -127,4 +132,33 @@ test("a name someone else chose cannot read as the page's own words", () => {
   // A look-alike of our own App (Cyrillic "\u0430") never reads as the real one.
   assert.match(plainChanges(["apps +wws-front-desk#1:all:contents=write", "apps +wws-front-d\u0435sk#2:all:contents=write"])[0]!.items[1]!, /"wws-front-d\?sk" \(has unusual characters\)/);
   assert.equal(plainChanges(["repos +my-repo_2.0:private"])[0]!.items[0]!, 'New: "my-repo_2.0" (private)', "ordinary names unflagged");
+});
+
+test("a standing key's approval says plainly that it never expires", () => {
+  assert.match((JOBS["cf.token.headcount.setup"].explain as () => Guide)().does, /It never expires/);
+});
+
+test("each failed job says what it actually left behind", () => {
+  assert.match(JOBS["gh.app.baseline"].done({ ok: false, error: "e", main: { locked_to_passkey_now: true } }), /list was not saved[\s\S]*key is now locked to your passkey; that part is done/);
+  assert.doesNotMatch(JOBS["gh.app.baseline"].done({ ok: false, error: "e", main: { locked_to_passkey_now: false } }), /locked/);
+  assert.match(JOBS["cf.dns.txt.probe"].done({ ok: false, error: "e", added: true, removed: false, minted: [{ id: "a", deleted: false }] }), /test record may still be in DNS; a 5-minute key was not deleted/);
+  assert.match(JOBS["cf.token.zone.read"].done({ ok: false, error: "key delete failed: 500" }), /No key was handed to the agent[\s\S]*could not be deleted: the agent must remove it/);
+  assert.match(JOBS["cf.token.headcount.setup"].done({ ok: false, error: "e", key_id: "k" }), /keeps its previous key; the new one did not pass/);
+});
+
+test("after the tap, Done shows only when the front desk says done; anything unclear says so", () => {
+  assert.deepEqual(outcomeView(200, { outcome: "done", summary: "Done. x" }), { ok: true, head: "Done", text: "Done. x" });
+  assert.deepEqual(outcomeView(200, { outcome: "not_done", summary: "Not done. y" }), { ok: false, head: "Not done", text: "Not done. y" });
+  for (const [status, body] of [[200, null], [200, {}], [200, { ok: true }], [200, { outcome: "done" }], [200, { outcome: "yes", summary: "Done" }], [500, { error: "boom" }], [502, null]] as const) {
+    const v = outcomeView(status, body);
+    assert.equal(v.ok, false, JSON.stringify([status, body]));
+    assert.equal(v.head, "Unclear");
+    assert.match(v.text, /unknown what happened\. Do not tap again/);
+  }
+  assert.match(outcomeView(null, null).text, /unknown whether your tap arrived/);
+  const refused = outcomeView(403, { error: "wrong_grant" });
+  assert.deepEqual([refused.ok, refused.head], [false, "Not approved"]);
+  assert.match(refused.text, /not approved\. Tell the agent the words in brackets: \[wrong_grant\]/);
+  // The page runs this same code.
+  assert.ok(approvePage(grant("test.echo"), {}, "n").includes(outcomeView.toString()));
 });

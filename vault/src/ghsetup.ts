@@ -67,7 +67,10 @@ async function next(logic: VaultLogic, s: Awaited<ReturnType<VaultLogic["ghStatu
   for (const kind of ["headcount", "main"] as AppKind[]) {
     if (s[kind].created && !s[kind].installed) {
       return page(`${head(STEP[`install:${kind}`]!, `Let ${NAMES[kind]} into your repos`)}
-<p>It was created, but GitHub has not sent it back installed. On GitHub, open ${ORG}'s Settings &gt; GitHub Apps, install it on <b>All repositories</b>, and you come back here.</p>`, 200, TITLE);
+<p>It was created, but GitHub has not sent it back installed. Until you install it, it can't see any repo.</p>
+${LOGIN}
+<p><b>Expect on GitHub:</b> open ${ORG}'s Settings &gt; GitHub Apps, then this App, then Install. Choose <b>All repositories</b>. The permissions should read: <i>${PERMS[kind]}</i>. If they say anything else, stop and tell the agent. Then tap <b>Install</b>.</p>
+<p><b>Next:</b> GitHub sends you back here.</p>`, 200, TITLE);
     }
     if (!s[kind].created) {
       const state = await logic.ghStart(kind);

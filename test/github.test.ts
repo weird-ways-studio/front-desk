@@ -354,6 +354,7 @@ test("pages: Ben only; GitHub's form allowed only on /github; everything 404 onc
   const createdHtml = await created.text();
   assert.match(html, /Step 1 of 5[\s\S]*Create the watcher \(read-only\)[\s\S]*Expect on GitHub:[\s\S]*Next:/);
   assert.match(createdHtml, /Step 2 of 5[\s\S]*Done: the watcher \(read-only\) exists[\s\S]*All repositories[\s\S]*Read access to administration, members/);
+  assert.match(await (await get("/github")).text(), /Step 2 of 5[\s\S]*All repositories[\s\S]*Read access to administration, members[\s\S]*stop and tell the agent/, "coming back mid-setup keeps the permission check");
   assert.match(await (await get("/github/installed/headcount?installation_id=1010")).text(), /Step 2 of 5[\s\S]*Go to step 3/);
   assert.equal((await handleSetup(new Request(ORIGIN + "/github", { method: "POST" }), vault, "ben@example.test")).status, 404);
   assert.match(await (await get("/github")).text(), /Step 3 of 5[\s\S]*Create the repo-maker[\s\S]*within an hour/);

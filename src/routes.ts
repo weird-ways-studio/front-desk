@@ -111,7 +111,9 @@ export async function route(request: Request, store: Store, who: Who, now = Date
       }
       if (m === "POST") {
         const g = await desk.approve(parts[1], await body(request, desk, "approve", now), now);
-        return json({ ok: true, status: g.status, summary: JOBS[g.job].done(g.result), ...(g.result === undefined ? {} : { result: withoutSecret(g.result) }) });
+        const summary = JOBS[g.job].done(g.result);
+        const outcome = /^(Done|Approved)\b/.test(summary) ? "done" : "not_done";
+        return json({ ok: true, status: g.status, outcome, summary, ...(g.result === undefined ? {} : { result: withoutSecret(g.result) }) });
       }
     }
     if (m === "POST" && parts[0] === "collect" && parts.length === 2) {
