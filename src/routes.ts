@@ -101,7 +101,7 @@ export async function route(request: Request, store: Store, who: Who, now = Date
       const g = await desk.request(input, requester, now, source);
       const approveUrl = `${url.origin}/approve/${g.id}`;
       // A failed push never fails the request: the agent sees pushed=false, and why, and sends Ben the link itself.
-      const why = push ? await push(JOBS[g.job].describe(g.params), approveUrl).then(() => "", (e: Error) => pushError(e)) : "no ntfy topic set";
+      const why = push ? await push(JOBS[g.job].explain(g.params).does, approveUrl).then(() => "", (e: Error) => pushError(e)) : "no ntfy topic set";
       return json({ id: g.id, approve_url: approveUrl, expires_at: g.expires_at, pushed: !why, ...(why ? { push_error: why } : {}) }, 201);
     }
     if (parts[0] === "approve" && parts.length === 2) {
@@ -111,7 +111,7 @@ export async function route(request: Request, store: Store, who: Who, now = Date
       }
       if (m === "POST") {
         const g = await desk.approve(parts[1], await body(request, desk, "approve", now), now);
-        return json({ ok: true, status: g.status, ...(g.result === undefined ? {} : { result: withoutSecret(g.result) }) });
+        return json({ ok: true, status: g.status, summary: JOBS[g.job].done(g.result), ...(g.result === undefined ? {} : { result: withoutSecret(g.result) }) });
       }
     }
     if (m === "POST" && parts[0] === "collect" && parts.length === 2) {

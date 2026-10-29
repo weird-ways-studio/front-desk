@@ -26,7 +26,7 @@ const HEADERS = {
 const STYLE = `body{background:#111;color:#eee;font:17px/1.45 -apple-system,system-ui,sans-serif;margin:0;padding:16px;max-width:560px}
 h1{font-size:26px}.big{font-size:28px;font-weight:700}.pass{color:#4ade80}.fail{color:#f87171}
 textarea{width:100%;font-size:16px;box-sizing:border-box}button{width:100%;font-size:20px;padding:16px;border:0;border-radius:12px;background:#3b82f6;color:#fff;margin-top:16px}
-.key{font:20px/1.6 ui-monospace,monospace;word-break:break-all}`;
+.key{font:20px/1.6 ui-monospace,monospace;word-break:break-all}.muted{color:#aaa;font-size:15px}a{color:#60a5fa}`;
 
 export const esc = (t: string) => t.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 

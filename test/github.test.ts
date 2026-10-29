@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { createVerify, generateKeyPairSync, type KeyObject } from "node:crypto";
 import { MemoryStore } from "../src/desk.ts";
 import { b64url } from "../vault/src/seal.ts";
-import { GH_PENDING_MS, GH_STATE_MS, VaultLogic, type GhBaselineResult } from "../vault/src/vault.ts";
+import { GH_ESCALATION_REFUSAL, GH_PENDING_MS, GH_STATE_MS, VaultLogic, type GhBaselineResult } from "../vault/src/vault.ts";
 import { ORG, PERMISSIONS, appJwt, checkPermissions, manifest, pkcs8FromPem } from "../vault/src/github.ts";
 import { handleSetup } from "../vault/src/setup.ts";
 
@@ -78,7 +78,7 @@ function fakeGitHub(fail?: Fail) {
       const granted = PERMISSIONS[app] as Record<string, string>;
       const over = Object.entries(asked as Record<string, string>).some(([k, v]) => !granted[k] || level[v] > level[granted[k]]);
       if (over && fail === "hcMint500" && app === "headcount") return json({ message: "Server Error" }, 500);
-      if (over && !(fail === "hcGetsWrite" && app === "headcount")) return json({ message: "The permissions requested are not granted to this installation." }, 422);
+      if (over && !(fail === "hcGetsWrite" && app === "headcount")) return json({ message: "The level of access for permissions requested are not granted to this installation." }, 422);
       const t = `ghs_${app}_${++n}`;
       tokens.set(t, { app, perms: asked });
       return json({ token: t, expires_at: new Date(NOW + 3600_000).toISOString() }, 201);
@@ -351,10 +351,24 @@ test("pages: Ben only; GitHub's form allowed only on /github; everything 404 onc
   assert.match((await get("/setup")).headers.get("content-security-policy") ?? "form-action 'self'", /form-action 'self'/);
   const state = decodeURIComponent(html.match(/state=([^"]+)"/)![1]);
   const created = await get(`/github/created/headcount?code=headcountcode0123456789&state=${encodeURIComponent(state)}`);
-  assert.match(await created.text(), /PASS: the read-only headcount App created/);
+  const createdHtml = await created.text();
+  assert.match(html, /Step 1 of 5[\s\S]*Create the watcher \(read-only\)[\s\S]*Expect on GitHub:[\s\S]*Next:/);
+  assert.match(createdHtml, /Step 2 of 5[\s\S]*Done: the watcher \(read-only\) exists[\s\S]*All repositories[\s\S]*Read access to administration, members/);
+  assert.match(await (await get("/github/installed/headcount?installation_id=1010")).text(), /Step 2 of 5[\s\S]*Go to step 3/);
   assert.equal((await handleSetup(new Request(ORIGIN + "/github", { method: "POST" }), vault, "ben@example.test")).status, 404);
-  await vault.ghInstalled("headcount", "1010");
+  assert.match(await (await get("/github")).text(), /Step 3 of 5[\s\S]*Create the repo-maker[\s\S]*within an hour/);
   await makeApp(vault, "main");
+  assert.match(await (await get("/github")).text(), /Step 5 of 5[\s\S]*tell the agent "ready"[\s\S]*Next:<\/b> nothing/);
   await baseline(vault);
   assert.equal((await get("/github")).status, 404);
+});
+
+test("only GitHub's exact permission refusal counts as the read-only App being refused write", () => {
+  assert.ok(GH_ESCALATION_REFUSAL.test("gh_422: The level of access for permissions requested are not granted to this installation."));
+  for (const other of [
+    "gh_422: Validation failed: permission is invalid",
+    "gh_403: Resource not accessible by integration (permission)",
+    "gh_500: permissions service unavailable",
+    "gh_422: The level of access for permissions requested are not granted to this installation. Retry later",
+  ]) assert.equal(GH_ESCALATION_REFUSAL.test(other), false, other);
 });

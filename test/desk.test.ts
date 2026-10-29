@@ -269,7 +269,7 @@ function headcountDesk(answer: () => Promise<Headcount>) {
 test("headcount: a clean night logs 'headcount_ok' and sends the all-clear", async () => {
   const { desk, told, alarm } = headcountDesk(async () => clean);
   await desk.headcount(alarm, T0);
-  assert.deepEqual(told, [{ ok: true, detail: "ok: 5 keys, all expected" }]);
+  assert.deepEqual(told, [{ ok: true, detail: "All clear: 5 Cloudflare keys, all expected; GitHub matches the list you accepted." }]);
   const [row] = await desk.readLog();
   assert.equal(row.event, "headcount_ok");
 });
@@ -280,6 +280,26 @@ test("headcount: a planted key fails the alarm, naming the key, and is logged", 
   assert.equal(told[0].ok, false);
   assert.match(told[0].detail, /planted1/);
   assert.equal((await desk.readLog())[0].event, "headcount_mismatch");
+});
+
+test("headcount: the alarm Ben reads is plain words naming each change and what to do, never raw data", async () => {
+  const { desk, told, alarm } = headcountDesk(async () => ({
+    ...clean,
+    ok: false,
+    unexpected: [{ id: "planted1", name: "test key" }],
+    github: { ok: false, changes: ["deploy_keys +sway:99", "apps -old-app#5:all:contents=write"] },
+  }));
+  await desk.headcount(alarm, T0);
+  const said = told[0].detail;
+  assert.match(said, /^Something changed that you have not approved/);
+  assert.match(said, /Cloudflare: a key nobody asked you for, named "test key" \[planted1\]/);
+  assert.match(said, /GitHub, Deploy keys \(a machine's key to one repo\): New: a key on sway/);
+  assert.match(said, /GitHub, Installed apps: Gone: old-app, on all repositories: can change: contents/);
+  assert.match(said, /What to do: if you made these changes/);
+  assert.doesNotMatch(said, /[{}]|"\w+":/, "no JSON in the alarm");
+  const unset = headcountDesk(async () => ({ ...clean, ok: false, github: { ok: false, changes: [], error: "github_not_set_up" } }));
+  await unset.desk.headcount(unset.alarm, T0);
+  assert.match(unset.told[0].detail, /GitHub: not checked, because the GitHub setup is not finished/);
 });
 
 test("headcount: a vault error is a fail, never an all-clear", async () => {
@@ -314,7 +334,7 @@ test("headcount alarm: all-clear pings the check; a fail pings /fail AND pushes 
   assert.deepEqual(sent, [
     { url: hc, body: "ok", title: undefined },
     { url: `${hc}/fail`, body: "MISMATCH planted1", title: undefined },
-    { url: topic, body: "MISMATCH planted1", title: "Front desk: key headcount MISMATCH" },
+    { url: topic, body: "MISMATCH planted1", title: "Front desk nightly check: needs you" },
   ]);
   for (const bad of [undefined, "", "http://hc-ping.com/0f2e8a4c-1b2d-4e5f-8a9b-0c1d2e3f4a5b", "https://evil.example/0f2e8a4c-1b2d-4e5f-8a9b-0c1d2e3f4a5b"])
     assert.equal(headcountAlarm(bad, topic, fetchFn), undefined);
@@ -332,6 +352,6 @@ test("headcount setup job: takes no parameters and says it is a standing key", (
   assert.deepEqual(job.validate({}), {});
   assert.equal(job.validate({ zone: "benculbert.com" }), null);
   assert.equal(job.validate(null), null);
-  assert.match(job.describe(), /standing key/);
+  assert.match((job.explain as () => { does: string })().does, /standing key/);
   assert.equal(job.vault, true);
 });
