@@ -119,5 +119,10 @@ test("a name someone else chose cannot read as the page's own words", () => {
   assert.equal(g!.items.length, 1);
   assert.doesNotMatch(g!.items[0]!, /\n/);
   assert.match(g!.items[0]!, /^"[^"\n]*"$/, "shown whole, as one quoted, inert item");
+  assert.match(plainChanges(["repos +a\u2028b:private"])[0]!.items[0]!, /^"[^"\n\u2028]*"$/, "a line separator too");
   assert.match(plainChanges(['repos +a"b:private'])[0]!.items[0]!, /^New: "a b" \(private\)$/, "no quote to close");
+  for (const sneaky of ["a\u201db", "a\u202eb", "a\u200bb", "a\u2066b", "a\ufeffb", "a\u00a0b", "a\u0007b"]) {
+    assert.equal(plainChanges([`repos +${sneaky}:private`])[0]!.items[0]!, 'New: "a b" (private)', JSON.stringify(sneaky));
+  }
+  assert.equal(plainChanges(["repos +caf\u00e9-2:private"])[0]!.items[0]!, 'New: "caf\u00e9-2" (private)', "ordinary letters stay");
 });
