@@ -53,7 +53,7 @@ test("over HTTP: enroll, ask, approve, collect; page shows stored grant, quotes 
   const asked = await call(store, "/request", { method: "POST", body: JSON.stringify({ job: "test.echo", params: { word: "hi" }, reason }) });
   const { id } = (await asked.json()) as { id: string };
   const pageHtml = await (await call(store, `/approve/${id}`)).text();
-  assert.ok(pageHtml.includes('Test only: echo the word &quot;hi&quot;'));
+  assert.ok(pageHtml.includes('Test only: the front desk echoes the word &quot;hi&quot;'));
   assert.ok(pageHtml.includes("&lt;script&gt;alert(1)&lt;/script&gt; please"));
   assert.ok(!pageHtml.includes("<script>alert(1)"));
   assert.ok(pageHtml.includes("Login: your <strong>front desk passkey</strong>"), "the screen names the login it wants (a830d543)");
@@ -377,8 +377,8 @@ test("c-box key: Ben enrolls it by Face ID; the screen shows its fingerprint and
   const fp = (await desk(store).grant(id)).params.fingerprint;
   assert.match(fp, /^([0-9a-f]{4}-){3}[0-9a-f]{4}$/);
   const page = await (await callV(store, fakeVault(true), `/approve/${id}`)).text();
-  assert.match(page, new RegExp(`fingerprint ${fp}\\. Requests signed`));
-  assert.match(page, /Only approve if the agent just showed you this same fingerprint/);
+  assert.match(page, new RegExp(`Fingerprint ${fp}`));
+  assert.match(page, /the agent must have just shown you this same fingerprint in chat: /);
   assert.equal((await approveAs(store, fakeVault(true), key, id)).status, 200);
   assert.equal((await desk(store).cboxKey())!.fingerprint, fp);
   assert.ok(!(await (await callV(store, fakeVault(true), "/cbox-key")).text()).includes("No c-box key"));
@@ -393,7 +393,7 @@ test("c-box key: one enrollment waits at a time; one asked before a removal (or 
   const { store, key, cbox } = await withCboxKey();
   const old = (await desk(store).cboxKey())!.fingerprint;
   const a = await askEnroll(store, cboxKey().spki);
-  assert.match(await (await callV(store, fakeVault(true), `/approve/${a}`)).text(), new RegExp(`REPLACING key ${old}`));
+  assert.match(await (await callV(store, fakeVault(true), `/approve/${a}`)).text(), new RegExp(`REPLACING the current one[\\s\\S]*replaces ${old}`));
   const again = await agentPost(store, fakeVault(true), "/request", { job: "cbox.key.enroll", params: { key: cboxKey().spki }, reason: "r" });
   assert.deepEqual(await again.json(), { error: "enroll_pending" });
   // Ben removes the key, so "a" was asked about a state that no longer exists.
@@ -495,8 +495,9 @@ test("minted key: pinned to the address Cloudflare saw, not one the agent names;
   assert.deepEqual((await desk(store).grant(id)).params, { zone: ZONE, minutes: "10", ip: CBOX });
   const page = await (await callV(store, fakeVault(true), `/approve/${id}`)).text();
   assert.match(page, /TEST key/);
-  assert.match(page, /not its DNS, not its settings/);
-  assert.match(page, /expires after 10 minutes and works only from the c-box \(203\.0\.113\.7\)/);
+  assert.match(page, /Not its DNS, not its settings/);
+  assert.match(page, /The key dies after 10 minutes/);
+  assert.match(page, /works only from 203\.0\.113\.7/);
 });
 
 test("minted key: refused over 15 minutes, for another zone, or with no usable address", async () => {
@@ -573,7 +574,7 @@ test("a request sends one push with its approve link; a failed push never fails 
   const out = (await res.json()) as { id: string; approve_url: string; pushed: boolean; push_error?: string };
   assert.equal(res.status, 201);
   assert.equal(out.pushed, true);
-  assert.deepEqual(sent, [{ what: 'Test only: echo the word "hi". Touches nothing.', url: `${base}/approve/${out.id}` }]);
+  assert.deepEqual(sent, [{ what: 'Test only: the front desk echoes the word "hi". It touches nothing.', url: `${base}/approve/${out.id}` }]);
   const broken: Push = async () => { throw new Error("ntfy down"); };
   const res2 = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, broken);
   assert.equal(res2.status, 201);

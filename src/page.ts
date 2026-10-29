@@ -2,7 +2,7 @@
 // grant; the agent's reason appears only as a labelled quote.
 
 import type { Grant, LogEntry } from "./desk.ts";
-import { JOBS } from "./jobs.ts";
+import { JOBS, type Guide } from "./jobs.ts";
 import type { CboxKey } from "./cboxkey.ts";
 
 export function esc(text: string): string {
@@ -16,6 +16,7 @@ body{background:var(--bg);color:var(--fg);font:17px/1.45 -apple-system,system-ui
 #status{font-size:28px;font-weight:700;min-height:1.4em;margin:4px 0 12px}
 #status.pass{color:var(--ok)}#status.fail{color:var(--bad)}
 .muted{color:var(--muted);font-size:15px}
+h2{font-size:18px;margin:16px 0 4px}ul{margin:0;padding-left:20px}li{margin:2px 0}.warn{color:var(--bad);font-weight:600}details{margin-top:20px}pre{white-space:pre-wrap;word-break:break-word;font-size:13px}
 blockquote{margin:8px 0;padding:8px 12px;border-left:4px solid var(--line)}
 button{width:100%;font-size:20px;padding:16px;border:0;border-radius:12px;background:var(--btn);color:#fff;margin-top:16px}
 button:disabled{opacity:.5}
@@ -42,27 +43,56 @@ function page(title: string, nonce: string, body: string, script = ""): string {
 <body>${body}${script ? `<script nonce="${nonce}">${CLIENT}${script}</script>` : ""}</body></html>`;
 }
 
+/**
+ * What the phone shows after the tap, from the HTTP status (null: no answer arrived) and the parsed
+ * body (null: unreadable). Runs in the browser as written (approvePage embeds its source) and in tests.
+ * Done only when the front desk says so; anything unclear says so and asks Ben not to tap again.
+ */
+export function outcomeView(status: number | null, j: unknown): { ok: boolean; head: string; text: string } {
+  const b = (j && typeof j === "object" ? j : {}) as { outcome?: unknown; summary?: unknown; error?: unknown };
+  const again = "Do not tap again; tell the agent";
+  if (status === null) return { ok: false, head: "Unclear", text: `The connection failed before the front desk answered, so it is unknown whether your tap arrived. ${again}: [no answer]` };
+  if (status >= 400 && status < 500 && typeof b.error === "string") return { ok: false, head: "Not approved", text: `The front desk refused the tap, so this request is not approved. Tell the agent the words in brackets: [${b.error}]` };
+  if (status !== 200 || typeof b.summary !== "string" || (b.outcome !== "done" && b.outcome !== "not_done")) return { ok: false, head: "Unclear", text: `No clear answer came back (status ${status}), so it is unknown what happened. ${again}: [unclear answer]` };
+  return { ok: b.outcome === "done", head: b.outcome === "done" ? "Done" : "Not done", text: b.summary };
+}
+
+// Step 1 of 2 is reading what approving does; step 2 is the plain result after the tap. The exact
+// technical text is there, folded, never instead of the plain words (instruction.orient-the-person).
 export function approvePage(g: Grant, options: unknown, nonce: string): string {
-  const describe = JOBS[g.job].describe(g.params);
+  const guide: Guide = JOBS[g.job].explain(g.params);
+  const sections = (guide.sections ?? [])
+    .map((s) => `<h2>${esc(s.heading)}</h2><ul>${s.items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>`)
+    .join("");
+  const exact = [guide.exact, `Job ${g.job} · asked by ${g.requester} · request ${g.id}`].filter(Boolean).join("\n\n");
   return page(
     "Approve access",
     nonce,
-    `<div id="status"></div>
+    `<p class="muted" id="step">Step 1 of 2 · Check what this does, then approve</p>
+<div id="status"></div>
 <h1>Approve this?</h1>
-<p><strong>${esc(describe)}</strong></p>
-<p class="muted">Job <code>${esc(g.job)}</code> · asked by ${esc(g.requester)} · expires ${new Date(g.expires_at).toISOString().slice(11, 16)} UTC</p>
-<p class="muted">The agent's words:</p><blockquote>${esc(g.reason)}</blockquote>
-<p class="muted">Login: your <strong>front desk passkey</strong>. Face ID offers only that one.</p>
-<button id="go">Next: approve with Face ID</button><pre id="after" class="muted" style="white-space:pre-wrap"></pre>`,
+<p><strong>${esc(guide.does)}</strong></p>
+${sections}
+${guide.warn ? `<p class="warn">${esc(guide.warn)}</p>` : ""}
+<p><strong>When you approve:</strong> ${esc(guide.expect)}</p>
+<p class="muted">The agent's reason, in its own words:</p><blockquote>${esc(g.reason)}</blockquote>
+<p class="muted">This request expires at <span id="expires">${new Date(g.expires_at).toISOString().slice(11, 16)} UTC</span>. Login: your <strong>front desk passkey</strong>; Face ID offers only that one.</p>
+<button id="go">Approve with Face ID</button>
+<p id="after"></p>
+<details><summary class="muted">Exact details (technical)</summary><pre id="exact" class="muted">${esc(exact)}</pre></details>`,
     `const opts=${JSON.stringify(options)};
+document.getElementById('expires').textContent=new Date(${g.expires_at}).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
 document.getElementById('go').onclick=async e=>{const t0=Date.now();e.target.disabled=true;
  let c;try{c=await navigator.credentials.get({publicKey:{challenge:u2b(opts.challenge),rpId:opts.rpId,timeout:opts.timeout,userVerification:'required',
   allowCredentials:(opts.allowCredentials||[]).map(a=>({type:'public-key',id:u2b(a.id)})),...(opts.prfSalt?{extensions:{prf:{eval:{first:u2b(opts.prfSalt)}}}}:{})}})}
  catch(err){failed(err,t0);e.target.disabled=false;return}
  const x=(c.getClientExtensionResults&&c.getClientExtensionResults().prf)||{};const first=x.results&&x.results.first;
- const res=await fetch(location.pathname,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...cred(c),prf:first?b2u(first):null})});
- const j=await res.json().catch(()=>({}));const bad=j.result&&j.result.ok!==true;show(res.ok&&!bad,res.ok?(bad?'FAIL: '+(j.result.error||'a check did not pass, see below'):'PASS'):'FAIL: '+(j.error||res.status));
- if(j.result)document.getElementById('after').textContent=JSON.stringify(j.result,null,1)};`,
+ let res=null,j=null;try{res=await fetch(location.pathname,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...cred(c),prf:first?b2u(first):null})});j=await res.json().catch(()=>null)}catch(_){}
+ const v=outcomeView(res?res.status:null,j);
+ document.getElementById('step').textContent='Step 2 of 2 · Result';e.target.hidden=true;show(v.ok,v.head);
+ document.getElementById('after').textContent=v.text;
+ if(j&&j.result)document.getElementById('exact').textContent+='\\n\\nResult:\\n'+JSON.stringify(j.result,null,1)};
+${outcomeView.toString()}`,
   );
 }
 
@@ -126,7 +156,7 @@ export function logPage(entries: LogEntry[], nonce: string): string {
     .slice()
     .reverse()
     .map((e) => {
-      const what = e.job ? (e.params ? JOBS[e.job as keyof typeof JOBS]?.describe(e.params) ?? e.job : e.job) : "";
+      const what = e.job ? (e.params ? JOBS[e.job as keyof typeof JOBS]?.explain(e.params).does ?? e.job : e.job) : "";
       return `<tr><td>${time(e.at)}</td><td><strong>${esc(e.event)}</strong>${e.grant_id ? `<br><span class="muted">${esc(e.grant_id.slice(0, 8))}</span>` : ""}</td>
 <td>${esc(what)}${e.detail ? `<br><span class="muted">${esc(e.detail)}</span>` : ""}</td><td>${esc(e.requester ?? "")}</td>
 <td>${e.reason ? `<q>${esc(e.reason)}</q>` : ""}</td><td>${e.expires_at ? time(e.expires_at) : ""}</td></tr>`;

@@ -27,10 +27,9 @@ export const GH_LABEL = "github-app-key v1";
 export const GH_PENDING_MS = 60 * 60_000;
 // GitHub's manifest code is good for one hour; the vault's matching `state` lasts as long.
 export const GH_STATE_MS = 60 * 60_000;
-// How GitHub refuses an installation key with permissions the App was not given (FROM MEMORY:
-// 422 "The permissions requested are not granted to this installation."; the first live run records
-// the exact text, and this is narrowed to it). Anything else -- an outage -- proves nothing.
-export const GH_ESCALATION_REFUSAL = /^gh_(422|403): .*permission/i;
+// How GitHub refuses an installation key with permissions the App was not given: VERIFIED live
+// 2026-10-28 (grant 8db03e71), exactly this. Anything else -- an outage, another 422 -- proves nothing.
+export const GH_ESCALATION_REFUSAL = /^gh_422: The level of access for permissions requested are not granted to this installation\.$/;
 
 export interface VaultStore {
   get<T>(key: string): Promise<T | undefined>;

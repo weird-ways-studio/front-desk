@@ -10,6 +10,7 @@ import {
   type AuthenticationResponseJSON,
   type RegistrationResponseJSON,
 } from "@simplewebauthn/server";
+import { ascii, name, plainChanges } from "./ghplain.ts";
 import { JOBS, type Job, type JobName } from "./jobs.ts";
 import { currentKey, fingerprint, keyRev, type CboxKey } from "./cboxkey.ts";
 import type { Headcount, VaultApi } from "../vault/src/api.ts";
@@ -140,6 +141,39 @@ export async function grantHash(g: Pick<Grant, "id" | "job" | "params" | "reques
 
 // Tells the off-box alarm the night's result (headcountAlarm below: healthchecks.io).
 // Throws when the alarm did not take it.
+/**
+ * The nightly count in words, for Ben's phone and the log (instruction.orient-the-person): what to do
+ * first, one line per kind of trouble with its own next step, then the changes, cut to fit `max`
+ * with a count of what was left out. The vault's exact reasons stay in brackets for the agent.
+ */
+export function headcountWords(r: Headcount, max = LOG_DETAIL_MAX): string {
+  if (r.ok) return `All clear: ${r.tokens} Cloudflare keys, all expected; GitHub matches the list you accepted.`;
+  if (r.error) return `The nightly check could not finish, so tonight is unconfirmed. Tell the agent to fix it; there is nothing to accept. [${name(r.error)}]`;
+  const cf: string[] = [
+    ...r.unexpected.map((k) => `Cloudflare: a key nobody asked you for, named ${name(k.name)} [${name(k.id)}]`),
+    ...r.stretched.map((k) => `Cloudflare: a key whose expiry was pushed later, now ${name(k.expires_on)} [${name(k.id)}]`),
+    ...r.missing.map((k) => `Cloudflare: one of the front desk's own keys is missing [${name(k)}]`),
+  ];
+  const gh = plainChanges(r.github.changes).flatMap((g) => g.items.map((i) => `GitHub, ${g.heading.split(":")[0]}: ${i}`));
+  const todo = ["Front desk nightly check: needs you."];
+  if (cf.length) todo.push(`Cloudflare: ${cf.length} key change${cf.length === 1 ? "" : "s"} you did not approve. If one is not yours, tell the agent now: it may be someone else's access. If you made it, tell the agent so it can check it.`);
+  if (gh.length) todo.push(`GitHub: ${gh.length} change${gh.length === 1 ? "" : "s"} since the list you accepted. If you made them, ask the agent to accept them (one Face ID tap). If not, tell the agent now.`);
+  if (r.github.error) todo.push(r.github.error === "github_not_set_up" ? "GitHub: not checked, because the GitHub setup is not finished. Tell the agent to finish it; there is nothing to accept." : `GitHub: could not be checked tonight, so it is unconfirmed. Tell the agent to fix it; there is nothing to accept. [${name(r.github.error)}]`);
+  const lines = [...todo];
+  const changes = [...cf, ...gh];
+  if (changes.length) lines.push("The changes:");
+  let shown = 0;
+  for (const c of changes) {
+    const rest = changes.length - shown - 1;
+    const tail = rest ? `\n...and ${rest} more not shown here: ask the agent for the full list.` : "";
+    if ([...lines, `- ${c}`].join("\n").length + tail.length > max) break;
+    lines.push(`- ${c}`);
+    shown++;
+  }
+  if (shown < changes.length) lines.push(`...and ${changes.length - shown} more not shown here: ask the agent for the full list.`);
+  return lines.map(ascii).join("\n");
+}
+
 export type Alarm = (ok: boolean, detail: string) => Promise<void>;
 
 /**
@@ -155,7 +189,7 @@ export function headcountAlarm(url: string | undefined, ntfyUrl?: string, fetchF
     if (!res.ok) throw new Error(`healthchecks answered ${res.status}`);
     if (ok) return;
     if (!ntfy) throw new Error("no ntfy topic set: the phone alert will not name the keys");
-    const push = await fetchFn(ntfy, { method: "POST", body: detail.slice(0, 3000), headers: { Title: "Front desk: key headcount MISMATCH", Priority: "high" } });
+    const push = await fetchFn(ntfy, { method: "POST", body: detail.slice(0, 3000), headers: { Title: "Front desk nightly check: needs you", Priority: "high" } });
     if (!push.ok) throw new Error(`ntfy answered ${push.status}`);
   };
 }
@@ -454,7 +488,7 @@ export class Desk {
     } catch (e) {
       r = { ok: false, tokens: -1, unexpected: [], stretched: [], missing: [], github: { ok: false, changes: [] }, error: (e as Error).message.slice(0, 120) };
     }
-    const detail = r.ok ? `ok: ${r.tokens} keys, all expected` : `MISMATCH: ${JSON.stringify(r).slice(0, LOG_DETAIL_MAX)}`;
+    const detail = headcountWords(r);
     await this.log({ event: r.ok ? "headcount_ok" : "headcount_mismatch", detail }, now);
     try {
       if (!alarm) throw new Error("no alarm configured");
