@@ -43,6 +43,9 @@ export function name(raw: string): string {
   return `"${short}"${kept === raw ? "" : " (has unusual characters)"}`;
 }
 
+/** Any character outside printable ASCII becomes "?", so no text can hide, reorder or break a line. */
+export const ascii = (t: string) => t.replace(/[^\x20-\x7e]/g, "?");
+
 /** "administration=write,metadata=read" -> "can change: administration; can read: metadata". */
 function perms(list: string): string {
   const by: Record<string, string[]> = { write: [], read: [], admin: [] };
@@ -183,6 +186,9 @@ export function plainChanges(lines: string[]): { heading: string; items: string[
     const both = new Set(g.items.filter((i) => i.startsWith("New: ")).map(said).filter((t) => g.items.includes(`Gone: ${t}`)));
     g.items = g.items.map((i) => (both.has(said(i)) ? `${i} (CHANGED in a way these words do not show: read Exact details before approving)` : i));
   }
+  // Last line of defence: every item is printable ASCII, whatever path its text came through (rule
+  // types, setting names and values, permission names). Our own words are all ASCII.
+  for (const g of groups.values()) g.items = g.items.map(ascii);
   return [...groups].map(([kind, g]) => ({
     heading: `${KINDS[kind] ?? kind}: ${[g.added && `${g.added} new`, g.gone && `${g.gone} gone`].filter(Boolean).join(", ") || "changed"}`,
     items: g.items,

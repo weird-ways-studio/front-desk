@@ -162,3 +162,13 @@ test("after the tap, Done shows only when the front desk says done; anything unc
   // The page runs this same code.
   assert.ok(approvePage(grant("test.echo"), {}, "n").includes(outcomeView.toString()));
 });
+
+test("no path lets hidden or direction characters into the list: rule types, setting values, permission names", () => {
+  const evil = JSON.stringify({ ...JSON.parse(RULESET), conditions: { ref_name: { include: ["main\u202eevil"], exclude: [] } }, rules: [{ type: "x\u2066y" }] });
+  const items = plainChanges([
+    `rulesets -front-desk:666:active:${RULESET}`,
+    `rulesets +front-desk:666:active:${evil}`,
+    "apps +a#1:all:con\u200btents=write",
+  ]).flatMap((g) => g.items);
+  for (const i of items) assert.match(i, /^[\x20-\x7e]*$/, i);
+});

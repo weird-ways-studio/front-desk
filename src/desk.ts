@@ -10,7 +10,7 @@ import {
   type AuthenticationResponseJSON,
   type RegistrationResponseJSON,
 } from "@simplewebauthn/server";
-import { name, plainChanges } from "./ghplain.ts";
+import { ascii, name, plainChanges } from "./ghplain.ts";
 import { JOBS, type Job, type JobName } from "./jobs.ts";
 import { currentKey, fingerprint, keyRev, type CboxKey } from "./cboxkey.ts";
 import type { Headcount, VaultApi } from "../vault/src/api.ts";
@@ -171,7 +171,7 @@ export function headcountWords(r: Headcount, max = LOG_DETAIL_MAX): string {
     shown++;
   }
   if (shown < changes.length) lines.push(`...and ${changes.length - shown} more not shown here: ask the agent for the full list.`);
-  return lines.join("\n");
+  return lines.map(ascii).join("\n");
 }
 
 export type Alarm = (ok: boolean, detail: string) => Promise<void>;
