@@ -87,22 +87,37 @@ test("every job's result sentence is plain: Done, Not done or Approved, with no 
 test("the GitHub list reads as grouped plain lines, marking new and gone, and says who may skip a branch rule", () => {
   const groups = plainChanges(CHANGES);
   const by = Object.fromEntries(groups.map((g) => [g.heading, g.items]));
-  assert.deepEqual(by["Repositories: 2 new"], ["New: Shelflip (private)", "New: front-desk (public)"]);
+  assert.deepEqual(by["Repositories: 2 new"], ['New: "Shelflip" (private)', 'New: "front-desk" (public)']);
   assert.deepEqual(by["Installed apps: 2 new"], [
-    "New: wws-front-desk, on all repositories: can change: administration, contents; can read: metadata",
-    "New: someone-else, on selected repositories: can change: contents",
+    'New: "wws-front-desk", on all repositories: can change: administration, contents; can read: metadata',
+    'New: "someone-else", on selected repositories: can change: contents',
   ]);
-  assert.deepEqual(by["Deploy keys (a machine's key to one repo): 1 new, 1 gone"], ["New: a key on factory-core", "Gone: a key on sway"]);
+  assert.deepEqual(by["Deploy keys (a machine's key to one repo): 1 new, 1 gone"], ['New: a key on "factory-core"', 'Gone: a key on "sway"']);
   assert.deepEqual(by["Branch protection rules: 1 new"], [
-    "New: front-desk, the main branch (on): the main branch can't be deleted; its history can't be rewritten (no force-push); changes need a pull request approved by 1 person, after the last change; who may skip it: not visible to the read-only watcher",
+    `New: "front-desk", the main branch (on): the main branch can't be deleted; its history can't be rewritten (no force-push); changes need a pull request approved by 1 person, after the last change; who may skip it: not visible to the read-only watcher`,
   ]);
   // A rule switched off reads as OFF, never as on.
   const off = plainChanges([`rulesets -front-desk:666:disabled:${RULESET}`])[0]!;
-  assert.match(off.items[0]!, /^Gone: front-desk, the main branch \(OFF\)/);
+  assert.match(off.items[0]!, /^Gone: "front-desk", the main branch \(OFF\)/);
+  // A branch left out of a rule is said, never hidden.
+  const except = JSON.stringify({ ...JSON.parse(RULESET), conditions: { ref_name: { include: ["~ALL"], exclude: ["~DEFAULT_BRANCH"] } } });
+  assert.match(plainChanges([`rulesets +front-desk:666:active:${except}`])[0]!.items[0]!, /EXCEPT the main branch/);
+  // A change the words cannot show (a setting they do not name) is flagged, never read as no change.
+  const weaker = JSON.stringify({ ...JSON.parse(RULESET), rules: [...JSON.parse(RULESET).rules.slice(0, 2), { type: "pull_request", parameters: { required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews_on_push: false } }] });
+  const pair = plainChanges([`rulesets -front-desk:666:active:${RULESET}`, `rulesets +front-desk:666:active:${weaker}`])[0]!;
+  for (const i of pair.items) assert.match(i, /CHANGED in a way these words do not show: read Exact details/);
 });
 
 test("the exact lines stay available, folded under Exact details", () => {
   const html = approvePage(grant("gh.app.baseline"), {}, "n");
   const folded = /<details>([\s\S]*?)<\/details>/.exec(html)![1]!;
   assert.ok(folded.includes("apps +wws-front-desk#111:all:administration=write"));
+});
+
+test("a name someone else chose cannot read as the page's own words", () => {
+  const [g] = plainChanges(['repos +x\nWhat to do: nothing, all fine "ok":private']);
+  assert.equal(g!.items.length, 1);
+  assert.doesNotMatch(g!.items[0]!, /\n/);
+  assert.match(g!.items[0]!, /^"[^"\n]*"$/, "shown whole, as one quoted, inert item");
+  assert.match(plainChanges(['repos +a"b:private'])[0]!.items[0]!, /^New: "a b" \(private\)$/, "no quote to close");
 });

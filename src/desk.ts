@@ -10,7 +10,7 @@ import {
   type AuthenticationResponseJSON,
   type RegistrationResponseJSON,
 } from "@simplewebauthn/server";
-import { plainChanges } from "./ghplain.ts";
+import { name, plainChanges } from "./ghplain.ts";
 import { JOBS, type Job, type JobName } from "./jobs.ts";
 import { currentKey, fingerprint, keyRev, type CboxKey } from "./cboxkey.ts";
 import type { Headcount, VaultApi } from "../vault/src/api.ts";
@@ -149,9 +149,9 @@ export function headcountWords(r: Headcount): string {
   if (r.ok) return `All clear: ${r.tokens} Cloudflare keys, all expected; GitHub matches the list you accepted.`;
   if (r.error) return `The nightly check could not finish, so nothing is confirmed tonight. Tell the agent: [${r.error}]`;
   const lines = ["Something changed that you have not approved. Check each line:"];
-  for (const k of r.unexpected) lines.push(`- Cloudflare: a key nobody asked you for, named "${k.name}" [${k.id}]`);
-  for (const k of r.stretched) lines.push(`- Cloudflare: a key whose expiry was pushed later, now ${k.expires_on} [${k.id}]`);
-  for (const k of r.missing) lines.push(`- Cloudflare: one of the front desk's own keys is missing [${k}]`);
+  for (const k of r.unexpected) lines.push(`- Cloudflare: a key nobody asked you for, named ${name(k.name)} [${name(k.id)}]`);
+  for (const k of r.stretched) lines.push(`- Cloudflare: a key whose expiry was pushed later, now ${name(k.expires_on)} [${name(k.id)}]`);
+  for (const k of r.missing) lines.push(`- Cloudflare: one of the front desk's own keys is missing [${name(k)}]`);
   if (r.github.error) lines.push(r.github.error === "github_not_set_up" ? "- GitHub: not checked, because the GitHub setup is not finished." : `- GitHub: not checked tonight [${r.github.error}]`);
   for (const g of plainChanges(r.github.changes)) for (const i of g.items) lines.push(`- GitHub, ${g.heading.split(":")[0]}: ${i}`);
   lines.push("What to do: if you made these changes, ask the agent to accept them (one Face ID tap). If not, tell the agent now: it may be someone else's access.");

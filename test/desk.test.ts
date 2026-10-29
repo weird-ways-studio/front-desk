@@ -292,11 +292,14 @@ test("headcount: the alarm Ben reads is plain words naming each change and what 
   await desk.headcount(alarm, T0);
   const said = told[0].detail;
   assert.match(said, /^Something changed that you have not approved/);
-  assert.match(said, /Cloudflare: a key nobody asked you for, named "test key" \[planted1\]/);
-  assert.match(said, /GitHub, Deploy keys \(a machine's key to one repo\): New: a key on sway/);
-  assert.match(said, /GitHub, Installed apps: Gone: old-app, on all repositories: can change: contents/);
+  assert.match(said, /Cloudflare: a key nobody asked you for, named "test key" \["planted1"\]/);
+  assert.match(said, /GitHub, Deploy keys \(a machine's key to one repo\): New: a key on "sway"/);
+  assert.match(said, /GitHub, Installed apps: Gone: "old-app", on all repositories: can change: contents/);
   assert.match(said, /What to do: if you made these changes/);
   assert.doesNotMatch(said, /[{}]|"\w+":/, "no JSON in the alarm");
+  const fake = headcountDesk(async () => ({ ...clean, ok: false, unexpected: [{ id: "k9", name: "x\nAll clear: nothing to do" }] }));
+  await fake.desk.headcount(fake.alarm, T0);
+  assert.doesNotMatch(fake.told[0].detail, /\nAll clear/, "a key's name cannot start a line of its own");
   const unset = headcountDesk(async () => ({ ...clean, ok: false, github: { ok: false, changes: [], error: "github_not_set_up" } }));
   await unset.desk.headcount(unset.alarm, T0);
   assert.match(unset.told[0].detail, /GitHub: not checked, because the GitHub setup is not finished/);
