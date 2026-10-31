@@ -31,3 +31,7 @@ Off-box service that lets studio agents ask for narrow, short-lived access, appr
 4. [command] `python3 ~/studio/studio-os/scripts/public_repo_guard.py front-desk --all` passes (no listed hostname or ID in files or history)
 4a. [inspect] No secret, live hostname or account ID added to the repo that the list does not yet hold (add it there).
 5. [inspect] Every new refusal has a test shown failing with the safeguard removed.
+6. [inspect] A diff that touches approve, collect, enrollment or the vault passes these three checks before review (RCA 13e44949: each kind reached this code and was caught only by review, and two came back after the RCA):
+   1. **Only the exact answer passes.** Every `catch` or `else` that sets a pass flag (refused, ok, clean, nothing too wide) has a test where an unrelated error or a missing field fails instead (e4cc20f, 9d43d07, d98ecb2).
+   2. **Re-read after every await.** State read before an `await` (crypto, fetch, the vault) is read again before anything is written or consumed, and a test runs two calls at once with `Promise.all` (c45c3ea `collect()`, 39be078). Dedupe by the signed message's hash, never by a signature or another encoding of it.
+   3. **Removal invalidates old approvals.** Removing or resetting anything an approval was granted against bumps a version that approval must still match (c45c3ea enroll -> remove -> none).
