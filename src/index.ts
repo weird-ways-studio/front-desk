@@ -38,7 +38,7 @@ export class FrontDesk extends DurableObject<Env> {
   }
   // The nightly count runs in here too, so its log rows join the one log.
   async headcount(): Promise<void> {
-    await new Desk(this.ctx.storage, { origin: "", rpID: "" }, { vault: this.env.VAULT }).headcount(headcountAlarm(this.env.HC_HEADCOUNT_URL, this.env.NTFY_TOPIC_URL), Date.now());
+    await new Desk(this.ctx.storage, { origin: "", rpID: "" }, { vault: this.env.VAULT }).headcount(headcountAlarm(this.env.HC_HEADCOUNT_URL, this.env.NTFY_TOPIC_URL, { user: this.env.PUSHOVER_USER, token: this.env.PUSHOVER_TOKEN }), Date.now());
   }
 }
 

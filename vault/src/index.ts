@@ -34,6 +34,9 @@ export class VaultBox extends DurableObject<Env> {
   ghPreview() {
     return this.logic().ghPreview();
   }
+  cfPreview() {
+    return this.logic().cfPreview();
+  }
 }
 
 /** What the front desk calls (types: vault/src/api.ts), plus the setup page. */
@@ -57,5 +60,9 @@ export default class Vault extends WorkerEntrypoint<Env> {
   // What job gh.app.baseline would accept, for Ben's approval screen (called at /request). Reads only.
   ghPreview() {
     return this.box().ghPreview();
+  }
+  // What job cf.token.accept would accept, for Ben's approval screen (called at /request). Reads only.
+  cfPreview() {
+    return this.box().cfPreview();
   }
 }

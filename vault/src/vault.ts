@@ -45,7 +45,8 @@ interface Master {
   pending?: { key: string; box: Sealed; until: number };
   by_recovery: Sealed;
   stored_at: number;
-  // Token ids in the account at setup: the audit's baseline (ids are not secrets).
+  // Token ids the audit expects (ids are not secrets): those in the account at setup, plus keys Ben
+  // accepted since with job cf.token.accept.
   baseline: string[];
   // Keys handed to the agent and not yet deleted. Cloudflare keeps expired keys listed, so the
   // vault deletes these once expired, at its next job, and the audit expects them (Codex minted r1 #6).
@@ -89,6 +90,14 @@ interface GhHeadcountApp extends GhApp {
 interface GhMainApp extends GhApp {
   by_passkey?: Sealed;
   pending?: { key: string; box: Sealed; until: number };
+}
+
+// Job cf.token.accept: which unexpected keys Ben's tap added to what the audit expects.
+export interface CfAcceptResult {
+  ok: boolean;
+  accepted: string[];
+  master: { token_id: string; locked_to_passkey_now: boolean };
+  error?: string;
 }
 
 export interface GhBaselineResult {
@@ -223,9 +232,10 @@ export class VaultLogic {
   }
 
   /** Runs one job from the fixed list with the master key opened by Ben's passkey secret. */
-  async run(job: string, params: Record<string, string>, prf: string): Promise<ProbeResult | MintResult | HeadcountSetupResult | GhBaselineResult> {
-    if (job !== "cf.dns.txt.probe" && job !== "cf.token.zone.read" && job !== "cf.token.headcount.setup" && job !== "gh.app.baseline") throw new VaultError("job_not_offered");
+  async run(job: string, params: Record<string, string>, prf: string): Promise<ProbeResult | MintResult | HeadcountSetupResult | GhBaselineResult | CfAcceptResult> {
+    if (job !== "cf.dns.txt.probe" && job !== "cf.token.zone.read" && job !== "cf.token.headcount.setup" && job !== "gh.app.baseline" && job !== "cf.token.accept") throw new VaultError("job_not_offered");
     if (job === "cf.token.headcount.setup") return this.runHeadcountSetup(prf);
+    if (job === "cf.token.accept") return this.acceptKeys(prf, params?.ids ?? "");
     if (job === "gh.app.baseline") return this.ghBaseline(prf, params?.snapshot ?? "", params?.base ?? "");
     if (!STUDIO_ZONES.includes(params?.zone ?? "")) throw new VaultError("zone_not_offered");
     // Checked here too, not only at the front desk: the vault is the last word on what it mints.
@@ -311,6 +321,50 @@ export class VaultLogic {
     return r;
   }
 
+  /**
+   * What job cf.token.accept would accept, read at request time with the list-only key (no tap), so
+   * Ben's approval screen names every key his tap adds.
+   */
+  async cfPreview(): Promise<{ id: string; name: string }[]> {
+    const m = await this.master();
+    const hc = await this.store.get<HeadcountKey | null>("headcount");
+    if (!m || !hc) throw new VaultError("headcount_not_set_up");
+    return this.unexpectedKeys(m, await listTokens(new Cloudflare(hc.value, this.fetch), m.account_id), hc.token_id);
+  }
+
+  // Keys in the account the vault does not expect: not in the baseline, not the master or headcount
+  // key, not handed out. The nightly count and job cf.token.accept use this same rule.
+  private unexpectedKeys(m: Master, listed: Listed[], hcId: string): { id: string; name: string }[] {
+    const known = new Set([...m.baseline, m.token_id, hcId, ...(m.issued ?? []).map((k) => k.id)]);
+    return listed.filter((t) => !known.has(t.id)).map((t) => ({ id: t.id, name: String(t.name ?? "").slice(0, 60) }));
+  }
+
+  /**
+   * Job cf.token.accept, at Ben's tap: adds exactly the key ids his screen listed to what the audit
+   * expects. Each must still be in the account and still unexpected; otherwise nothing is added.
+   */
+  private async acceptKeys(prf: string, approved: string): Promise<CfAcceptResult> {
+    const ids = approved.split(",");
+    if (!ids.length || ids.some((id) => !/^[0-9a-f]{32}$/.test(id))) throw new VaultError("bad_params");
+    const m = await this.master();
+    if (!m) throw new VaultError("no_master_key");
+    const { token, lockedNow } = await this.unlock(m, prf);
+    const r: CfAcceptResult = { ok: false, accepted: [], master: { token_id: m.token_id, locked_to_passkey_now: lockedNow } };
+    try {
+      const hcIds = await this.headcountId();
+      const unexpected = this.unexpectedKeys(m, await listTokens(new Cloudflare(token, this.fetch), m.account_id), hcIds[0] ?? "").map((k) => k.id);
+      if (ids.some((id) => !unexpected.includes(id))) throw new VaultError("keys_changed_since_request: nothing accepted, ask again");
+      // Re-read after the awaited calls: unlock may have just locked the master to the passkey.
+      const now = (await this.master())!;
+      await this.store.put<Master>("master", { ...now, baseline: [...now.baseline, ...ids.filter((id) => !now.baseline.includes(id))] });
+      r.accepted = ids;
+      r.ok = true;
+    } catch (e) {
+      note(r, (e as Error).message);
+    }
+    return r;
+  }
+
   // The headcount key is known to every job's audit, so making it does not stop later jobs.
   private async headcountId(): Promise<string[]> {
     const hc = await this.store.get<HeadcountKey | null>("headcount");
@@ -332,8 +386,7 @@ export class VaultLogic {
       const listed = await listTokens(new Cloudflare(hc.value, this.fetch), m.account_id);
       r.tokens = listed.length;
       const issued = new Map((m.issued ?? []).map((k) => [k.id, k.expires_on]));
-      const known = new Set([...m.baseline, m.token_id, hc.token_id, ...issued.keys()]);
-      r.unexpected = listed.filter((t) => !known.has(t.id)).map((t) => ({ id: t.id, name: String(t.name ?? "").slice(0, 60) }));
+      r.unexpected = this.unexpectedKeys(m, listed, hc.token_id);
       r.stretched = listed
         .filter((t) => issued.has(t.id) && (!t.expires_on || Date.parse(t.expires_on) > Date.parse(issued.get(t.id)!)))
         .map((t) => ({ id: t.id, expires_on: t.expires_on ?? "never" }));

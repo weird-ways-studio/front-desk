@@ -251,6 +251,9 @@ function fakeVault(stored = false) {
     async ghPreview() {
       return { changes: ["members +someone"], snapshot: "s".repeat(64), base: "b".repeat(64) };
     },
+    async cfPreview() {
+      return [{ id: "c".repeat(32), name: "observatory-backup-read" }];
+    },
   };
 }
 const callV = (store: MemoryStore, vault: ReturnType<typeof fakeVault>, path: string, init?: RequestInit, caller = callerFor(path, init)) =>
@@ -669,4 +672,26 @@ test("gh.app.baseline: refused at request when the vault cannot read GitHub", as
   const res = await agentPost(store, vault, "/request", { job: "gh.app.baseline", params: {}, reason: "x" });
   assert.equal(res.status, 502);
   assert.match(await res.text(), /github_preview_failed: github_not_set_up/);
+});
+
+// The Cloudflare key job shows Ben exactly the keys his tap accepts (vault cfPreview).
+test("cf.token.accept: the front desk adds the vault's unexpected keys; Ben's screen names each; the agent cannot choose them", async () => {
+  const { store } = await enrolled();
+  const vault = fakeVault(true);
+  const res = await agentPost(store, vault, "/request", { job: "cf.token.accept", params: {}, reason: "accept the Observatory key" });
+  assert.equal(res.status, 201);
+  const { id } = (await res.json()) as { id: string };
+  assert.deepEqual((await store.get<any>(`grant:${id}`)).params, { ids: "c".repeat(32), names: "observatory-backup-read" });
+  assert.match(await (await callV(store, vault, `/approve/${id}`)).text(), /observatory-backup-read/);
+  const forged = await agentPost(store, vault, "/request", { job: "cf.token.accept", params: { ids: "d".repeat(32) }, reason: "x" });
+  assert.equal(forged.status, 400, "the agent cannot choose the keys");
+});
+
+test("cf.token.accept: refused when nothing is unexpected, or the vault cannot list keys", async () => {
+  const { store } = await enrolled();
+  const none = await agentPost(store, { ...fakeVault(true), cfPreview: async () => [] }, "/request", { job: "cf.token.accept", params: {}, reason: "x" });
+  assert.equal(none.status, 409);
+  const down = await agentPost(store, { ...fakeVault(true), cfPreview: async () => Promise.reject(new Error("headcount_not_set_up")) }, "/request", { job: "cf.token.accept", params: {}, reason: "x" });
+  assert.equal(down.status, 502);
+  assert.match(await down.text(), /cloudflare_preview_failed: headcount_not_set_up/);
 });
