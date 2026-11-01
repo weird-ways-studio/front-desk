@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { MemoryStore } from "../src/desk.ts";
 import { MASTER_LABEL, RECOVERY_LABEL, open, seal, b64url, fromB64url } from "../vault/src/seal.ts";
-import { PENDING_MS, PROBE_TOKEN_MS, VaultLogic, type Headcount, type HeadcountSetupResult, type MintResult, type ProbeResult } from "../vault/src/vault.ts";
+import { PENDING_MS, PROBE_TOKEN_MS, VaultLogic, type CfAcceptResult, type Headcount, type HeadcountSetupResult, type MintResult, type ProbeResult } from "../vault/src/vault.ts";
 import { handleSetup } from "../vault/src/setup.ts";
 
 const ACCOUNT = "a".repeat(32);
@@ -497,4 +497,49 @@ test("headcount setup again: an old key that will not delete makes the result no
   assert.ok(third.replaced.includes(first.key_id!));
   assert.deepEqual((await store.get<any>("headcount")).retired, []);
   assert.ok(cfClean(await vault.headcount()));
+});
+
+// Job cf.token.accept: Ben tells the nightly count a flagged key is ours.
+const OURS = "0".repeat(31) + "1";
+const accept = (vault: VaultLogic, ids: string, fill = 7) => vault.run("cf.token.accept", { ids }, prf(fill)) as Promise<CfAcceptResult>;
+
+test("cf.token.accept: the preview names the flagged key; after Ben's tap the count and the jobs' audit expect it", async () => {
+  const { vault, cf } = await stored();
+  await hcSetup(vault);
+  cf.tokens.push({ id: OURS, name: "observatory-backup-read" });
+  assert.deepEqual(await vault.cfPreview(), [{ id: OURS, name: "observatory-backup-read" }]);
+  assert.equal((await vault.headcount()).unexpected.length, 1);
+  cf.calls.length = 0;
+  const r = await accept(vault, OURS);
+  assert.deepEqual(r, { ok: true, accepted: [OURS], master: r.master });
+  assert.ok(cf.calls.every((c) => c.method === "GET"), "changes nothing in Cloudflare");
+  assert.ok(cfClean(await vault.headcount()));
+  assert.deepEqual(await vault.cfPreview(), []);
+  const p = await probe(vault);
+  assert.equal(p.ok, true, JSON.stringify(p.audit));
+});
+
+test("cf.token.accept: nothing is accepted for a key that is gone, already expected, or not on Ben's screen", async () => {
+  const { vault, cf, store } = await stored();
+  await hcSetup(vault);
+  const before = (await store.get<any>("master")).baseline;
+  const gone = await accept(vault, OURS);
+  assert.equal(gone.ok, false);
+  assert.match(gone.error ?? "", /keys_changed_since_request/);
+  cf.tokens.push({ id: OURS, name: "x" });
+  await assert.rejects(accept(vault, `${OURS},not-an-id`), /bad_params/);
+  await assert.rejects(accept(vault, ""), /bad_params/);
+  assert.deepEqual((await store.get<any>("master")).baseline, before, "nothing added by a refused tap");
+  assert.equal((await accept(vault, OURS)).ok, true);
+  const again = await accept(vault, OURS);
+  assert.match(again.error ?? "", /keys_changed_since_request/, "an already expected key is not on any new screen");
+  assert.equal((await store.get<any>("master")).baseline.filter((id: string) => id === OURS).length, 1);
+});
+
+test("cf.token.accept: needs Ben's passkey secret; a wrong one changes nothing", async () => {
+  const { vault, cf, store } = await stored();
+  await hcSetup(vault);
+  cf.tokens.push({ id: OURS, name: "x" });
+  await assert.rejects(accept(vault, OURS, 9));
+  assert.ok(!(await store.get<any>("master")).baseline.includes(OURS));
 });

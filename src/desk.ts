@@ -179,18 +179,18 @@ export type Alarm = (ok: boolean, detail: string) => Promise<void>;
 /**
  * Pings healthchecks.io: the check URL for all-clear, its /fail with the detail otherwise. Its phone
  * alert does not carry that detail (VERIFIED: healthchecks ntfy_message.html has no ping body), so a
- * failed count is ALSO pushed straight to ntfy with the detail when `ntfyUrl` is set.
+ * failed count is ALSO pushed straight to Ben's phone with the detail: Pushover first, then ntfy, the
+ * same senders as approval pushes (ntfy.sh refuses Workers' shared addresses; see approvalPush).
  */
-export function headcountAlarm(url: string | undefined, ntfyUrl?: string, fetchFn: typeof fetch = fetch): Alarm | undefined {
+export function headcountAlarm(url: string | undefined, ntfyUrl?: string, pushover: PushoverKeys = {}, fetchFn: typeof fetch = fetch): Alarm | undefined {
   if (!url || !/^https:\/\/hc-ping\.com\/[0-9a-f-]{36}$/.test(url.trim())) return undefined;
-  const ntfy = ntfyTopic(ntfyUrl);
+  const send = phoneSenders(ntfyUrl, pushover, fetchFn);
   return async (ok, detail) => {
     const res = await fetchFn(ok ? url.trim() : `${url.trim()}/fail`, { method: "POST", body: detail });
     if (!res.ok) throw new Error(`healthchecks answered ${res.status}`);
     if (ok) return;
-    if (!ntfy) throw new Error("no ntfy topic set: the phone alert will not name the keys");
-    const push = await fetchFn(ntfy, { method: "POST", body: detail.slice(0, 3000), headers: { Title: "Front desk nightly check: needs you", Priority: "high" } });
-    if (!push.ok) throw new Error(`ntfy answered ${push.status}`);
+    if (!send) throw new Error("no phone push set: the phone alert will not name the keys");
+    await send("Front desk nightly check: needs you", detail);
   };
 }
 
@@ -211,24 +211,34 @@ export interface PushoverKeys {
 /**
  * One push per request (card a830d543): Pushover first, then ntfy. It carries what is asked and the
  * approve link, never a secret: the link still needs Ben's Access login and his passkey. MAX_PENDING
- * bounds how many can arrive. ntfy.sh refuses Cloudflare Workers' shared addresses (429, ntfy issues
- * #1963/#1726), hence Pushover, which counts per account. Throws "<service> answered NNN; ..." when none took it.
+ * bounds how many can arrive. Throws "<service> answered NNN; ..." when none took it.
  */
 export function approvalPush(ntfyUrl: string | undefined, pushover: PushoverKeys = {}, fetchFn: typeof fetch = fetch): Push | undefined {
+  const send = phoneSenders(ntfyUrl, pushover, fetchFn);
+  return send && ((what, approveUrl) => send("Front desk: approve?", what.slice(0, 300), approveUrl));
+}
+
+/**
+ * Sends one message to Ben's phone: Pushover first, then ntfy, stopping at the first that takes it.
+ * ntfy.sh refuses Cloudflare Workers' shared addresses (429, ntfy issues #1963/#1726), hence
+ * Pushover, which counts per account. Undefined when neither is set up.
+ */
+function phoneSenders(ntfyUrl: string | undefined, pushover: PushoverKeys, fetchFn: typeof fetch) {
   const ntfy = ntfyTopic(ntfyUrl);
   const key = /^[A-Za-z0-9]{30}$/;
   const po = pushover.user && pushover.token && key.test(pushover.user.trim()) && key.test(pushover.token.trim())
     ? { user: pushover.user.trim(), token: pushover.token.trim() } : undefined;
-  const senders: [string, (what: string, url: string) => Promise<Response>][] = [];
-  if (po) senders.push(["pushover", (what, url) => fetchFn("https://api.pushover.net/1/messages.json", { method: "POST",
-    body: new URLSearchParams({ token: po.token, user: po.user, title: "Front desk: approve?", message: what.slice(0, 300), url, url_title: "Open to approve" }) })]);
-  if (ntfy) senders.push(["ntfy", (what, url) => fetchFn(ntfy, { method: "POST", body: what.slice(0, 300), headers: { Title: "Front desk: approve?", Click: url, Priority: "high" } })]);
+  const senders: [string, (title: string, text: string, url?: string) => Promise<Response>][] = [];
+  // Pushover takes at most 1024 characters per message.
+  if (po) senders.push(["pushover", (title, text, url) => fetchFn("https://api.pushover.net/1/messages.json", { method: "POST",
+    body: new URLSearchParams({ token: po.token, user: po.user, title, message: text.slice(0, 1024), ...(url ? { url, url_title: "Open to approve" } : {}) }) })]);
+  if (ntfy) senders.push(["ntfy", (title, text, url) => fetchFn(ntfy, { method: "POST", body: text.slice(0, 3000), headers: { Title: title, Priority: "high", ...(url ? { Click: url } : {}) } })]);
   if (!senders.length) return undefined;
-  return async (what, approveUrl) => {
+  return async (title: string, text: string, url?: string) => {
     const failed: string[] = [];
     for (const [name, send] of senders) {
       // A thrown fetch error is reduced to fixed words: its message could carry the topic or a key.
-      const status = await send(what, approveUrl).then((r) => r.status, () => 0);
+      const status = await send(title, text, url).then((r) => r.status, () => 0);
       if (status >= 200 && status < 300) return;
       failed.push(status ? `${name} answered ${status}` : `${name} unreachable`);
     }
@@ -334,6 +344,21 @@ export class Desk {
       if (params.changes.length > 4000) throw new DeskError("too_many_changes", 400);
       params.snapshot = seen.snapshot;
       params.base = seen.base;
+    }
+    if (job === "cf.token.accept") {
+      // Ben's screen names exactly the keys his tap accepts; the vault refuses if any changed since.
+      const keys = await Promise.resolve()
+        .then(() => {
+          if (!this.hooks.vault) throw new Error("vault not connected");
+          return this.hooks.vault.cfPreview();
+        })
+        .catch((e: Error) => {
+          throw new DeskError(`cloudflare_preview_failed: ${e.message.slice(0, 100)}`, 502);
+        });
+      if (!keys.length) throw new DeskError("nothing_to_accept", 409);
+      if (keys.length > 20) throw new DeskError("too_many_changes", 400);
+      params.ids = keys.map((k) => k.id).join(",");
+      params.names = keys.map((k) => k.name).join("\n");
     }
     if (typeof body.reason !== "string" || !body.reason.trim() || body.reason.length > 200) {
       throw new DeskError("bad_reason", 400);

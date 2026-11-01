@@ -41,6 +41,7 @@ const PARAMS: Record<keyof typeof JOBS, Record<string, string>> = {
   "cf.token.zone.read": { zone: "example.com", minutes: "10", ip: "203.0.113.7" },
   "cf.token.headcount.setup": {},
   "gh.app.baseline": { changes: CHANGES.join("\n"), snapshot: "s", base: "b" },
+  "cf.token.accept": { ids: `${"a".repeat(32)},${"b".repeat(32)}`, names: "observatory-backup-read\n{\"x\":1}" },
 };
 
 const grant = (job: keyof typeof JOBS): Grant =>

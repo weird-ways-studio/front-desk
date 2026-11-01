@@ -5,8 +5,8 @@
 import { STUDIO_ZONES } from "../vault/src/zones.ts";
 import { MAX_KEY_MINUTES, isIPv4 } from "../vault/src/vault.ts";
 import { isP256Spki } from "./cboxkey.ts";
-import { baselineDone, plainChanges } from "./ghplain.ts";
-import type { GhBaselineResult, HeadcountSetupResult, ProbeResult } from "../vault/src/api.ts";
+import { baselineDone, name, plainChanges } from "./ghplain.ts";
+import type { CfAcceptResult, GhBaselineResult, HeadcountSetupResult, ProbeResult } from "../vault/src/api.ts";
 
 // What Ben reads on the approval screen, built from the stored grant (instruction.orient-the-person):
 // what approving does, anything to check, what happens when he taps, and the exact text folded below.
@@ -135,6 +135,25 @@ export const JOBS = {
       notDone(r, (x) => `The list was not saved, so the nightly check still expects the previous one.${(x as unknown as Partial<GhBaselineResult>).main?.locked_to_passkey_now ? " The main App's key is now locked to your passkey; that part is done and safe." : ""}`) ??
       baselineDone(r as GhBaselineResult),
     // The agent sends no params; the front desk adds `changes` and `snapshot` from the vault (desk.ts request).
+    validate: (params) => (params && typeof params === "object" && Object.keys(params).length === 0 ? {} : null),
+    vault: true,
+  },
+  // Adds Cloudflare keys the nightly count flagged to what it expects (vault/src/vault.ts acceptKeys).
+  "cf.token.accept": {
+    explain: (p) => {
+      const ids = (p.ids ?? "").split(",");
+      const names = (p.names ?? "").split("\n");
+      return {
+        does: `Cloudflare: tell the nightly check ${ids.length === 1 ? "this key is" : "these keys are"} yours, so it stops flagging ${ids.length === 1 ? "it" : "them"}. Nothing is made, changed or deleted in Cloudflare.`,
+        sections: [{ heading: `Keys: ${ids.length}`, items: ids.map((id, i) => `${name(names[i] ?? "")} [${id}]`) }],
+        warn: "If you do not recognise every key, do not approve: it may be someone else's access.",
+        expect: "Face ID unlocks the vault for a moment. It checks each key is still in the account and still unexpected, then adds them to what the nightly check expects. If anything changed since this page was made, nothing is accepted and you will see why.",
+      };
+    },
+    done: (r) =>
+      notDone(r, () => "Nothing was added, so the nightly check still flags these keys.") ??
+      `Done. The nightly check now expects ${((r as Partial<CfAcceptResult>).accepted?.length ?? 0) === 1 ? "this key" : "these keys"}. Nothing else to do.`,
+    // The agent sends no params; the front desk adds `ids` and `names` from the vault (desk.ts request).
     validate: (params) => (params && typeof params === "object" && Object.keys(params).length === 0 ? {} : null),
     vault: true,
   },
