@@ -13,8 +13,9 @@
 import { DurableObject } from "cloudflare:workers";
 import { agentOf, type AgentConfig } from "./agent.ts";
 import { callerOf, route, type Who } from "./routes.ts";
-import { Desk, approvalPush, headcountAlarm } from "./desk.ts";
+import { Desk, approvalPush, headcountAlarm, phoneAlert } from "./desk.ts";
 import type { VaultApi } from "../vault/src/api.ts";
+import { recorderFrom } from "./recorder.ts";
 
 interface Env extends AgentConfig {
   DESK: DurableObjectNamespace<FrontDesk>;
@@ -28,13 +29,21 @@ interface Env extends AgentConfig {
   // Pushover user key and app token (dashboard secrets, card a830d543): the request push tries Pushover first.
   PUSHOVER_USER?: string;
   PUSHOVER_TOKEN?: string;
+  // The Observatory's recorder (card 97a2e83d): its address is a dashboard variable (a live hostname,
+  // kept out of this public repo); the service token's id and secret are dashboard secrets Ben pastes.
+  // Any one unset = every request refused.
+  RECORDER_URL?: string;
+  RECORDER_CLIENT_ID?: string;
+  RECORDER_CLIENT_SECRET?: string;
   // The vault Worker (vault/), reached only through this service binding (wrangler.jsonc "services").
   VAULT: Service & VaultApi;
 }
 
 export class FrontDesk extends DurableObject<Env> {
   async handle(request: Request, who: Who): Promise<Response> {
-    return route(request, this.ctx.storage, who, Date.now(), this.env.VAULT, approvalPush(this.env.NTFY_TOPIC_URL, { user: this.env.PUSHOVER_USER, token: this.env.PUSHOVER_TOKEN }));
+    const recorder = recorderFrom(this.env.RECORDER_URL, this.env.RECORDER_CLIENT_ID, this.env.RECORDER_CLIENT_SECRET);
+    const phone = { user: this.env.PUSHOVER_USER, token: this.env.PUSHOVER_TOKEN };
+    return route(request, this.ctx.storage, who, Date.now(), this.env.VAULT, approvalPush(this.env.NTFY_TOPIC_URL, phone), recorder, phoneAlert(this.env.NTFY_TOPIC_URL, phone));
   }
   // The nightly count runs in here too, so its log rows join the one log.
   async headcount(): Promise<void> {

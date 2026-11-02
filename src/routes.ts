@@ -1,11 +1,12 @@
 // The front desk's HTTP routes, kept apart from the Durable Object (index.ts)
 // so tests can drive them with an in-memory store.
 
-import { Desk, DeskError, withoutSecret, type Push, type Source, type Store } from "./desk.ts";
+import { Desk, DeskError, withoutSecret, type Alert, type Push, type Source, type Store } from "./desk.ts";
 import { JOBS } from "./jobs.ts";
 import { checkSignature } from "./cboxkey.ts";
 import type { VaultApi } from "../vault/src/api.ts";
 import { approvePage, cboxKeyPage, enrollPage, logPage, prfCheckPage } from "./page.ts";
+import type { Recorder } from "./recorder.ts";
 
 export const VERSION = "0.10.1";
 
@@ -74,10 +75,10 @@ function pushError(e: unknown): string {
 }
 
 // The routes, kept apart from the Durable Object so tests can drive them.
-export async function route(request: Request, store: Store, who: Who, now = Date.now(), vault?: VaultApi, push?: Push): Promise<Response> {
+export async function route(request: Request, store: Store, who: Who, now = Date.now(), vault?: VaultApi, push?: Push, recorder?: Recorder, alert?: Alert): Promise<Response> {
   const { caller, requester = "" } = who;
   const url = new URL(request.url);
-  const desk = new Desk(store, { origin: url.origin, rpID: url.hostname }, { vault });
+  const desk = new Desk(store, { origin: url.origin, rpID: url.hostname }, { vault, recorder, alert });
   const nonce = crypto.randomUUID().replace(/-/g, "");
   const parts = url.pathname.split("/").filter(Boolean);
   const m = request.method;

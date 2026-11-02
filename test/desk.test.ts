@@ -7,6 +7,10 @@ import { APPROVE_WINDOW_MS, CHALLENGE_TTL_MS, COLLECT_WINDOW_MS, Desk, DeskError
 import { JOBS } from "../src/jobs.ts";
 import type { Headcount } from "../vault/src/api.ts";
 import { SoftKey } from "./softkey.ts";
+import { FakeRecorder } from "./fakerecorder.ts";
+
+// One stand-in recorder for every grant in this file (grant ids never repeat).
+const recorder = new FakeRecorder().send;
 
 const site = { origin: "https://desk.example", rpID: "desk.example" };
 const T0 = 1_800_000_000_000;
@@ -18,7 +22,7 @@ async function refuses(p: Promise<unknown>, code: string) {
 
 async function setup(hooks: DeskHooks = {}) {
   const store = new MemoryStore();
-  const desk = new Desk(store, site, hooks);
+  const desk = new Desk(store, site, { recorder, ...hooks });
   const key = await SoftKey.create();
   await desk.enroll(await key.register(await desk.enrollOptions(T0), site.origin), T0);
   return { store, desk, key };
@@ -133,7 +137,7 @@ test("two approvals in flight for one grant: exactly one wins, and a collected g
 
 test("two first-passkey enrollments in flight: exactly one passkey ends up enrolled", async () => {
   const store = new MemoryStore();
-  const desk = new Desk(store, site);
+  const desk = new Desk(store, site, { recorder });
   const a = await SoftKey.create();
   const b = await SoftKey.create();
   const ra = await a.register(await desk.enrollOptions(T0), site.origin);
@@ -210,7 +214,7 @@ test("taps refused before the passkey check are logged (expired, reused, unknown
   const lines = async () => (await desk.readLog()).filter((e) => e.event === "refused").map((e) => e.detail);
   // Enrollment page left open past the challenge clock -- Ben's 2026-10-26 first attempt.
   const store2 = new MemoryStore();
-  const desk2 = new Desk(store2, site);
+  const desk2 = new Desk(store2, site, { recorder });
   const late = await fresh.register(await desk2.enrollOptions(T0), site.origin);
   await refuses(desk2.enroll(late, T0 + CHALLENGE_TTL_MS + 1), "challenge_expired");
   assert.deepEqual((await desk2.readLog()).map((e) => e.detail), ["enroll: challenge_expired"]);
@@ -263,7 +267,7 @@ function headcountDesk(answer: () => Promise<Headcount>) {
   const vault = { status: async () => ({ stored: true, pending: false }), run: async () => ({}) as any, headcount: answer, ghPreview: async () => ({ changes: [], snapshot: "", base: "" }), cfPreview: async () => [] };
   const told: { ok: boolean; detail: string }[] = [];
   const alarm = async (ok: boolean, detail: string) => void told.push({ ok, detail });
-  return { desk: new Desk(store, site, { vault }), told, alarm };
+  return { desk: new Desk(store, site, { vault, recorder }), told, alarm };
 }
 
 test("headcount: a clean night logs 'headcount_ok' and sends the all-clear", async () => {
