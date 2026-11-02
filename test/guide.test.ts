@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { JOBS, type Guide } from "../src/jobs.ts";
-import { approvePage, outcomeView } from "../src/page.ts";
+import { approvePage, outcomeView, SECOND_CHECK } from "../src/page.ts";
 import { plainChanges } from "../src/ghplain.ts";
 import type { Grant } from "../src/desk.ts";
 
@@ -172,4 +172,8 @@ test("no path lets hidden or direction characters into the list: rule types, set
     "apps +a#1:all:con\u200btents=write",
   ]).flatMap((g) => g.items);
   for (const i of items) assert.match(i, /^[\x20-\x7e]*$/, i);
+});
+
+test("every approval screen says no second check has looked at the request yet (card 6da30339)", () => {
+  for (const job of Object.keys(JOBS) as (keyof typeof JOBS)[]) assert.ok(visible(approvePage(grant(job), {}, "n")).includes(SECOND_CHECK), job);
 });

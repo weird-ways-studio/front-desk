@@ -57,6 +57,9 @@ export function outcomeView(status: number | null, j: unknown): { ok: boolean; h
   return { ok: b.outcome === "done", head: b.outcome === "done" ? "Done" : "Not done", text: b.summary };
 }
 
+// No overseer reviews requests yet; the desk records the same answer as verdict "not_checked" (card 6da30339).
+export const SECOND_CHECK = "Second check: none yet (only the desk's job list checked this)";
+
 // Step 1 of 2 is reading what approving does; step 2 is the plain result after the tap. The exact
 // technical text is there, folded, never instead of the plain words (instruction.orient-the-person).
 export function approvePage(g: Grant, options: unknown, nonce: string): string {
@@ -76,6 +79,7 @@ ${sections}
 ${guide.warn ? `<p class="warn">${esc(guide.warn)}</p>` : ""}
 <p><strong>When you approve:</strong> ${esc(guide.expect)}</p>
 <p class="muted">The agent's reason, in its own words:</p><blockquote>${esc(g.reason)}</blockquote>
+<p class="muted" id="overseer">${SECOND_CHECK}</p>
 <p class="muted">This request expires at <span id="expires">${new Date(g.expires_at).toISOString().slice(11, 16)} UTC</span>. Login: your <strong>front desk passkey</strong>; Face ID offers only that one.</p>
 <button id="go">Approve with Face ID</button>
 <p id="after"></p>

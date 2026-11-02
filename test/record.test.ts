@@ -57,16 +57,18 @@ const spki = () => (generateKeyPairSync("ec", { namedCurve: "P-256" }).publicKey
 test("happy path: request, approval and result are recorded in order, each naming the request", async () => {
   const { rec, desk, key } = await setup();
   const g = await desk.request(echo, "agent", T0);
-  assert.deepEqual(rec.stages(g.id), ["request"]);
+  assert.deepEqual(rec.stages(g.id), ["request", "verdict"]);
   await desk.approve(g.id, await answer(desk, key, g.id), T0);
-  assert.deepEqual(rec.stages(g.id), ["request", "approval"]);
+  assert.deepEqual(rec.stages(g.id), ["request", "verdict", "approval"]);
   await desk.collect(g.id, "agent", T0 + 1000);
-  assert.deepEqual(rec.stages(g.id), ["request", "approval", "result"]);
-  const [req, appr, res] = rec.records.map((r) => r.record);
+  assert.deepEqual(rec.stages(g.id), ["request", "verdict", "approval", "result"]);
+  const [req, verdict, appr, res] = rec.records.map((r) => r.record);
   assert.equal(req.grant_hash, g.hash);
+  assert.equal(verdict.overseer, "not_checked");
+  assert.equal(verdict.request, (await desk.grant(g.id)).recorded!.request);
   assert.equal(appr.request, (await desk.grant(g.id)).recorded!.request);
   assert.equal(res.outcome, "done");
-  assert.deepEqual((await desk.grant(g.id)).recorded, { request: (await desk.grant(g.id)).recorded!.request, approval: 2, result: 3 });
+  assert.deepEqual((await desk.grant(g.id)).recorded, { request: (await desk.grant(g.id)).recorded!.request, verdict: 2, approval: 3, result: 4 });
 });
 
 test("R1: with no recorder set, a request is refused and no grant exists", async () => {
@@ -129,7 +131,7 @@ test("R4: approval not recorded: vault job never runs, grant is stopped, collect
   const g2 = await desk.request({ job: "cf.dns.txt.probe", params: { zone: "benculbert.com" }, reason: "probe" }, "agent", T0);
   await desk.approve(g2.id, await answer(desk, key, g2.id, PRF), T0);
   assert.deepEqual(runs, ["cf.dns.txt.probe"]);
-  assert.deepEqual(rec.stages(g2.id), ["request", "approval", "result"]);
+  assert.deepEqual(rec.stages(g2.id), ["request", "verdict", "approval", "result"]);
 });
 
 test("R4: approval not recorded for a plain job: collect does not run it", async () => {
@@ -138,7 +140,7 @@ test("R4: approval not recorded for a plain job: collect does not run it", async
   rec.failStage = "approval";
   await refuses(desk.approve(g.id, await answer(desk, key, g.id), T0), "approval_not_recorded");
   await refuses(desk.collect(g.id, "agent", T0 + 1000), "stopped");
-  assert.deepEqual(rec.stages(g.id), ["request"]);
+  assert.deepEqual(rec.stages(g.id), ["request", "verdict"]);
 });
 
 test("R5: approval not recorded: the c-box key is not enrolled", async () => {
@@ -151,10 +153,10 @@ test("R5: approval not recorded: the c-box key is not enrolled", async () => {
   const g2 = await desk.request({ job: "cbox.key.enroll", params: { key: spki() }, reason: "new key" }, "agent", T0);
   await desk.approve(g2.id, await answer(desk, key, g2.id), T0);
   assert.ok(await store.get("cbox:key"));
-  assert.deepEqual(rec.stages(g2.id), ["request", "approval", "result"]);
+  assert.deepEqual(rec.stages(g2.id), ["request", "verdict", "approval", "result"]);
   // Its collect hands over the word only; no second result.
   await desk.collect(g2.id, "agent", T0 + 1000);
-  assert.deepEqual(rec.stages(g2.id), ["request", "approval", "result"]);
+  assert.deepEqual(rec.stages(g2.id), ["request", "verdict", "approval", "result"]);
 });
 
 test("R6 (change-over): a grant made before recording began is never approved or collected", async () => {
@@ -165,6 +167,25 @@ test("R6 (change-over): a grant made before recording began is never approved or
   await refuses(desk.approvalOptions(g.id, T0).then(async (o) => desk.approve(g.id, await key.assert(o.challenge, site.rpID, site.origin), T0)), "not_recorded");
   await store.put<Grant>(`grant:${g.id}`, { ...old, status: "approved", approved_at: T0 });
   await refuses(desk.collect(g.id, "agent", T0 + 1000), "not_recorded");
+});
+
+test("V1: verdict not recorded: no grant exists, nothing for Ben to approve (card 6da30339)", async () => {
+  const { rec, store, desk } = await setup();
+  rec.failStage = "verdict";
+  await refuses(desk.request(echo, "agent", T0), "recorder_unavailable");
+  assert.equal((await store.list({ prefix: "grant:" })).size, 0);
+  assert.match((await desk.readLog()).at(-1)!.detail!, /verdict not recorded/);
+  // Safeguard working: with the verdict recorded, the grant waits for Ben.
+  rec.failStage = undefined;
+  assert.equal((await desk.request(echo, "agent", T0)).status, "pending");
+});
+
+test("V2 (change-over): a grant asked before verdicts were recorded is never approved", async () => {
+  const { store, desk, key } = await setup();
+  const g = await desk.request(echo, "agent", T0);
+  const old: Grant = { ...g, recorded: { request: g.recorded!.request } };
+  await store.put(`grant:${g.id}`, old);
+  await refuses(desk.approvalOptions(g.id, T0).then(async (o) => desk.approve(g.id, await key.assert(o.challenge, site.rpID, site.origin), T0)), "not_recorded");
 });
 
 test("R7: while the approval is being recorded, a second approve and a collect are both refused", async () => {
@@ -226,8 +247,8 @@ test("R10: no record carries the minted key, the passkey secret or the user hand
   assert.ok(!all.includes(MINTED), "minted key value in a record");
   assert.ok(!all.includes(PRF), "passkey secret in a record");
   assert.ok(!all.includes("dXNlci1oYW5kbGU"), "user handle in a record");
-  assert.deepEqual(Object.keys(rec.records[1].record.assertion as object).sort(), ["authenticator_data", "client_data_json", "passkey_id", "signature"]);
-  assert.deepEqual(rec.records[2].record.outcome, "done");
+  assert.deepEqual(Object.keys(rec.records[2].record.assertion as object).sort(), ["authenticator_data", "client_data_json", "passkey_id", "signature"]);
+  assert.deepEqual(rec.records[3].record.outcome, "done");
 });
 
 test("R11: a lost answer is retried once with the same bytes; a refusal is not retried", async () => {

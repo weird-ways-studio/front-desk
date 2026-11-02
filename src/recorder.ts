@@ -3,7 +3,7 @@
 // it is reached by URL with the front desk's service token (observatory RECORDS.md). No receipt
 // that matches the exact bytes sent means the record does not count, and the desk refuses to go on.
 
-export type Stage = "request" | "approval" | "result";
+export type Stage = "request" | "verdict" | "approval" | "result";
 
 export interface Receipt {
   seq: number;
