@@ -14,7 +14,7 @@ import { ascii, name, plainChanges } from "./ghplain.ts";
 import { JOBS, type Job, type JobName } from "./jobs.ts";
 import { currentKey, fingerprint, keyRev, type CboxKey } from "./cboxkey.ts";
 import type { Headcount, VaultApi } from "../vault/src/api.ts";
-import { RecorderError, type Receipt, type Recorder } from "./recorder.ts";
+import { RecorderError, type Receipt, type Recorder, type Stage } from "./recorder.ts";
 
 export const APPROVE_WINDOW_MS = 10 * 60_000; // ask -> approve
 export const COLLECT_WINDOW_MS = 5 * 60_000; // approve -> collect
@@ -63,8 +63,9 @@ export interface Grant {
   cbox_rev?: number;
   // What the Observatory's recorder has receipted for this grant (card 97a2e83d): the SHA-256 of the
   // request record's bytes (later records name the request by it), then the approval and result
-  // record numbers. A grant with no request receipt is never approved or collected.
-  recorded?: { request: string; approval?: number; result?: number };
+  // record numbers. A grant with no request receipt is never approved or collected. `verdict` is the
+  // number of the "overseer: not checked" record (card 6da30339); a grant without it is never approved.
+  recorded?: { request: string; verdict?: number; approval?: number; result?: number };
   // What a vault job reported when it ran at approval. A minted key's secret (result.key.value)
   // is kept only until the agent collects it, then erased; it is never logged or shown to Ben.
   result?: unknown;
@@ -313,7 +314,7 @@ export class Desk {
 
   // One record to the Observatory. Any failure is logged and becomes recorder_unavailable: the caller
   // stops before anything runs (card 97a2e83d).
-  private async record(g: Grant, stage: "request" | "approval" | "result", fields: Record<string, unknown>, now: number): Promise<Receipt> {
+  private async record(g: Grant, stage: Stage, fields: Record<string, unknown>, now: number): Promise<Receipt> {
     try {
       if (!this.hooks.recorder) throw new RecorderError("recorder not set");
       const r = { grant: g.id, stage, job: g.job, ...(stage === "request" ? {} : { request: g.recorded?.request }), ...fields };
@@ -456,6 +457,8 @@ export class Desk {
     // Recorded before the grant exists: no receipt, nothing for Ben to approve.
     const receipt = await this.record(g, "request", { params, requester, reason: g.reason, created_at: now, expires_at: g.expires_at, grant_hash: g.hash }, now);
     g.recorded = { request: receipt.sha256 };
+    // No overseer exists yet, so the record says so plainly (card 6da30339). No receipt: no grant.
+    g.recorded.verdict = (await this.record(g, "verdict", { overseer: "not_checked" }, now)).seq;
     await this.store.put(`grant:${g.id}`, g);
     await this.log({ event: "requested", ...this.grantFacts(g) }, now);
     return g;
@@ -535,8 +538,8 @@ export class Desk {
     let g: Grant;
     try {
       g = await this.pending(id, now);
-      // Asked before recording began (or never receipted): never approved.
-      if (!g.recorded?.request) throw new DeskError("not_recorded", 409);
+      // Asked before recording began, or before verdicts were recorded (or never receipted): never approved.
+      if (!g.recorded?.request || g.recorded.verdict === undefined) throw new DeskError("not_recorded", 409);
     } catch (e) {
       if (e instanceof DeskError) await this.refuse(`approve: ${e.code}`, now);
       throw e;
