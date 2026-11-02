@@ -699,3 +699,25 @@ test("cf.token.accept: refused when nothing is unexpected, or the vault cannot l
   assert.equal(down.status, 502);
   assert.match(await down.text(), /cloudflare_preview_failed: headcount_not_set_up/);
 });
+
+test("passkeys page: owner only; shows the enrolled key's id, COSE key and the site hashes to pin", async () => {
+  const store = new MemoryStore();
+  assert.equal((await call(store, "/passkeys", undefined, "unknown")).status, 403);
+  assert.equal((await call(store, "/passkeys", undefined, "agent")).status, 403);
+  assert.match(await (await call(store, "/passkeys")).text(), /No passkey is enrolled/);
+  const key = await SoftKey.create();
+  const regOpts = JSON.parse((await (await call(store, "/enroll")).text()).match(/const opts=(\{.*?\});\n/)![1]);
+  assert.equal((await call(store, "/enroll", { method: "POST", body: JSON.stringify(await key.register(regOpts, base)) })).status, 200);
+  const res = await call(store, "/passkeys");
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("x-robots-tag"), "noindex, nofollow");
+  const pin = JSON.parse((await res.text()).match(/<pre>([\s\S]*?)<\/pre>/)![1].replace(/&quot;/g, '"'));
+  const [stored] = await new Desk(store, { origin: base, rpID: "desk.example" }).passkeys();
+  const sha = async (s: string) => Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s))).toString("hex");
+  assert.deepEqual(pin, {
+    id: stored.id,
+    key: Buffer.from(stored.publicKey).toString("base64url"),
+    rp_hash: await sha("desk.example"),
+    origin_hash: await sha(base),
+  });
+});

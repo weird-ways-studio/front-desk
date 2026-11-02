@@ -77,6 +77,13 @@ export interface Passkey {
   enrolled_at: number;
 }
 
+export interface PasskeyPin {
+  id: string;
+  key: string; // the COSE public key, base64url
+  rp_hash: string;
+  origin_hash: string;
+}
+
 interface Challenge {
   purpose: "approve" | "enroll" | "check" | "setup";
   grant_id?: string;
@@ -365,6 +372,14 @@ export class Desk {
 
   async passkeys(): Promise<Passkey[]> {
     return [...(await this.store.list<Passkey>({ prefix: "passkey:" })).values()];
+  }
+
+  // What the Observatory pins to check Ben's approvals itself (card 7190ab0a): public values only.
+  // The site name and origin go as SHA-256 hex, so no live hostname enters its public repo.
+  async passkeyPins(): Promise<PasskeyPin[]> {
+    const sha = async (s: string) => hex(new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(s))));
+    const [rp_hash, origin_hash] = [await sha(this.site.rpID), await sha(this.site.origin)];
+    return (await this.passkeys()).map((k) => ({ id: k.id, key: b64url(new Uint8Array(k.publicKey)), rp_hash, origin_hash }));
   }
 
   async grant(id: string): Promise<Grant> {

@@ -5,10 +5,10 @@ import { Desk, DeskError, withoutSecret, type Alert, type Push, type Source, typ
 import { JOBS } from "./jobs.ts";
 import { checkSignature } from "./cboxkey.ts";
 import type { VaultApi } from "../vault/src/api.ts";
-import { approvePage, cboxKeyPage, enrollPage, logPage, prfCheckPage } from "./page.ts";
+import { approvePage, cboxKeyPage, enrollPage, logPage, passkeysPage, prfCheckPage } from "./page.ts";
 import type { Recorder } from "./recorder.ts";
 
-export const VERSION = "0.10.1";
+export const VERSION = "0.11.0";
 
 // Who is calling, worked out by the Worker from Cloudflare Access (index.ts):
 // owner from Ben's email (callerOf), agent from the service-token ticket (agent.ts).
@@ -33,7 +33,7 @@ export async function callerOf(access: ExecutionContext["access"], ownerEmail: s
 
 // Which caller each route needs. Ben enrolls, approves and reads the log; the agent asks and collects.
 function needs(m: string, parts: string[]): Caller | null {
-  if (parts[0] === "enroll" || parts[0] === "approve" || parts[0] === "log" || parts[0] === "prf-check" || parts[0] === "cbox-key") return "owner";
+  if (parts[0] === "enroll" || parts[0] === "approve" || parts[0] === "log" || parts[0] === "passkeys" || parts[0] === "prf-check" || parts[0] === "cbox-key") return "owner";
   if ((m === "POST" && parts[0] === "request") || parts[0] === "collect") return "agent";
   return null;
 }
@@ -141,6 +141,7 @@ export async function route(request: Request, store: Store, who: Who, now = Date
       }
     }
     if (m === "GET" && url.pathname === "/log") return html(logPage(await desk.readLog(), nonce), nonce);
+    if (m === "GET" && url.pathname === "/passkeys") return html(passkeysPage(await desk.passkeyPins(), nonce), nonce);
     return json({ error: "not_found" }, 404);
   } catch (e) {
     if (e instanceof DeskError) return json({ error: e.code }, e.status);

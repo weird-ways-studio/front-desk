@@ -1,7 +1,7 @@
 // HTML for Ben's phone. Everything shown about a grant comes from the stored
 // grant; the agent's reason appears only as a labelled quote.
 
-import type { Grant, LogEntry } from "./desk.ts";
+import type { Grant, LogEntry, PasskeyPin } from "./desk.ts";
 import { JOBS, type Guide } from "./jobs.ts";
 import type { CboxKey } from "./cboxkey.ts";
 
@@ -167,5 +167,17 @@ export function logPage(entries: LogEntry[], nonce: string): string {
     nonce,
     `<h1>Grant log</h1><p class="muted">Newest first. Times UTC. Nothing here can be edited or deleted. The reason is the agent's own words.</p>
 <table><tr><th>When</th><th>What happened</th><th>Job</th><th>Who</th><th>Why</th><th>Expires</th></tr>${rows}</table>`,
+  );
+}
+
+// Ben copies this into the chat; the agent puts it in the Observatory's pin (card 7190ab0a).
+// Every value is public: a public key and two hashes.
+export function passkeysPage(pins: PasskeyPin[], nonce: string): string {
+  const text = pins.map((p) => JSON.stringify(p, null, 2)).join("\n");
+  return page(
+    "Passkey pin",
+    nonce,
+    `<h1>Passkey pin</h1><p class="muted">Your enrolled passkey's public key, for the Observatory to check your approvals itself. Nothing here is secret: it is safe to paste into the chat. Select all of the text below, copy it, and paste it to the agent.</p>
+${pins.length ? `<pre>${esc(text)}</pre>` : `<p class="warn">No passkey is enrolled.</p>`}`,
   );
 }
