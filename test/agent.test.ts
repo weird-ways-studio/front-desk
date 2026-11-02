@@ -4,6 +4,10 @@ import { generateKeyPair, SignJWT, type JWTVerifyGetKey } from "jose";
 import { agentOf } from "../src/agent.ts";
 import { route } from "../src/routes.ts";
 import { Desk, MemoryStore } from "../src/desk.ts";
+import { FakeRecorder } from "./fakerecorder.ts";
+
+// One stand-in recorder for every grant in this file (grant ids never repeat).
+const recorder = new FakeRecorder().send;
 
 // A stand-in Access team: its own signing key, issuer and app audience.
 const TEAM = "team.example";
@@ -78,10 +82,10 @@ const post = (path: string, body?: unknown) => new Request(base + path, { method
 
 test("the grant records who asked from the verified identity, and only they can collect", async () => {
   const store = new MemoryStore();
-  const res = await route(post("/request", { job: "test.echo", params: { word: "hi" }, reason: "x" }), store, { caller: "agent", requester: "c-box agent (aaaa)" });
+  const res = await route(post("/request", { job: "test.echo", params: { word: "hi" }, reason: "x" }), store, { caller: "agent", requester: "c-box agent (aaaa)" }, Date.now(), undefined, undefined, recorder);
   assert.equal(res.status, 201);
   const { id } = (await res.json()) as { id: string };
-  const desk = new Desk(store, { origin: base, rpID: "desk.example" });
+  const desk = new Desk(store, { origin: base, rpID: "desk.example" }, { recorder });
   assert.equal((await desk.grant(id)).requester, "c-box agent (aaaa)");
   const other = await route(post(`/collect/${id}`), store, { caller: "agent", requester: "c-box agent (bbbb)" });
   assert.equal(other.status, 403);

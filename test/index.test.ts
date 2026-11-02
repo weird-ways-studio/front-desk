@@ -6,13 +6,17 @@ import assert from "node:assert/strict";
 import { callerOf, route, VERSION, type Caller } from "../src/routes.ts";
 import { Desk, MemoryStore, approvalPush, type Push } from "../src/desk.ts";
 import { SoftKey } from "./softkey.ts";
+import { FakeRecorder } from "./fakerecorder.ts";
+
+// One stand-in recorder for every grant in this file (grant ids never repeat).
+const recorder = new FakeRecorder().send;
 
 const base = "https://desk.example";
 // Each route gets the caller it needs, as the Worker would after Access (index.ts).
 const callerFor = (path: string, init?: RequestInit): Caller =>
   path.startsWith("/request") || path.startsWith("/collect") ? "agent" : "owner";
 const call = (store: MemoryStore, path: string, init?: RequestInit, caller = callerFor(path, init)) =>
-  route(new Request(base + path, init), store, { caller, requester: caller === "agent" ? AGENT : undefined });
+  route(new Request(base + path, init), store, { caller, requester: caller === "agent" ? AGENT : undefined }, Date.now(), undefined, undefined, recorder);
 const AGENT = "c-box agent (test)";
 
 test("health answers with the version", async () => {
@@ -130,7 +134,7 @@ test("owner only when Access signed in OWNER_EMAIL", async () => {
 test("caller refusals are bounded: 20 log rows a day plus one notice, the rest only counted", async () => {
   const store = new MemoryStore();
   for (let i = 0; i < 25; i++) assert.equal((await call(store, "/log", undefined, "unknown")).status, 403);
-  const desk = new Desk(store, { origin: base, rpID: "desk.example" });
+  const desk = new Desk(store, { origin: base, rpID: "desk.example" }, { recorder });
   const rows = (await desk.readLog()).filter((e) => e.event === "refused");
   assert.equal(rows.length, 21);
   assert.match(rows[20].detail ?? "", /more caller refusals today/);
@@ -257,7 +261,7 @@ function fakeVault(stored = false) {
   };
 }
 const callV = (store: MemoryStore, vault: ReturnType<typeof fakeVault>, path: string, init?: RequestInit, caller = callerFor(path, init)) =>
-  route(new Request(base + path, init), store, { caller, requester: caller === "agent" ? AGENT : undefined }, Date.now(), vault);
+  route(new Request(base + path, init), store, { caller, requester: caller === "agent" ? AGENT : undefined }, Date.now(), vault, undefined, recorder);
 const ZONE = "benculbert.com";
 const optsIn = async (res: Response) => JSON.parse((await res.text()).match(/const opts=(\{.*?\});\n/)![1]);
 
@@ -350,7 +354,7 @@ const agentPost = (store: MemoryStore, vault: ReturnType<typeof fakeVault>, path
   const text = JSON.stringify(body);
   const now = o.now ?? Date.now();
   const headers: Record<string, string> = { ...(o.ip ? { "cf-connecting-ip": o.ip } : {}), ...(o.pem ? signRequest(o.pem, "POST", path, text, o.time ?? now) : {}), ...o.headers };
-  return route(new Request(base + path, { method: "POST", headers, body: text }), store, { caller: "agent", requester: AGENT }, now, vault);
+  return route(new Request(base + path, { method: "POST", headers, body: text }), store, { caller: "agent", requester: AGENT }, now, vault, undefined, recorder);
 };
 const askKey = (store: MemoryStore, vault: ReturnType<typeof fakeVault>, params: Record<string, string>, o: Signing) =>
   agentPost(store, vault, "/request", { job: "cf.token.zone.read", params, reason: "read the zone" }, o);
@@ -371,7 +375,7 @@ async function withCboxKey() {
   assert.equal(ok.status, 200);
   return { ...e, cbox: k };
 }
-const desk = (store: MemoryStore) => new Desk(store, { origin: base, rpID: "desk.example" });
+const desk = (store: MemoryStore) => new Desk(store, { origin: base, rpID: "desk.example" }, { recorder });
 
 test("c-box key: Ben enrolls it by Face ID; the screen shows its fingerprint and when to say no", async () => {
   const { store, key } = await enrolled();
@@ -573,22 +577,22 @@ test("a request sends one push with its approve link; a failed push never fails 
   const sent: { what: string; url: string }[] = [];
   const push: Push = async (what, url) => { sent.push({ what, url }); };
   const ask = { method: "POST", body: JSON.stringify({ job: "test.echo", params: { word: "hi" }, reason: "x" }) };
-  const res = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, push);
+  const res = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, push, recorder);
   const out = (await res.json()) as { id: string; approve_url: string; pushed: boolean; push_error?: string };
   assert.equal(res.status, 201);
   assert.equal(out.pushed, true);
   assert.deepEqual(sent, [{ what: 'Test only: the front desk echoes the word "hi". It touches nothing.', url: `${base}/approve/${out.id}` }]);
   const broken: Push = async () => { throw new Error("ntfy down"); };
-  const res2 = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, broken);
+  const res2 = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, broken, recorder);
   assert.equal(res2.status, 201);
   const out2 = (await res2.json()) as { pushed: boolean; push_error?: string };
   assert.equal(out2.pushed, false, "the agent learns to send the link itself");
   assert.equal(out2.push_error, "push failed", "and why, in fixed words only");
   const leaky: Push = async () => { throw new Error("connect failed: https://ntfy.sh/secret-topic-name-here"); };
-  const res4 = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, leaky);
+  const res4 = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, leaky, recorder);
   assert.ok(!(await res4.text()).includes("secret-topic"), "a thrown error never echoes the topic");
   const refused: Push = async () => { throw new Error("ntfy answered 429"); };
-  const res5 = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, refused);
+  const res5 = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, refused, recorder);
   assert.equal(((await res5.json()) as { push_error?: string }).push_error, "ntfy answered 429");
   const out3 = (await (await call(new MemoryStore(), "/request", ask)).json()) as { pushed: boolean; push_error?: string };
   assert.deepEqual([out3.pushed, out3.push_error], [false, "no ntfy topic set"]);
@@ -598,9 +602,9 @@ test("a request sends one push with its approve link; a failed push never fails 
 test("a refused request sends no push", async () => {
   let pushes = 0;
   const push: Push = async () => { pushes++; };
-  const res = await route(new Request(base + "/request", { method: "POST", body: JSON.stringify({ job: "no.such.job", reason: "x" }) }), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, push);
+  const res = await route(new Request(base + "/request", { method: "POST", body: JSON.stringify({ job: "no.such.job", reason: "x" }) }), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, push, recorder);
   assert.equal(res.status, 400);
-  const owner = await route(new Request(base + "/request", { method: "POST", body: "{}" }), new MemoryStore(), { caller: "owner" }, Date.now(), undefined, push);
+  const owner = await route(new Request(base + "/request", { method: "POST", body: "{}" }), new MemoryStore(), { caller: "owner" }, Date.now(), undefined, push, recorder);
   assert.equal(owner.status, 403);
   assert.equal(pushes, 0);
 });
@@ -648,7 +652,7 @@ test("approvalPush tries Pushover first, falls back to ntfy, and names each refu
 
 test("a request's push_error passes both services' refusals through", async () => {
   const both: Push = async () => { throw new Error("pushover answered 429; ntfy answered 429"); };
-  const res = await route(new Request(base + "/request", { method: "POST", body: JSON.stringify({ job: "test.echo", params: { word: "hi" }, reason: "x" }) }), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, both);
+  const res = await route(new Request(base + "/request", { method: "POST", body: JSON.stringify({ job: "test.echo", params: { word: "hi" }, reason: "x" }) }), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, both, recorder);
   assert.equal(((await res.json()) as { push_error?: string }).push_error, "pushover answered 429; ntfy answered 429");
 });
 

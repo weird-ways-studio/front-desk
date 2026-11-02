@@ -14,12 +14,14 @@ import { ascii, name, plainChanges } from "./ghplain.ts";
 import { JOBS, type Job, type JobName } from "./jobs.ts";
 import { currentKey, fingerprint, keyRev, type CboxKey } from "./cboxkey.ts";
 import type { Headcount, VaultApi } from "../vault/src/api.ts";
+import { RecorderError, type Receipt, type Recorder } from "./recorder.ts";
 
 export const APPROVE_WINDOW_MS = 10 * 60_000; // ask -> approve
 export const COLLECT_WINDOW_MS = 5 * 60_000; // approve -> collect
 export const MAX_PENDING = 3; // grants one requester may have waiting for Ben at once
 export const CHALLENGE_TTL_MS = 5 * 60_000;
 export const ROUTE_REFUSALS_PER_DAY = 20;
+export const ALERT_TIMEOUT_MS = 5_000; // a result-unrecorded push to Ben's phone
 // PRF check only. The master key will use a different label, so a check never reveals key material.
 export const PRF_CHECK_LABEL = "front-desk prf-check v1";
 // Salt for the secret that unlocks the master key (setup and vault jobs).
@@ -33,7 +35,9 @@ export interface Store {
   delete(key: string): Promise<boolean>;
 }
 
-export type GrantStatus = "pending" | "approved" | "collected";
+// "stopped": approved, but its approval could not be recorded (or the c-box key changed while it
+// was being recorded), so nothing runs and it cannot be collected; the agent asks again.
+export type GrantStatus = "pending" | "approved" | "collected" | "stopped";
 
 // Where an agent request came from: the address Cloudflare saw, and the route's check of the c-box
 // signature (cboxkey.ts), run only for jobs that hand out keys.
@@ -57,6 +61,10 @@ export interface Grant {
   // For key jobs: the c-box key generation (cboxkey.ts keyRev) the request was signed under. Approval
   // and collect are refused if Ben has removed or replaced the key since (Codex architecture r2).
   cbox_rev?: number;
+  // What the Observatory's recorder has receipted for this grant (card 97a2e83d): the SHA-256 of the
+  // request record's bytes (later records name the request by it), then the approval and result
+  // record numbers. A grant with no request receipt is never approved or collected.
+  recorded?: { request: string; approval?: number; result?: number };
   // What a vault job reported when it ran at approval. A minted key's secret (result.key.value)
   // is kept only until the agent collects it, then erased; it is never logged or shown to Ben.
   result?: unknown;
@@ -218,6 +226,13 @@ export function approvalPush(ntfyUrl: string | undefined, pushover: PushoverKeys
   return send && ((what, approveUrl) => send("Front desk: approve?", what.slice(0, 300), approveUrl));
 }
 
+/** A plain message to Ben's phone (no link), or undefined when no push service is set up. */
+export function phoneAlert(ntfyUrl: string | undefined, pushover: PushoverKeys = {}, fetchFn: typeof fetch = fetch): Alert | undefined {
+  const send = phoneSenders(ntfyUrl, pushover, fetchFn);
+  return send && ((title, text) => send(title, text));
+}
+export type Alert = (title: string, text: string) => Promise<void>;
+
 /**
  * Sends one message to Ben's phone: Pushover first, then ntfy, stopping at the first that takes it.
  * ntfy.sh refuses Cloudflare Workers' shared addresses (429, ntfy issues #1963/#1726), hence
@@ -251,6 +266,16 @@ export interface DeskHooks {
   afterVerify?: (grantId: string) => Promise<void>;
   // The vault Worker (service binding VAULT); absent in tests that do not need it.
   vault?: VaultApi;
+  // The Observatory's recorder (recorder.ts). Absent = not set up: every request is refused.
+  recorder?: Recorder;
+  // Ben's phone, for a job that ran but whose result could not be recorded (phoneAlert).
+  alert?: Alert;
+}
+
+// The public parts of Ben's passkey answer, kept so the Observatory can check the signature itself
+// (phase 3b). Never the PRF output, the user handle or extension results.
+function assertionOf(r: AuthenticationResponseJSON) {
+  return { passkey_id: r.id, authenticator_data: r.response.authenticatorData, client_data_json: r.response.clientDataJSON, signature: r.response.signature };
 }
 
 // The passkey secret a browser sent with its answer, if it is 32 bytes.
@@ -277,6 +302,53 @@ export class Desk {
 
   private grantFacts(g: Grant) {
     return { grant_id: g.id, job: g.job, params: g.params, reason: g.reason, requester: g.requester, expires_at: g.expires_at };
+  }
+
+  // One record to the Observatory. Any failure is logged and becomes recorder_unavailable: the caller
+  // stops before anything runs (card 97a2e83d).
+  private async record(g: Grant, stage: "request" | "approval" | "result", fields: Record<string, unknown>, now: number): Promise<Receipt> {
+    try {
+      if (!this.hooks.recorder) throw new RecorderError("recorder not set");
+      const r = { grant: g.id, stage, job: g.job, ...(stage === "request" ? {} : { request: g.recorded?.request }), ...fields };
+      return await this.hooks.recorder(r);
+    } catch (e) {
+      const why = e instanceof RecorderError ? e.message : "recorder failed";
+      await this.log({ event: "refused", ...this.grantFacts(g), detail: `${stage} not recorded: ${why}` }, now);
+      throw new DeskError("recorder_unavailable", 503);
+    }
+  }
+
+  // After an effect: never throws, since the effect has happened; a miss is logged for Ben.
+  private async recordResult(id: string, ok: boolean, now: number): Promise<void> {
+    const g = await this.grant(id);
+    try {
+      const r = await this.record(g, "result", { outcome: ok ? "done" : "failed", at: now }, now);
+      const latest = await this.grant(id);
+      await this.store.put(`grant:${id}`, { ...latest, recorded: { ...latest.recorded!, result: r.seq } });
+    } catch {
+      await this.log({ event: "result_unrecorded", ...this.grantFacts(g) }, now);
+      // The job already ran, so Ben hears of it now; the hourly checker does not flag a missing result.
+      // Bounded, so a stalled push service cannot hold back the job's answer.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const late = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error("push timed out")), ALERT_TIMEOUT_MS)));
+      const told = await Promise.race([
+        Promise.resolve().then(() => {
+          if (!this.hooks.alert) throw new Error("no phone push set");
+          return this.hooks.alert("Front desk: a job ran but was not fully recorded", `Job ${g.job} ran, but the Observatory did not take its result record. Tell the agent: grant ${g.id}.`);
+        }),
+        late,
+      ])
+        .then(() => "", () => "failed")
+        .finally(() => clearTimeout(timer));
+      if (told) await this.log({ event: "alert_failed", ...this.grantFacts(g), detail: "result_unrecorded alert did not reach Ben's phone" }, now);
+    }
+  }
+
+  // Ends an approved grant that must not run: it can no longer be collected, and the log says why.
+  private async stop(id: string, detail: string, now: number): Promise<void> {
+    const latest = await this.grant(id);
+    await this.store.put(`grant:${id}`, { ...latest, status: "stopped" });
+    await this.log({ event: "stopped", ...this.grantFacts(latest), detail }, now);
   }
 
   private async log(entry: Omit<LogEntry, "at">, now: number): Promise<void> {
@@ -366,6 +438,9 @@ export class Desk {
     const base = { id: crypto.randomUUID(), job, params, requester, expires_at: now + APPROVE_WINDOW_MS };
     const g: Grant = { ...base, reason: body.reason.trim(), created_at: now, hash: await grantHash(base), status: "pending" };
     if ((JOBS[job] as Job).pinIp) g.cbox_rev = await keyRev(this.store);
+    // Recorded before the grant exists: no receipt, nothing for Ben to approve.
+    const receipt = await this.record(g, "request", { params, requester, reason: g.reason, created_at: now, expires_at: g.expires_at, grant_hash: g.hash }, now);
+    g.recorded = { request: receipt.sha256 };
     await this.store.put(`grant:${g.id}`, g);
     await this.log({ event: "requested", ...this.grantFacts(g) }, now);
     return g;
@@ -445,6 +520,8 @@ export class Desk {
     let g: Grant;
     try {
       g = await this.pending(id, now);
+      // Asked before recording began (or never receipted): never approved.
+      if (!g.recorded?.request) throw new DeskError("not_recorded", 409);
     } catch (e) {
       if (e instanceof DeskError) await this.refuse(`approve: ${e.code}`, now);
       throw e;
@@ -471,10 +548,36 @@ export class Desk {
       throw new DeskError("cbox_key_changed", 409);
     }
     await this.commitCounter(key.id, newCounter);
-    const approved: Grant = { ...current, status: "approved", approved_at: now };
-    await this.store.put(`grant:${g.id}`, approved);
+    // Committed as approved before the approval is recorded, so a replay finds it not pending while
+    // the record is in flight; nothing runs, and collect refuses, until the approval receipt is in.
+    await this.store.put(`grant:${g.id}`, { ...current, status: "approved", approved_at: now });
     await this.log({ event: "approved", ...this.grantFacts(g) }, now);
-    if (g.job === "cbox.key.enroll") await this.enrollCboxKey(approved, now);
+    let receipt: Receipt;
+    try {
+      receipt = await this.record(current, "approval", { grant_hash: g.hash, approved_at: now, assertion: assertionOf(response) }, now);
+    } catch {
+      // A 4xx, so Ben's page says "Not approved" (page.ts outcomeView): nothing ran, which is known.
+      await this.stop(id, "approval not recorded; nothing ran", now);
+      throw new DeskError("approval_not_recorded", 409);
+    }
+    // The record awaited the network, so other requests may have run: re-read and re-check.
+    const recorded = await this.grant(id);
+    if (recorded.cbox_rev !== undefined && recorded.cbox_rev !== (await keyRev(this.store))) {
+      await this.stop(id, "the c-box key was removed or replaced while the approval was recorded; nothing ran", now);
+      throw new DeskError("cbox_key_changed", 409);
+    }
+    const approved: Grant = { ...recorded, recorded: { ...recorded.recorded!, approval: receipt.seq } };
+    await this.store.put(`grant:${g.id}`, approved);
+    if (g.job === "cbox.key.enroll") {
+      try {
+        await this.enrollCboxKey(approved, now);
+      } catch (e) {
+        await this.recordResult(id, false, now);
+        throw e;
+      }
+      await this.recordResult(id, true, now);
+      return this.grant(id);
+    }
     if (!prf) return approved;
     // Committed as approved first, so a replay finds it not pending while the vault works.
     let result: unknown;
@@ -487,6 +590,7 @@ export class Desk {
       result = { error: (e as Error).message.slice(0, 120) };
       await this.log({ event: "job_failed", ...this.grantFacts(g), detail: (e as Error).message.slice(0, 120) }, now);
     }
+    await this.recordResult(id, (result as { ok?: unknown } | null)?.ok === true, now);
     // Re-read: other requests ran while the vault worked; only the result is added. If Ben removed or
     // replaced the c-box key meanwhile, a minted key's secret is dropped, never released.
     const latest = await this.grant(id);
@@ -606,10 +710,15 @@ export class Desk {
     const g = await this.grant(id);
     if (g.status === "pending") throw new DeskError("not_approved", 403);
     if (g.status === "collected") throw new DeskError("already_collected", 409);
+    if (g.status === "stopped") throw new DeskError("stopped", 409);
+    // Nothing is handed over or run without a recorded approval (card 97a2e83d). A grant from before
+    // recording never gets one; for any other, the approval is still being recorded: ask again.
+    if (!g.recorded?.request) throw new DeskError("not_recorded", 409);
     if (now > (g.approved_at ?? 0) + COLLECT_WINDOW_MS) {
       await this.eraseStaleSecrets(now);
       throw new DeskError("collect_window_closed", 410);
     }
+    if (g.recorded.approval === undefined) throw new DeskError("not_ready", 409);
     // A vault job is approved before the vault finishes; until its result is in, there is nothing to collect.
     if ((JOBS[g.job] as Job).vault && g.result === undefined) throw new DeskError("not_ready", 409);
     if ((JOBS[g.job] as Job).pinIp) {
@@ -625,6 +734,7 @@ export class Desk {
     const job = JOBS[g.job] as Job;
     const result = job.vault ? g.result : await job.run!(g.params);
     await this.log({ event: "collected", ...this.grantFacts(g) }, now);
+    if (!job.vault && g.recorded.result === undefined) await this.recordResult(g.id, true, now);
     return { grant: collected, result };
   }
 
