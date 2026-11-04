@@ -261,7 +261,7 @@ test("log detail stays valid JSON and says when it shortened a long token list",
 });
 
 // Nightly headcount (C5c-2 3baea7cc): the desk logs the vault's count and tells the alarm.
-const clean: Headcount = { ok: true, tokens: 5, unexpected: [], stretched: [], missing: [], github: { ok: true, changes: [] } };
+const clean: Headcount = { ok: true, tokens: 5, unexpected: [], stretched: [], missing: [], cleanup: [], github: { ok: true, changes: [] } };
 function headcountDesk(answer: () => Promise<Headcount>) {
   const store = new MemoryStore();
   const vault = { status: async () => ({ stored: true, pending: false }), run: async () => ({}) as any, headcount: answer, ghPreview: async () => ({ changes: [], snapshot: "", base: "" }), cfPreview: async () => [] };

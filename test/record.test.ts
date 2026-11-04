@@ -217,16 +217,16 @@ test("R8: c-box key replaced while the approval is recorded: the key job stops, 
   };
   const { store, desk, key, runs } = await setup({ recorder: send });
   const signed = { ip: "203.0.113.7", checkSignature: async () => {} };
-  const g = await desk.request({ job: "cf.token.zone.read", params: { zone: "benculbert.com", minutes: "5" }, reason: "read" }, "agent", T0, signed);
+  const g = await desk.request({ job: "cf.dns.list", params: { zone: "benculbert.com" }, reason: "read" }, "agent", T0, signed);
   during = async () => store.put("cbox:rev", ((await store.get<number>("cbox:rev")) ?? 0) + 1);
   await refuses(desk.approve(g.id, await answer(desk, key, g.id, PRF), T0), "cbox_key_changed");
   assert.deepEqual(runs, []);
   assert.equal((await desk.grant(g.id)).status, "stopped");
   // Safeguard working: unchanged key, the job runs.
   during = async () => {};
-  const g2 = await desk.request({ job: "cf.token.zone.read", params: { zone: "benculbert.com", minutes: "5" }, reason: "read" }, "agent", T0, signed);
+  const g2 = await desk.request({ job: "cf.dns.list", params: { zone: "benculbert.com" }, reason: "read" }, "agent", T0, signed);
   await desk.approve(g2.id, await answer(desk, key, g2.id, PRF), T0);
-  assert.deepEqual(runs, ["cf.token.zone.read"]);
+  assert.deepEqual(runs, ["cf.dns.list"]);
 });
 
 test("R9: the agent cannot name record fields; extra params never reach a record", async () => {
@@ -240,7 +240,7 @@ test("R9: the agent cannot name record fields; extra params never reach a record
 test("R10: no record carries the minted key, the passkey secret or the user handle", async () => {
   const { rec, desk, key } = await setup();
   const signed = { ip: "203.0.113.7", checkSignature: async () => {} };
-  const g = await desk.request({ job: "cf.token.zone.read", params: { zone: "benculbert.com", minutes: "5" }, reason: "read" }, "agent", T0, signed);
+  const g = await desk.request({ job: "cf.dns.list", params: { zone: "benculbert.com" }, reason: "read" }, "agent", T0, signed);
   const a = await answer(desk, key, g.id, PRF);
   await desk.approve(g.id, { ...a, response: { ...a.response, userHandle: "dXNlci1oYW5kbGU" } }, T0);
   const all = rec.records.map((r) => r.body).join("\n");

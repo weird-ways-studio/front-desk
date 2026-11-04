@@ -38,7 +38,9 @@ const PARAMS: Record<keyof typeof JOBS, Record<string, string>> = {
   "test.echo": { word: "hi" },
   "cf.dns.txt.probe": { zone: "example.com" },
   "cbox.key.enroll": { key: "AAAA", fingerprint: "07e4-1b75-6019-92b3", replaces: "7766-d5a4-6072-636c", rev: "1" },
-  "cf.token.zone.read": { zone: "example.com", minutes: "10", ip: "203.0.113.7" },
+  "cf.zone.read": { zone: "example.com" },
+  "cf.dns.list": { zone: "example.com" },
+  "cf.audit.read": { since: "2026-11-01T00:00:00Z", until: "2026-11-03T00:00:00Z" },
   "cf.token.headcount.setup": {},
   "gh.app.baseline": { changes: CHANGES.join("\n"), snapshot: "s", base: "b" },
   "cf.token.accept": { ids: `${"a".repeat(32)},${"b".repeat(32)}`, names: "observatory-backup-read\n{\"x\":1}" },
@@ -143,7 +145,8 @@ test("each failed job says what it actually left behind", () => {
   assert.match(JOBS["gh.app.baseline"].done({ ok: false, error: "e", main: { locked_to_passkey_now: true } }), /list was not saved[\s\S]*key is now locked to your passkey; that part is done/);
   assert.doesNotMatch(JOBS["gh.app.baseline"].done({ ok: false, error: "e", main: { locked_to_passkey_now: false } }), /locked/);
   assert.match(JOBS["cf.dns.txt.probe"].done({ ok: false, error: "e", added: true, removed: false, minted: [{ id: "a", deleted: false }] }), /test record may still be in DNS; a 5-minute key was not deleted/);
-  assert.match(JOBS["cf.token.zone.read"].done({ ok: false, error: "key delete failed: 500" }), /No key was handed to the agent[\s\S]*could not be deleted: the agent must remove it/);
+  assert.match(JOBS["cf.dns.list"].done({ ok: false, error: "token delete failed: 500" }), /No answer went to the agent, and no key either[\s\S]*could not be deleted: the nightly check lists it/);
+  assert.match(JOBS["cf.dns.list"].done({ ok: true, truncated: true }), /it was cut/);
   assert.match(JOBS["cf.token.headcount.setup"].done({ ok: false, error: "e", key_id: "k" }), /keeps its previous key; the new one did not pass/);
 });
 

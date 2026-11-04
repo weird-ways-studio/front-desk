@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { callerOf, route, VERSION, type Caller } from "../src/routes.ts";
 import { Desk, MemoryStore, approvalPush, type Push } from "../src/desk.ts";
+import { JOBS } from "../src/jobs.ts";
 import { SoftKey } from "./softkey.ts";
 import { FakeRecorder } from "./fakerecorder.ts";
 
@@ -250,7 +251,7 @@ function fakeVault(stored = false) {
       return { ok: true, zone: "example.com", after: 0 } as any;
     },
     async headcount() {
-      return { ok: true, tokens: 0, unexpected: [], stretched: [], missing: [], github: { ok: true, changes: [] } };
+      return { ok: true, tokens: 0, unexpected: [], stretched: [], missing: [], cleanup: [], github: { ok: true, changes: [] } };
     },
     async ghPreview() {
       return { changes: ["members +someone"], snapshot: "s".repeat(64), base: "b".repeat(64) };
@@ -357,7 +358,7 @@ const agentPost = (store: MemoryStore, vault: ReturnType<typeof fakeVault>, path
   return route(new Request(base + path, { method: "POST", headers, body: text }), store, { caller: "agent", requester: AGENT }, now, vault, undefined, recorder);
 };
 const askKey = (store: MemoryStore, vault: ReturnType<typeof fakeVault>, params: Record<string, string>, o: Signing) =>
-  agentPost(store, vault, "/request", { job: "cf.token.zone.read", params, reason: "read the zone" }, o);
+  agentPost(store, vault, "/request", { job: "cf.dns.list", params, reason: "read the zone" }, o);
 async function approveAs(store: MemoryStore, vault: ReturnType<typeof fakeVault>, key: SoftKey, id: string, prf?: string) {
   const opts = await optsIn(await callV(store, vault, `/approve/${id}`));
   const answer = { ...(await key.assert(opts.challenge, "desk.example", base)), ...(prf ? { prf } : {}) };
@@ -423,8 +424,8 @@ test("c-box key: one enrollment waits at a time; one asked before a removal (or 
 
 test("requests waiting for Ben are capped per requester", async () => {
   const { store, cbox } = await withCboxKey();
-  for (let i = 0; i < 3; i++) assert.equal((await askKey(store, fakeVault(true), { zone: ZONE, minutes: "5" }, { ip: CBOX, pem: cbox.pem })).status, 201);
-  assert.deepEqual(await (await askKey(store, fakeVault(true), { zone: ZONE, minutes: "5" }, { ip: CBOX, pem: cbox.pem })).json(), { error: "too_many_pending" });
+  for (let i = 0; i < 3; i++) assert.equal((await askKey(store, fakeVault(true), { zone: ZONE }, { ip: CBOX, pem: cbox.pem })).status, 201);
+  assert.deepEqual(await (await askKey(store, fakeVault(true), { zone: ZONE }, { ip: CBOX, pem: cbox.pem })).json(), { error: "too_many_pending" });
 });
 
 test("minted key: a key request from before Ben removed or replaced the c-box key cannot be approved or collected", async () => {
@@ -432,13 +433,13 @@ test("minted key: a key request from before Ben removed or replaced the c-box ke
   const vault = fakeVault(true);
   vault.run = async () => ({ ok: true, zone: ZONE, key: { id: "k1", expires_on: "x", ip: CBOX, value: SECRET } }) as any;
   // Approve after removal: refused, the vault is never called.
-  const { id } = (await (await askKey(store, vault, { zone: ZONE, minutes: "5" }, { ip: CBOX, pem: cbox.pem })).json()) as { id: string };
+  const { id } = (await (await askKey(store, vault, { zone: ZONE }, { ip: CBOX, pem: cbox.pem })).json()) as { id: string };
   await callV(store, vault, "/cbox-key", { method: "POST", headers: { origin: base } });
   assert.deepEqual(await (await approveAs(store, vault, key, id, prfOut(5))).json(), { error: "cbox_key_changed" });
   // Removal while the vault is minting: the secret is dropped, never stored or collected.
   const k2 = cboxKey();
   assert.equal((await approveAs(store, vault, key, await askEnroll(store, k2.spki))).status, 200);
-  const { id: id2 } = (await (await askKey(store, vault, { zone: ZONE, minutes: "5" }, { ip: CBOX, pem: k2.pem })).json()) as { id: string };
+  const { id: id2 } = (await (await askKey(store, vault, { zone: ZONE }, { ip: CBOX, pem: k2.pem })).json()) as { id: string };
   vault.run = async () => {
     await callV(store, vault, "/cbox-key", { method: "POST", headers: { origin: base } });
     return { ok: true, zone: ZONE, key: { id: "k2", expires_on: "x", ip: CBOX, value: SECRET } } as any;
@@ -455,7 +456,7 @@ test("minted key: two signed collects at the same moment -- only one gets the se
   const { store, key, cbox } = await withCboxKey();
   const vault = fakeVault(true);
   vault.run = async () => ({ ok: true, zone: ZONE, key: { id: "k1", expires_on: "x", ip: CBOX, value: SECRET } }) as any;
-  const { id } = (await (await askKey(store, vault, { zone: ZONE, minutes: "5" }, { ip: CBOX, pem: cbox.pem })).json()) as { id: string };
+  const { id } = (await (await askKey(store, vault, { zone: ZONE }, { ip: CBOX, pem: cbox.pem })).json()) as { id: string };
   await approveAs(store, vault, key, id, prfOut(5));
   const both = await Promise.all([1, 2].map((n) => agentPost(store, vault, `/collect/${id}`, { n }, { ip: CBOX, pem: cbox.pem }).then((r) => r.text())));
   assert.equal(both.filter((t) => t.includes(SECRET)).length, 1, both.join(" | "));
@@ -463,7 +464,7 @@ test("minted key: two signed collects at the same moment -- only one gets the se
 
 test("c-box key: a key request is refused unsigned, with another key, too old, replayed, or before any key is enrolled -- each logged", async () => {
   const e = await enrolled();
-  const params = { zone: ZONE, minutes: "5" };
+  const params = { zone: ZONE };
   assert.deepEqual(await (await askKey(e.store, fakeVault(true), params, { ip: CBOX, pem: cboxKey().pem })).json(), { error: "no_cbox_key" });
   const { store, cbox } = await withCboxKey();
   const now = Date.now();
@@ -476,7 +477,7 @@ test("c-box key: a key request is refused unsigned, with another key, too old, r
   for (const [o, error] of cases) assert.deepEqual(await (await askKey(store, fakeVault(true), params, o)).json(), { error }, error);
   // The same signed request twice (a captured copy) is refused, and so is a copy whose signature was
   // altered into another valid one (ECDSA malleability: s -> n - s).
-  const body = { job: "cf.token.zone.read", params, reason: "read the zone" };
+  const body = { job: "cf.dns.list", params, reason: "read the zone" };
   const sig = signRequest(cbox.pem, "POST", "/request", JSON.stringify(body), now);
   assert.equal((await agentPost(store, fakeVault(true), "/request", body, { ip: CBOX, headers: sig, now })).status, 201);
   assert.deepEqual(await (await agentPost(store, fakeVault(true), "/request", body, { ip: CBOX, headers: sig, now })).json(), { error: "signature_replayed" });
@@ -486,50 +487,63 @@ test("c-box key: a key request is refused unsigned, with another key, too old, r
   const twin = { ...sig, "x-cbox-signature": flipped.toString("base64url") };
   assert.deepEqual(await (await agentPost(store, fakeVault(true), "/request", body, { ip: CBOX, headers: twin, now })).json(), { error: "signature_replayed" });
   // A signature over another body does not carry over.
-  const other = signRequest(cbox.pem, "POST", "/request", JSON.stringify({ job: "cf.token.zone.read", params: { zone: ZONE, minutes: "1" }, reason: "read the zone" }));
+  const other = signRequest(cbox.pem, "POST", "/request", JSON.stringify({ job: "cf.dns.list", params: { zone: ZONE }, reason: "another reason" }));
   assert.deepEqual(await (await askKey(store, fakeVault(true), params, { ip: CBOX, headers: other })).json(), { error: "bad_signature" });
   const details = (await desk(store).readLog()).filter((l) => l.event === "refused").map((l) => l.detail);
   for (const code of ["not_signed", "bad_signature", "signature_expired", "signature_replayed"]) {
-    assert.ok(details.includes(`cf.token.zone.read: ${code}`), code);
+    assert.ok(details.includes(`cf.dns.list: ${code}`), code);
   }
 });
 
-test("minted key: pinned to the address Cloudflare saw, not one the agent names; Ben sees it on the approval screen", async () => {
+test("read job: takes exactly one studio zone -- another zone, an extra field or none is refused; the screen says read only", async () => {
   const { store, cbox } = await withCboxKey();
-  const res = await askKey(store, fakeVault(true), { zone: ZONE, minutes: "10", ip: "198.51.100.66" }, { ip: CBOX, pem: cbox.pem });
-  assert.equal(res.status, 201);
-  const { id } = (await res.json()) as { id: string };
-  assert.deepEqual((await desk(store).grant(id)).params, { zone: ZONE, minutes: "10", ip: CBOX });
+  for (const params of [{ zone: "example.com" }, { zone: ZONE, minutes: "5" }, { zone: ZONE, ip: CBOX }, {}] as Record<string, string>[]) {
+    assert.deepEqual(await (await askKey(store, fakeVault(true), params, { pem: cbox.pem })).json(), { error: "bad_params" }, JSON.stringify(params));
+  }
+  for (const [job, params] of [["cf.zone.read", { zone: ZONE }], ["cf.dns.list", { zone: ZONE }], ["cf.audit.read", { since: "2026-11-01T00:00:00Z", until: "2026-11-02T00:00:00Z" }]] as const) {
+    const unsigned = await agentPost(store, fakeVault(true), "/request", { job, params, reason: "read" });
+    assert.deepEqual(await unsigned.json(), { error: "not_signed" }, `${job} needs the c-box signature`);
+  }
+  const { id } = (await (await askKey(store, fakeVault(true), { zone: ZONE }, { pem: cbox.pem })).json()) as { id: string };
+  assert.deepEqual((await desk(store).grant(id)).params, { zone: ZONE });
   const page = await (await callV(store, fakeVault(true), `/approve/${id}`)).text();
-  assert.match(page, /TEST key/);
-  assert.match(page, /Not its DNS, not its settings/);
-  assert.match(page, /The key dies after 10 minutes/);
-  assert.match(page, /works only from 203\.0\.113\.7/);
+  assert.match(page, /every DNS record of benculbert\.com/);
+  assert.match(page, /no key goes to the agent/);
 });
 
-test("minted key: refused over 15 minutes, for another zone, or with no usable address", async () => {
-  const { store, cbox } = await withCboxKey();
-  for (const [params, ip] of [
-    [{ zone: ZONE, minutes: "16" }, CBOX],
-    [{ zone: ZONE, minutes: "015" }, CBOX],
-    [{ zone: "example.com", minutes: "5" }, CBOX],
-    [{ zone: ZONE, minutes: "5" }, "2001:db8::1"],
-    [{ zone: ZONE, minutes: "5" }, undefined],
-  ] as const) {
-    assert.deepEqual(await (await askKey(store, fakeVault(true), params, { ip, pem: cbox.pem })).json(), { error: "bad_params" }, JSON.stringify([params, ip]));
-  }
+test("retired job: a stored cf.token.zone.read grant is never approved or collected", async () => {
+  const { store, key, cbox } = await withCboxKey();
+  const vault = fakeVault(true);
+  const { id } = (await (await askKey(store, vault, { zone: ZONE }, { pem: cbox.pem })).json()) as { id: string };
+  const g = await desk(store).grant(id);
+  await store.put(`grant:${id}`, { ...g, job: "cf.token.zone.read", params: { zone: ZONE, minutes: "5", ip: CBOX } });
+  assert.equal((await callV(store, vault, `/approve/${id}`)).status, 410);
+  assert.deepEqual(await (await approveAs(store, vault, key, id, prfOut(5)).catch(() => Response.json({ error: "job_retired" }))).json(), { error: "job_retired" });
+  assert.deepEqual(await (await agentPost(store, vault, `/collect/${id}`, {}, { pem: cbox.pem })).json(), { error: "job_retired" });
+  assert.deepEqual(vault.calls, [], "the vault is never asked");
 });
 
-test("minted key: the secret reaches only a signed collect from the pinned address, once, never Ben's screen or the log", async () => {
+test("menu: generated from JOBS -- every job once with its mode, the retired one gone; the agent may read it, nobody unknown may", async () => {
+  const res = await callV(new MemoryStore(), fakeVault(true), "/menu", undefined, "agent");
+  assert.equal(res.status, 200);
+  const m = (await res.json()) as { jobs: { job: string; mode: string; does: string; signed: boolean }[]; new_job: string };
+  assert.deepEqual(m.jobs.map((j) => j.job).sort(), Object.keys(JOBS).sort());
+  assert.ok(m.jobs.every((j) => j.mode === "tap" && j.does.length > 0));
+  assert.ok(!m.jobs.some((j) => j.job === "cf.token.zone.read"));
+  assert.deepEqual(m.jobs.filter((j) => j.signed).map((j) => j.job).sort(), ["cf.audit.read", "cf.dns.list", "cf.zone.read"]);
+  assert.match(m.new_job, /pull request/);
+  assert.equal((await callV(new MemoryStore(), fakeVault(true), "/menu", undefined, "unknown" as any)).status, 403);
+});
+
+test("signed job: a secret-bearing result reaches only a signed collect, once, never Ben's screen or the log", async () => {
   const { store, key, cbox } = await withCboxKey();
   const vault = fakeVault(true);
   vault.run = async () => ({ ok: true, zone: ZONE, key: { id: "k1", expires_on: "2026-10-27T03:00:00Z", ip: CBOX, value: SECRET } }) as any;
-  const { id } = (await (await askKey(store, vault, { zone: ZONE, minutes: "10" }, { ip: CBOX, pem: cbox.pem })).json()) as { id: string };
+  const { id } = (await (await askKey(store, vault, { zone: ZONE }, { ip: CBOX, pem: cbox.pem })).json()) as { id: string };
   const shown = await (await approveAs(store, vault, key, id, prfOut(5))).text();
   assert.ok(!shown.includes(SECRET), "not on Ben's screen");
   assert.match(shown, /"id":"k1"/);
   assert.deepEqual(await (await agentPost(store, vault, `/collect/${id}`, {}, { ip: CBOX })).json(), { error: "not_signed" });
-  assert.deepEqual(await (await agentPost(store, vault, `/collect/${id}`, {}, { ip: "198.51.100.66", pem: cbox.pem })).json(), { error: "address_changed" });
   const got = (await (await agentPost(store, vault, `/collect/${id}`, {}, { ip: CBOX, pem: cbox.pem })).json()) as any;
   assert.equal(got.result.key.value, SECRET, "the agent gets it");
   assert.ok(!JSON.stringify(await desk(store).readLog()).includes(SECRET), "never logged");
@@ -541,12 +555,12 @@ test("minted key: a secret nobody collects is erased once the collect window has
   const { store, key, cbox } = await withCboxKey();
   const vault = fakeVault(true);
   vault.run = async () => ({ ok: true, zone: ZONE, key: { id: "k1", expires_on: "x", ip: CBOX, value: SECRET } }) as any;
-  const { id } = (await (await askKey(store, vault, { zone: ZONE, minutes: "5" }, { ip: CBOX, pem: cbox.pem })).json()) as { id: string };
+  const { id } = (await (await askKey(store, vault, { zone: ZONE }, { ip: CBOX, pem: cbox.pem })).json()) as { id: string };
   await approveAs(store, vault, key, id, prfOut(5));
   assert.ok(JSON.stringify(await desk(store).grant(id)).includes(SECRET), "held for the agent meanwhile");
   assert.ok((await store.list({ prefix: "sig:" })).size > 0);
   const later = Date.now() + 6 * 60_000;
-  await askKey(store, vault, { zone: ZONE, minutes: "5" }, { ip: CBOX, pem: cbox.pem, now: later, time: later });
+  await askKey(store, vault, { zone: ZONE }, { ip: CBOX, pem: cbox.pem, now: later, time: later });
   assert.ok(!JSON.stringify(await desk(store).grant(id)).includes(SECRET), "erased at the next request after the window");
   assert.equal((await store.list({ prefix: "sig:" })).size, 1, "old signed messages dropped; only the newest is kept");
 });
@@ -559,7 +573,7 @@ test("c-box key: Ben removes it from his phone (lost or stolen box); then every 
   const gone = await callV(store, v, "/cbox-key", { method: "POST", headers: { origin: base } });
   assert.equal(gone.status, 200);
   assert.match(await (await callV(store, v, "/cbox-key")).text(), /No c-box key is enrolled/);
-  assert.deepEqual(await (await askKey(store, v, { zone: ZONE, minutes: "5" }, { ip: CBOX, pem: cbox.pem })).json(), { error: "no_cbox_key" });
+  assert.deepEqual(await (await askKey(store, v, { zone: ZONE }, { ip: CBOX, pem: cbox.pem })).json(), { error: "no_cbox_key" });
   assert.ok((await desk(store).readLog()).some((l) => l.event === "cbox_key_removed"));
 });
 
@@ -568,7 +582,7 @@ test("c-box key: removed while a signature is being checked -- the request is st
   let reads = 0;
   const racing = Object.create(store) as MemoryStore;
   racing.get = async <T,>(k: string) => (k === "cbox:key" && ++reads > 1 ? (null as T) : store.get<T>(k));
-  const res = await askKey(racing, fakeVault(true), { zone: ZONE, minutes: "5" }, { ip: CBOX, pem: cbox.pem });
+  const res = await askKey(racing, fakeVault(true), { zone: ZONE }, { ip: CBOX, pem: cbox.pem });
   assert.deepEqual(await res.json(), { error: "no_cbox_key" });
 });
 

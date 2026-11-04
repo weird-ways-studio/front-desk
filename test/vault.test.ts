@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { MemoryStore } from "../src/desk.ts";
 import { MASTER_LABEL, RECOVERY_LABEL, open, seal, b64url, fromB64url } from "../vault/src/seal.ts";
-import { PENDING_MS, PROBE_TOKEN_MS, VaultLogic, type CfAcceptResult, type Headcount, type HeadcountSetupResult, type MintResult, type ProbeResult } from "../vault/src/vault.ts";
+import { PENDING_MS, PROBE_TOKEN_MS, VaultLogic, type CfAcceptResult, type Headcount, type HeadcountSetupResult, type ProbeResult, type ReadResult, HELPER_PREFIX } from "../vault/src/vault.ts";
 import { handleSetup } from "../vault/src/setup.ts";
 
 const ACCOUNT = "a".repeat(32);
@@ -12,7 +12,7 @@ const ZONE = "benculbert.com";
 const PARENT = "P".repeat(40);
 const NOW = Date.UTC(2026, 9, 26, 23, 0, 0);
 const prf = (fill: number) => b64url(new Uint8Array(32).fill(fill));
-type Fail = "accounts2" | "accounts0" | "inactive" | "existing" | "add" | "verifyRead" | "recordDelete" | "tokenDelete" | "list" | "newToken" | "staysListed" | "offboxAllowed" | "offboxBroken" | "offboxOther403" | "hcCanMint" | "hcMint500" | "hcNoGroup" | "hcOldStays";
+type Fail = "accounts2" | "accounts0" | "inactive" | "existing" | "add" | "verifyRead" | "recordDelete" | "tokenDelete" | "list" | "newToken" | "staysListed" | "offboxAllowed" | "offboxBroken" | "offboxOther403" | "hcCanMint" | "hcMint500" | "hcNoGroup" | "hcOldStays" | "lostMint";
 
 // A fake Cloudflare API: answers the calls the vault makes and records each with the token used.
 // `fail` makes one step go wrong, to show what the vault does then.
@@ -41,6 +41,8 @@ function fakeCloudflare(fail?: Fail, baseline = 3) {
       return ok([
         { id: "dns-w", name: "DNS Write", scopes: ["com.cloudflare.api.account.zone"] },
         { id: "zone-r", name: "Zone Read", scopes: ["com.cloudflare.api.account.zone"] },
+        { id: "dns-r", name: "DNS Read", scopes: ["com.cloudflare.api.account.zone"] },
+        { id: "acct-set-r", name: "Account Settings Read", scopes: ["com.cloudflare.api.account"] },
         { id: "acct-dns", name: "DNS Write", scopes: ["com.cloudflare.api.account"] },
         ...(fail === "hcNoGroup" ? [] : [{ id: "tok-r", name: "Account API Tokens Read", scopes: ["com.cloudflare.api.account"] }]),
         { id: "tok-r-zone", name: "API Tokens Read", scopes: ["com.cloudflare.api.account.zone"] },
@@ -51,6 +53,8 @@ function fakeCloudflare(fail?: Fail, baseline = 3) {
       if (listOnly.has(token) && fail !== "hcCanMint") return bad(403, "Unauthorized to access requested resource");
       const id = `minted${++n}`;
       tokens.push({ id, name: body?.name, expires_on: body?.expires_on });
+      // The token exists, but the answer never reaches the vault (lost on the way back).
+      if (fail === "lostMint" && n === 1) return bad(502, "bad gateway");
       if (body?.policies?.[0]?.permission_groups?.every((g: { id: string }) => g.id === "tok-r")) listOnly.add(`V${n}`.padEnd(40, "v"));
       live.set(`V${n}`.padEnd(40, "v"), id);
       const cidr = body?.condition?.request_ip?.in?.[0];
@@ -77,7 +81,10 @@ function fakeCloudflare(fail?: Fail, baseline = 3) {
       if (pinned.has(token) && fail === "offboxBroken") return bad(500, "internal error");
       if (pinned.has(token) && fail === "offboxOther403") return bad(403, "Authentication error");
       if (pinned.has(token) && fail !== "offboxAllowed") return bad(403, "Cannot use the access token from location: 104.28.0.1");
-      return ok({ id: ZONE_ID, name: ZONE });
+      return ok({ id: ZONE_ID, name: ZONE, status: "active", paused: false, type: "full", plan: { name: "Free Website" }, name_servers: ["a.ns", "b.ns"], owner: { email: "x" } });
+    }
+    if (method === "GET" && path.startsWith(`/accounts/${ACCOUNT}/audit_logs?`)) {
+      return ok([{ when: "2026-11-02T10:00:00Z", action: { type: "update", result: true }, actor: { email: "ben@example.com", ip: "198.51.100.1" }, resource: { type: "zone", id: ZONE_ID }, metadata: { big: "x" } }]);
     }
     if (method === "GET" && path.startsWith(`/zones/${ZONE_ID}/dns_records?`)) {
       finds++;
@@ -234,83 +241,160 @@ const VAULT = "https://vault.example";
 const form = (token: string, origin = VAULT) =>
   new Request(`${VAULT}/setup`, { method: "POST", headers: { origin, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token }) });
 
-const CBOX = "203.0.113.7";
-const mint = (vault: VaultLogic, params: Record<string, string> = { zone: ZONE, minutes: "15", ip: CBOX }) =>
-  vault.run("cf.token.zone.read", params, prf(7)) as Promise<MintResult>;
+const readJob = (vault: VaultLogic, job: string, params: Record<string, string>) => vault.run(job, params, prf(7)) as Promise<ReadResult>;
+const WINDOW = { since: "2026-10-24T00:00:00Z", until: "2026-10-26T00:00:00Z" };
+const minted = (cf: ReturnType<typeof fakeCloudflare>) => cf.calls.filter((c) => c.method === "POST" && c.path.endsWith("/tokens"));
 
-test("minted key: read-only on one zone, expires in <=15 minutes, pinned to the asking address, refused off it", async () => {
-  const { vault, cf } = await stored();
-  const r = await mint(vault);
-  assert.equal(r.ok, true, JSON.stringify(r));
-  const made = cf.calls.find((c) => c.method === "POST" && c.path.endsWith("/tokens") && c.body.condition)!;
-  assert.deepEqual(made.body.condition, { request_ip: { in: [`${CBOX}/32`] } });
-  assert.deepEqual(made.body.policies, [{ effect: "allow", resources: { [`com.cloudflare.api.account.zone.${ZONE_ID}`]: "*" }, permission_groups: [{ id: "zone-r" }] }]);
-  assert.equal(made.body.expires_on, new Date(NOW + 15 * 60_000).toISOString().replace(/\.\d{3}Z$/, "Z"));
-  assert.equal(r.key!.ip, CBOX);
-  assert.equal(cf.live.get(r.key!.value!), r.key!.id, "the value handed over is the minted key");
-  assert.equal(r.offbox_refused, true);
-  assert.match(r.offbox_error!, /location/);
-  assert.equal(r.minted.length, 1, "one helper key to find the zone");
-  assert.ok(r.minted[0].deleted);
-  assert.deepEqual(r.audit.new_since_setup, [], "the handed-over key is the only new token");
-  assert.ok(cf.tokens.some((t) => t.id === r.key!.id), "the key stays until it expires");
-});
-
-test("handed-out keys: a second mint is fine while the first is live; once expired, the next job deletes it", async () => {
-  const { vault, cf, clock } = await stored();
-  const first = await mint(vault, { zone: ZONE, minutes: "2", ip: CBOX });
-  const second = await mint(vault, { zone: ZONE, minutes: "2", ip: CBOX });
-  assert.equal(second.ok, true, JSON.stringify(second.audit));
-  assert.ok(cf.tokens.some((t) => t.id === first.key!.id), "not deleted while live");
-  clock.now += 3 * 60_000;
-  const p = await probe(vault);
-  assert.equal(p.ok, true, JSON.stringify(p));
-  assert.ok(!cf.tokens.some((t) => t.id === first.key!.id || t.id === second.key!.id), "both expired keys deleted");
-});
-
-test("handed-out keys: a sweep that overlaps another job's mint does not lose the new key (Codex minted r2)", async () => {
-  const { store, vault, cf, clock } = await stored();
-  const first = await mint(vault, { zone: ZONE, minutes: "2", ip: CBOX });
-  clock.now += 3 * 60_000;
-  // Hold the first delete of the expired key until the second job has finished.
-  let release!: () => void;
-  const held = new Promise<void>((r) => (release = r));
-  let holds = 0;
-  const slow = new VaultLogic(store, async (input, init) => {
-    if (init?.method === "DELETE" && String(input).endsWith(`/tokens/${first.key!.id}`) && holds++ === 0) await held;
-    return cf.fetchFn(input as string, init);
-  }, () => clock.now);
-  const sweeping = slow.run("cf.dns.txt.probe", { zone: ZONE }, prf(7));
-  await new Promise((r) => setTimeout(r, 10));
-  const second = await mint(vault, { zone: ZONE, minutes: "5", ip: CBOX });
-  assert.equal(second.ok, true);
-  release();
-  await sweeping;
-  const issued = ((await store.get<any>("master")).issued ?? []).map((k: { id: string }) => k.id);
-  assert.deepEqual(issued, [second.key!.id]);
-});
-
-test("minted key fails closed: if it worked off the pinned address, or anything else is off, it is deleted and not handed over", async () => {
-  // offboxBroken: the off-box try failed for another reason, which proves nothing about the pin.
-  for (const fail of ["offboxAllowed", "offboxBroken", "offboxOther403", "newToken"] as const) {
-    const { vault, cf } = await stored(fail);
-    const r = await mint(vault);
-    assert.equal(r.ok, false, fail);
-    assert.equal(r.key?.value, undefined, `${fail}: no secret handed over`);
-    assert.ok(!cf.tokens.some((t) => t.id === r.key!.id), `${fail}: the key was deleted`);
+test("read jobs: each reads with short keys of a fixed policy, deletes them, and returns only the answer (no key)", async () => {
+  const cases = [
+    ["cf.zone.read", { zone: ZONE }, { [`com.cloudflare.api.account.zone.${ZONE_ID}`]: "*" }, "zone-r"],
+    ["cf.dns.list", { zone: ZONE }, { [`com.cloudflare.api.account.zone.${ZONE_ID}`]: "*" }, "dns-r"],
+    ["cf.audit.read", WINDOW, { [`com.cloudflare.api.account.${ACCOUNT}`]: "*" }, "acct-set-r"],
+  ] as const;
+  for (const [job, params, resources, group] of cases) {
+    const { store, vault, cf } = await stored();
+    const r = await readJob(vault, job, params);
+    assert.equal(r.ok, true, `${job}: ${JSON.stringify(r)}`);
+    assert.ok(r.data !== undefined, job);
+    const reader = minted(cf).at(-1)!;
+    assert.deepEqual(reader.body.policies, [{ effect: "allow", resources, permission_groups: [{ id: group }] }], job);
+    assert.equal(reader.body.expires_on, new Date(NOW + PROBE_TOKEN_MS).toISOString().replace(/\.\d{3}Z$/, "Z"), job);
+    assert.ok(reader.body.name.startsWith(HELPER_PREFIX), job);
+    assert.ok(r.minted.length >= 1 && r.minted.every((t) => t.deleted), `${job}: every short key deleted`);
+    assert.ok(minted(cf).every((c) => !cf.tokens.some((t) => t.name === c.body.name)), `${job}: none left at Cloudflare`);
+    assert.ok(![...cf.live.keys()].some((v) => JSON.stringify(r).includes(v)), `${job}: no key value in the result`);
+    assert.deepEqual(await store.get("helpers"), [], `${job}: nothing left to clean up`);
   }
+  const { vault } = await stored();
+  assert.deepEqual((await readJob(vault, "cf.zone.read", { zone: ZONE })).data, { id: ZONE_ID, name: ZONE, status: "active", paused: false, type: "full", plan: "Free Website", name_servers: ["a.ns", "b.ns"] });
+  assert.deepEqual((await readJob(vault, "cf.audit.read", WINDOW)).data, [{ when: "2026-11-02T10:00:00Z", action: "update", result: true, actor: "ben@example.com", ip: "198.51.100.1", resource: `zone ${ZONE_ID}` }]);
 });
 
-test("minted key: the vault itself refuses over 15 minutes, a bad address, or another zone", async () => {
+test("read jobs: the vault itself refuses another zone, a bad window, extra power, and the retired key job -- before any Cloudflare call", async () => {
   const { vault, cf } = await stored();
-  for (const params of [
-    { zone: ZONE, minutes: "16", ip: CBOX }, { zone: ZONE, minutes: "0", ip: CBOX }, { zone: ZONE, minutes: "60", ip: CBOX },
-    { zone: ZONE, minutes: "15", ip: "203.0.113.0/24" }, { zone: ZONE, minutes: "15", ip: "2001:db8::1" }, { zone: ZONE, minutes: "15" },
+  await assert.rejects(readJob(vault, "cf.dns.list", { zone: "example.com" }), /zone_not_offered/);
+  await assert.rejects(readJob(vault, "cf.zone.read", {}), /zone_not_offered/);
+  for (const w of [
+    { since: "2026-11-01T00:00:00Z", until: "2026-11-08T00:00:01Z" }, // over 7 days
+    { since: "2026-11-03T00:00:00Z", until: "2026-11-01T00:00:00Z" }, // backwards
+    { since: "2026-10-26T00:00:00Z", until: "2026-10-28T00:00:00Z" }, // ends in the future (NOW is 2026-10-26 23:00)
+    { since: "2026-11-01", until: "2026-11-02" },
+    { since: "2026-11-01T00:00:00.000Z", until: "2026-11-02T00:00:00Z" },
+    {},
   ]) {
-    await assert.rejects(mint(vault, params as Record<string, string>), /bad_params/, JSON.stringify(params));
+    await assert.rejects(readJob(vault, "cf.audit.read", w as Record<string, string>), /bad_params/, JSON.stringify(w));
   }
-  await assert.rejects(mint(vault, { zone: "example.com", minutes: "5", ip: CBOX }), /zone_not_offered/);
-  assert.equal(cf.calls.length, 0, "refused before any call to Cloudflare");
+  await assert.rejects(vault.run("cf.token.zone.read", { zone: ZONE, minutes: "5", ip: "203.0.113.7" }, prf(7)), /job_not_offered/);
+  assert.equal(cf.calls.length, 0);
+});
+
+test("read jobs: a long DNS list is cut at 500 and says so", async () => {
+  const { vault, cf } = await stored();
+  const many = Array.from({ length: 600 }, (_, i) => ({ id: `r${i}`, type: "A", name: `h${i}.${ZONE}`, content: "192.0.2.1" }));
+  const fetchFn = cf.fetchFn;
+  const v = new VaultLogic((vault as any).store, async (input: string, init?: RequestInit) =>
+    String(input).includes("/dns_records?") ? Response.json({ success: true, result: many }) : fetchFn(input, init), () => NOW);
+  const r = await readJob(v, "cf.dns.list", { zone: ZONE });
+  assert.equal(r.ok, true);
+  assert.equal(r.truncated, true);
+  assert.equal((r.data as unknown[]).length, 500);
+});
+
+// Card ae6147e4 R10: the vault's short keys are recorded before they exist and until a delete is confirmed.
+test("short keys: the intent is stored before the mint (name, asked expiry), the id right after", async () => {
+  const { store, vault, cf } = await stored();
+  const seen: unknown[] = [];
+  const v = new VaultLogic(store, async (input: string, init?: RequestInit) => {
+    if (init?.method === "POST" && String(input).endsWith("/tokens")) seen.push({ name: JSON.parse(String(init.body)).name, stored: await store.get("helpers") });
+    return cf.fetchFn(input, init);
+  }, () => NOW);
+  await readJob(v, "cf.zone.read", { zone: ZONE });
+  assert.equal(seen.length, 2);
+  for (const x of seen as { name: string; stored: { name: string; id?: string }[] }[]) {
+    const mine = x.stored.find((h) => h.name === x.name);
+    assert.ok(mine && mine.id === undefined, "recorded, without an id, before Cloudflare is asked");
+  }
+});
+
+test("short keys: a failed delete leaves them recorded; the nightly count lists them as cleanup (not acceptable), the next tap deletes them", async () => {
+  const { store, vault, cf } = await stored();
+  await hcSetup(vault);
+  const broken = new VaultLogic(store, async (input: string, init?: RequestInit) =>
+    init?.method === "DELETE" && String(input).includes("/tokens/minted") ? Response.json({ success: false, errors: [{ message: "delete broke" }] }, { status: 500 }) : cf.fetchFn(input, init), () => NOW);
+  const r = await readJob(broken, "cf.dns.list", { zone: ZONE });
+  assert.equal(r.ok, false);
+  assert.equal(r.data, undefined, "no answer handed on when a key was left behind");
+  const left = (await store.get<{ id?: string }[]>("helpers"))!;
+  assert.equal(left.length, 2);
+  const night = await vault.headcount();
+  assert.equal(night.ok, false);
+  assert.deepEqual(night.unexpected, [], "not 'unexpected', so cf.token.accept never offers them");
+  assert.deepEqual(night.cleanup.map((k) => k.id).sort(), left.map((h) => h.id).sort());
+  assert.ok(night.cleanup.every((k) => !k.expired && k.expires_on !== "never"), "expiry is Cloudflare's own");
+  assert.deepEqual(await vault.cfPreview(), []);
+  // The next approved Cloudflare tap sweeps them first.
+  const next = await readJob(vault, "cf.zone.read", { zone: ZONE });
+  assert.equal(next.ok, true, JSON.stringify(next));
+  assert.deepEqual(await store.get("helpers"), []);
+  const after = await vault.headcount();
+  assert.ok(cfClean(after) && after.cleanup.length === 0, JSON.stringify(after));
+});
+
+test("short keys: a lost mint answer leaves a named intent; the next tap finds the key by its name and deletes it", async () => {
+  const { store, vault, cf, clock } = await stored("lostMint");
+  const r = await readJob(vault, "cf.zone.read", { zone: ZONE });
+  assert.equal(r.ok, false);
+  const [intent] = (await store.get<{ name: string; id?: string }[]>("helpers"))!;
+  assert.equal(intent.id, undefined);
+  assert.ok(cf.tokens.some((t) => t.name === intent.name), "Cloudflare made it anyway");
+  clock.now += 60_000;
+  assert.equal((await readJob(vault, "cf.zone.read", { zone: ZONE })).ok, true);
+  assert.ok(!cf.tokens.some((t) => t.name === intent.name), "found by name and deleted");
+  assert.deepEqual(await store.get("helpers"), []);
+});
+
+test("short keys: an intent never made is dropped only after its asked expiry; an outside key borrowing the name is never deleted, keeps alarming, is never accepted", async () => {
+  const { store, vault, cf, clock } = await stored();
+  await hcSetup(vault);
+  await store.put("helpers", [{ name: `${HELPER_PREFIX}ghost`, until: new Date(NOW + 60_000).toISOString() }]);
+  await readJob(vault, "cf.zone.read", { zone: ZONE });
+  assert.equal((await store.get<unknown[]>("helpers"))!.length, 1, "kept: its mint could still be in flight");
+  clock.now += 2 * 60_000;
+  await readJob(vault, "cf.zone.read", { zone: ZONE });
+  assert.deepEqual(await store.get("helpers"), []);
+  cf.tokens.push({ id: "f".repeat(32), name: `${HELPER_PREFIX}not ours` });
+  await readJob(vault, "cf.zone.read", { zone: ZONE });
+  assert.ok(cf.tokens.some((t) => t.id === "f".repeat(32)), "a name the vault did not record is never deleted");
+  const night = await vault.headcount();
+  assert.equal(night.ok, false);
+  assert.deepEqual(night.cleanup.map((k) => k.id), ["f".repeat(32)]);
+  assert.match((await accept(vault, "f".repeat(32))).error ?? "", /helper_key_not_acceptable/);
+});
+
+test("short keys: cf.token.accept refuses a recorded short key by its id, even under another name", async () => {
+  const { store, vault, cf } = await stored();
+  await hcSetup(vault);
+  const id = "e".repeat(32);
+  cf.tokens.push({ id, name: "renamed" });
+  await store.put("helpers", [{ name: `${HELPER_PREFIX}x`, until: new Date(NOW + 60_000).toISOString(), id }]);
+  const stuck = new VaultLogic(store, async (input: string, init?: RequestInit) =>
+    init?.method === "DELETE" ? Response.json({ success: false, errors: [{ message: "delete broke" }] }, { status: 500 }) : cf.fetchFn(input, init), () => NOW);
+  const r = (await stuck.run("cf.token.accept", { ids: id }, prf(7))) as CfAcceptResult;
+  assert.equal(r.ok, false);
+  assert.match(r.error ?? "", /helper_key_not_acceptable/);
+  assert.ok(!(await store.get<any>("master")).baseline.includes(id));
+});
+
+test("handed-out keys from before 4a-1: once expired, the next job deletes them", async () => {
+  const { store, vault, cf, clock } = await stored();
+  await probe(vault);
+  cf.tokens.push({ id: "old1", expires_on: new Date(NOW + 60_000).toISOString() });
+  const m = await store.get<any>("master");
+  await store.put("master", { ...m, issued: [{ id: "old1", expires_on: new Date(NOW + 60_000).toISOString() }] });
+  clock.now += 2 * 60_000;
+  assert.equal((await readJob(vault, "cf.zone.read", { zone: ZONE })).ok, true);
+  assert.ok(!cf.tokens.some((t) => t.id === "old1"));
+  assert.deepEqual((await store.get<any>("master")).issued, []);
 });
 
 test("setup page: Ben gets the form, saves the token, sees the paper key once; then every address is 404", async () => {
@@ -427,7 +511,7 @@ test("headcount: a clean account counts ok, using only the list-only key", async
   cf.calls.length = 0;
   const r = await vault.headcount();
   // Cloudflare is clean; GitHub is not set up in these tests, so the night as a whole fails closed.
-  assert.deepEqual(r, { ok: false, tokens: 4, unexpected: [], stretched: [], missing: [], github: { ok: false, changes: [], error: "github_not_set_up" } });
+  assert.deepEqual(r, { ok: false, tokens: 4, unexpected: [], stretched: [], missing: [], cleanup: [], github: { ok: false, changes: [], error: "github_not_set_up" } });
   assert.ok(cf.calls.every((c) => cf.listOnly.has(c.token) && c.method === "GET"), "reads only, never with the master");
 });
 
@@ -441,16 +525,17 @@ test("headcount: a planted extra key is named", async () => {
 });
 
 test("headcount: a handed-out key is expected even after expiry, until its expiry is stretched", async () => {
-  const { vault, cf, clock } = await stored();
+  const { store, vault, cf, clock } = await stored();
   await hcSetup(vault);
-  const minted = (await vault.run("cf.token.zone.read", { zone: ZONE, minutes: "5", ip: "198.51.100.7" }, prf(7))) as MintResult;
-  assert.equal(minted.ok, true, JSON.stringify(minted).slice(0, 400));
+  const exp = new Date(NOW + 5 * 60_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  cf.tokens.push({ id: "k-old", expires_on: exp });
+  await store.put("master", { ...(await store.get<any>("master")), issued: [{ id: "k-old", expires_on: exp }] });
   clock.now += 60 * 60_000; // expired, still listed: Cloudflare keeps it until the next job sweeps it
   assert.ok(cfClean(await vault.headcount()));
-  cf.tokens.find((t) => t.id === minted.key!.id)!.expires_on = "2027-01-01T00:00:00Z";
+  cf.tokens.find((t) => t.id === "k-old")!.expires_on = "2027-01-01T00:00:00Z";
   const r = await vault.headcount();
   assert.equal(r.ok, false);
-  assert.deepEqual(r.stretched, [{ id: minted.key!.id, expires_on: "2027-01-01T00:00:00Z" }]);
+  assert.deepEqual(r.stretched, [{ id: "k-old", expires_on: "2027-01-01T00:00:00Z" }]);
 });
 
 test("headcount: refuses to report ok without a headcount key or a locked master", async () => {
@@ -471,12 +556,12 @@ test("headcount: a list failure is not ok", async () => {
   assert.equal(r.missing.length, 2);
 });
 
-test("after headcount setup, the jobs' own audit expects the headcount key (probe and mint still pass)", async () => {
+test("after headcount setup, the jobs' own audit expects the headcount key (probe and reads still pass)", async () => {
   const { vault } = await stored();
   await hcSetup(vault);
   const p = await probe(vault);
   assert.equal(p.ok, true, JSON.stringify(p.audit));
-  const k = (await vault.run("cf.token.zone.read", { zone: ZONE, minutes: "5", ip: "198.51.100.7" }, prf(7))) as MintResult;
+  const k = await readJob(vault, "cf.dns.list", { zone: ZONE });
   assert.equal(k.ok, true, JSON.stringify(k.audit));
 });
 

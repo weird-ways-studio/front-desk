@@ -2,7 +2,7 @@
 // so tests can drive them with an in-memory store.
 
 import { Desk, DeskError, withoutSecret, type Alert, type Push, type Source, type Store } from "./desk.ts";
-import { JOBS } from "./jobs.ts";
+import { JOBS, menu } from "./jobs.ts";
 import { checkSignature } from "./cboxkey.ts";
 import type { VaultApi } from "../vault/src/api.ts";
 import { approvePage, cboxKeyPage, enrollPage, logPage, passkeysPage, prfCheckPage } from "./page.ts";
@@ -34,7 +34,7 @@ export async function callerOf(access: ExecutionContext["access"], ownerEmail: s
 // Which caller each route needs. Ben enrolls, approves and reads the log; the agent asks and collects.
 function needs(m: string, parts: string[]): Caller | null {
   if (parts[0] === "enroll" || parts[0] === "approve" || parts[0] === "log" || parts[0] === "passkeys" || parts[0] === "prf-check" || parts[0] === "cbox-key") return "owner";
-  if ((m === "POST" && parts[0] === "request") || parts[0] === "collect") return "agent";
+  if ((m === "POST" && parts[0] === "request") || parts[0] === "collect" || (m === "GET" && parts[0] === "menu")) return "agent";
   return null;
 }
 
@@ -89,12 +89,10 @@ export async function route(request: Request, store: Store, who: Who, now = Date
       return json({ error: needed === "owner" ? "not_owner" : "not_agent" }, 403);
     }
     if (m === "GET" && url.pathname === "/health") return json({ ok: true, version: VERSION });
-    // Agent calls: the raw body is kept so the c-box signature can be checked over it. CF-Connecting-IP:
-    // for a direct request (not a Worker subrequest) Cloudflare's edge sets it to the caller's
-    // address; checked live by sending a forged value.
+    if (m === "GET" && url.pathname === "/menu") return json(menu());
+    // Agent calls: the raw body is kept so the c-box signature can be checked over it.
     const text = m === "POST" && (parts[0] === "request" || parts[0] === "collect") ? await request.text() : "";
     const source: Source = {
-      ip: request.headers.get("cf-connecting-ip") ?? undefined,
       checkSignature: () => checkSignature(store, m, url.pathname, request.headers, text, now),
     };
     if (m === "POST" && url.pathname === "/request") {
