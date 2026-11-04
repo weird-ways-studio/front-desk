@@ -756,29 +756,13 @@ export class VaultLogic {
       if (job === "cf.audit.read") {
         const group = await accountGroup(master, account, ACCOUNT_SETTINGS_READ, "Account Settings Read");
         const policy = { effect: "allow", resources: { [`com.cloudflare.api.account.${account}`]: "*" }, permission_groups: [group] };
-        const q = `since=${encodeURIComponent(params.since)}&before=${encodeURIComponent(params.until)}`;
-        const rows = await this.withKey(master, account, r, "cf.audit.read: read change log", policy, (cf) => pages<AuditRow>(cf, `/accounts/${account}/audit_logs?${q}`, AUDIT_MAX));
-        r.truncated = rows.length > AUDIT_MAX;
-        r.data = fit(r, rows.slice(0, AUDIT_MAX).map((x) => ({
-          when: x.when, action: x.action?.type, result: x.action?.result, actor: x.actor?.email ?? x.actor?.type, ip: x.actor?.ip,
-          resource: [x.resource?.type, x.resource?.id].filter(Boolean).join(" "),
-        })));
+        Object.assign(r, await this.withKey(master, account, r, "cf.audit.read: read change log", policy, readWith(job, account, "", params)));
       } else {
         const group = await zoneGroups(master, account);
         const zoneId = await this.findZone(master, account, r, group, params.zone);
         const oneZone = { [`com.cloudflare.api.account.zone.${zoneId}`]: "*" };
-        if (job === "cf.zone.read") {
-          const z = await this.withKey(master, account, r, "cf.zone.read: read zone", { effect: "allow", resources: oneZone, permission_groups: [group("Zone Read")] }, (cf) =>
-            cf.call<ZoneRow>("GET", `/zones/${zoneId}`),
-          );
-          r.data = { id: z.id, name: z.name, status: z.status, paused: z.paused, type: z.type, plan: z.plan?.name, name_servers: z.name_servers };
-        } else {
-          const rows = await this.withKey(master, account, r, "cf.dns.list: read DNS", { effect: "allow", resources: oneZone, permission_groups: [group("DNS Read")] }, (cf) =>
-            pages<DnsRow>(cf, `/zones/${zoneId}/dns_records?`, DNS_MAX),
-          );
-          r.truncated = rows.length > DNS_MAX;
-          r.data = fit(r, rows.slice(0, DNS_MAX).map((x) => ({ id: x.id, type: x.type, name: x.name, content: x.content, proxied: x.proxied, ttl: x.ttl })));
-        }
+        const [purpose, perm] = job === "cf.zone.read" ? ["cf.zone.read: read zone", "Zone Read"] : ["cf.dns.list: read DNS", "DNS Read"];
+        Object.assign(r, await this.withKey(master, account, r, purpose, { effect: "allow", resources: oneZone, permission_groups: [group(perm)] }, readWith(job, account, zoneId, params)));
       }
     } catch (e) {
       note(r, (e as Error).message);
@@ -788,6 +772,31 @@ export class VaultLogic {
     if (!r.ok) delete r.data; // an answer is handed on only when the whole job checked out
     return r;
   }
+}
+
+/** One read job's call and shaping, given a key that may read it: used by Ben's tap jobs (a short helper key)
+ * and by runs (the run's key, on the run's frozen account and zone -- runs.ts). Returns only the answer. */
+export function readWith(job: string, account: string, zoneId: string, params: Record<string, string>): (cf: Cloudflare) => Promise<{ data: unknown; truncated?: boolean }> {
+  return async (cf) => {
+    const r: { data?: unknown; truncated?: boolean } = {};
+    if (job === "cf.audit.read") {
+      const q = `since=${encodeURIComponent(params.since)}&before=${encodeURIComponent(params.until)}`;
+      const rows = await pages<AuditRow>(cf, `/accounts/${account}/audit_logs?${q}`, AUDIT_MAX);
+      r.truncated = rows.length > AUDIT_MAX;
+      r.data = fit(r, rows.slice(0, AUDIT_MAX).map((x) => ({
+        when: x.when, action: x.action?.type, result: x.action?.result, actor: x.actor?.email ?? x.actor?.type, ip: x.actor?.ip,
+        resource: [x.resource?.type, x.resource?.id].filter(Boolean).join(" "),
+      })));
+    } else if (job === "cf.zone.read") {
+      const z = await cf.call<ZoneRow>("GET", `/zones/${zoneId}`);
+      r.data = { id: z.id, name: z.name, status: z.status, paused: z.paused, type: z.type, plan: z.plan?.name, name_servers: z.name_servers };
+    } else if (job === "cf.dns.list") {
+      const rows = await pages<DnsRow>(cf, `/zones/${zoneId}/dns_records?`, DNS_MAX);
+      r.truncated = rows.length > DNS_MAX;
+      r.data = fit(r, rows.slice(0, DNS_MAX).map((x) => ({ id: x.id, type: x.type, name: x.name, content: x.content, proxied: x.proxied, ttl: x.ttl })));
+    } else throw new VaultError("job_not_offered");
+    return r as { data: unknown; truncated?: boolean };
+  };
 }
 
 // Drops whole rows from the end until the JSON fits RESULT_MAX_BYTES; says so with `truncated`.
