@@ -168,7 +168,11 @@ export function headcountWords(r: Headcount, max = LOG_DETAIL_MAX): string {
     ...r.unexpected.map((k) => `Cloudflare: a key nobody asked you for, named ${name(k.name)} [${name(k.id)}]`),
     ...r.stretched.map((k) => `Cloudflare: a key whose expiry was pushed later, now ${name(k.expires_on)} [${name(k.id)}]`),
     ...r.missing.map((k) => `Cloudflare: one of the front desk's own keys is missing [${name(k)}]`),
-    ...r.cleanup.map((k) => `Cloudflare: a short vault key not yet deleted, ${k.expired ? "already expired" : `usable until ${name(k.expires_on)}`}; the vault deletes it at your next Cloudflare tap [${name(k.id)}]`),
+    ...r.cleanup.map((k) =>
+      k.recorded
+        ? `Cloudflare: a short vault key not yet deleted, ${k.expired ? "already expired" : `usable until ${name(k.expires_on)}`}; the vault deletes it at your next Cloudflare tap [${name(k.id)}]`
+        : `Cloudflare: a key named like the vault's own short keys that the vault did not make, ${k.expired ? "already expired" : `usable until ${name(k.expires_on)}`}. The vault will not delete it. If you did not make it, tell the agent now; delete it in the Cloudflare dashboard [${name(k.id)}]`,
+    ),
   ];
   const gh = plainChanges(r.github.changes).flatMap((g) => g.items.map((i) => `GitHub, ${g.heading.split(":")[0]}: ${i}`));
   const todo = ["Front desk nightly check: needs you."];

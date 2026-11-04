@@ -45,6 +45,16 @@ export interface Job {
 // A failed vault job in words: what is known to be left behind, then the vault's own reason in
 // brackets for the agent. Each job says what its failure leaves (Codex readable r1 #9).
 type Failed = { ok?: unknown; error?: unknown } & Record<string, unknown>;
+// Earlier short vault keys this tap's sweep could not confirm deleted, in words (Codex 4a-1 r1 #2).
+function leftoverNote(result: unknown): string {
+  const n = ((result as { leftover?: unknown[] } | null | undefined)?.leftover ?? []).length;
+  return n ? ` Also: ${n} short vault key${n === 1 ? "" : "s"} from an earlier tap could not be confirmed deleted; the vault tries again at your next Cloudflare tap and the nightly check lists ${n === 1 ? "it" : "them"} until then.` : "";
+}
+
+function withLeftover(result: unknown, done: (r: unknown) => string): string {
+  return done(result) + leftoverNote(result);
+}
+
 function notDone(result: unknown, left: (r: Failed) => string): string | null {
   const r = result as Failed | null | undefined;
   if (r === undefined || r === null) return "Not done: no answer came back from the vault, so it is unknown what ran. Do not tap again; tell the agent: [no result]";
@@ -59,9 +69,9 @@ const READ_EXPECT =
 
 /** The sentence Ben reads after a read job's tap. */
 function readDone(result: unknown): string {
-  return (
+  return withLeftover(result, (result) =>
     notDone(result, () => "No answer went to the agent, and no key either.") ??
-    `Done. The agent gets the answer now${(result as Partial<ReadResult>).truncated ? " (the list was long, so it was cut)" : ""}; the internal keys were deleted. Nothing else to do.`
+    `Done. The agent gets the answer now${(result as Partial<ReadResult>).truncated ? " (the list was long, so it was cut)" : ""}; the internal keys were deleted. Nothing else to do.`,
   );
 }
 
@@ -96,12 +106,12 @@ export const JOBS = {
       expect: "Face ID unlocks the vault for a moment. It makes two keys good for 5 minutes (one to find the zone, one to edit its DNS), runs the test, and deletes both keys.",
       exact: `Record: _front-desk-probe.${p.zone} (TXT)`,
     }),
-    done: (r) =>
+    done: (r) => withLeftover(r, (r) =>
       notDone(r, (x) => {
         const p = x as unknown as Partial<ProbeResult>;
         const stuck = [p.added && !p.removed ? "the test record may still be in DNS" : "", (p.minted ?? []).some((t) => !t.deleted) ? "a 5-minute key was not deleted (it expires on its own)" : ""].filter(Boolean);
         return stuck.length ? `Left behind: ${stuck.join("; ")}.` : "Nothing was left behind.";
-      }) ?? "Done. The test record was added, seen and removed, and both short keys were deleted. Nothing else to do.",
+      }) ?? "Done. The test record was added, seen and removed, and both short keys were deleted. Nothing else to do."),
     validate: (params) => {
       const zone = (params as { zone?: unknown } | null)?.zone;
       return typeof zone === "string" && STUDIO_ZONES.includes(zone) ? { zone } : null;
@@ -178,7 +188,7 @@ export const JOBS = {
       does: `Make the nightly headcount key: it can LIST the names of every Cloudflare key in the studio account, and nothing else. It cannot make, change or delete keys, and cannot read their secrets. ${ONE_STANDING_KEY}`,
       expect: "Face ID unlocks the vault for a moment. It makes the key, checks it is refused when it tries to make a key, and keeps it inside the vault for the nightly count. Running this again replaces it.",
     }),
-    done: (r) => notDone(r, (x) => ((x as unknown as Partial<HeadcountSetupResult>).key_id ? "The nightly count keeps its previous key; the new one did not pass its checks and is deleted." : "The nightly count keeps its previous key.")) ?? "Done. The nightly count has its list-only key, and it was refused when it tried to make one. Nothing else to do.",
+    done: (r) => withLeftover(r, (r) => notDone(r, (x) => ((x as unknown as Partial<HeadcountSetupResult>).key_id ? "The nightly count keeps its previous key; the new one did not pass its checks and is deleted." : "The nightly count keeps its previous key.")) ?? "Done. The nightly count has its list-only key, and it was refused when it tried to make one. Nothing else to do."),
     validate: (params) => (params && typeof params === "object" && Object.keys(params).length === 0 ? {} : null),
     vault: true,
   },
@@ -219,9 +229,9 @@ export const JOBS = {
         expect: "Face ID unlocks the vault for a moment. It checks each key is still in the account and still unexpected, then adds them to what the nightly check expects. If anything changed since this page was made, nothing is accepted and you will see why.",
       };
     },
-    done: (r) =>
+    done: (r) => withLeftover(r, (r) =>
       notDone(r, () => "Nothing was added, so the nightly check still flags these keys.") ??
-      `Done. The nightly check now expects ${((r as Partial<CfAcceptResult>).accepted?.length ?? 0) === 1 ? "this key" : "these keys"}. Nothing else to do.`,
+      `Done. The nightly check now expects ${((r as Partial<CfAcceptResult>).accepted?.length ?? 0) === 1 ? "this key" : "these keys"}. Nothing else to do.`),
     // The agent sends no params; the front desk adds `ids` and `names` from the vault (desk.ts request).
     validate: (params) => (params && typeof params === "object" && Object.keys(params).length === 0 ? {} : null),
     vault: true,

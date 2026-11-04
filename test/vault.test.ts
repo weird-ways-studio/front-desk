@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { MemoryStore } from "../src/desk.ts";
 import { MASTER_LABEL, RECOVERY_LABEL, open, seal, b64url, fromB64url } from "../vault/src/seal.ts";
-import { PENDING_MS, PROBE_TOKEN_MS, VaultLogic, type CfAcceptResult, type Headcount, type HeadcountSetupResult, type ProbeResult, type ReadResult, HELPER_PREFIX } from "../vault/src/vault.ts";
+import { PENDING_MS, PROBE_TOKEN_MS, VaultLogic, type CfAcceptResult, type Headcount, type HeadcountSetupResult, type ProbeResult, type ReadResult, HELPER_PREFIX, RESULT_MAX_BYTES } from "../vault/src/vault.ts";
 import { handleSetup } from "../vault/src/setup.ts";
 
 const ACCOUNT = "a".repeat(32);
@@ -313,6 +313,7 @@ test("short keys: the intent is stored before the mint (name, asked expiry), the
   for (const x of seen as { name: string; stored: { name: string; id?: string }[] }[]) {
     const mine = x.stored.find((h) => h.name === x.name);
     assert.ok(mine && mine.id === undefined, "recorded, without an id, before Cloudflare is asked");
+    assert.match((mine as { purpose?: string }).purpose ?? "", /^(find zone benculbert\.com|cf\.zone\.read: read zone)$/, "with its purpose");
   }
 });
 
@@ -331,6 +332,7 @@ test("short keys: a failed delete leaves them recorded; the nightly count lists 
   assert.deepEqual(night.unexpected, [], "not 'unexpected', so cf.token.accept never offers them");
   assert.deepEqual(night.cleanup.map((k) => k.id).sort(), left.map((h) => h.id).sort());
   assert.ok(night.cleanup.every((k) => !k.expired && k.expires_on !== "never"), "expiry is Cloudflare's own");
+  assert.ok(night.cleanup.every((k) => k.recorded), "the vault's own: it will delete them");
   assert.deepEqual(await vault.cfPreview(), []);
   // The next approved Cloudflare tap sweeps them first.
   const next = await readJob(vault, "cf.zone.read", { zone: ZONE });
@@ -367,7 +369,7 @@ test("short keys: an intent never made is dropped only after its asked expiry; a
   assert.ok(cf.tokens.some((t) => t.id === "f".repeat(32)), "a name the vault did not record is never deleted");
   const night = await vault.headcount();
   assert.equal(night.ok, false);
-  assert.deepEqual(night.cleanup.map((k) => k.id), ["f".repeat(32)]);
+  assert.deepEqual(night.cleanup.map((k) => [k.id, k.recorded]), [["f".repeat(32), false]], "not recorded: the vault will not delete it");
   assert.match((await accept(vault, "f".repeat(32))).error ?? "", /helper_key_not_acceptable/);
 });
 
@@ -383,6 +385,44 @@ test("short keys: cf.token.accept refuses a recorded short key by its id, even u
   assert.equal(r.ok, false);
   assert.match(r.error ?? "", /helper_key_not_acceptable/);
   assert.ok(!(await store.get<any>("master")).baseline.includes(id));
+});
+
+test("read jobs: a failed final audit is not a success, and no answer is handed on (Codex 4a-1 r1 #1)", async () => {
+  const { vault } = await stored("list");
+  const r = await readJob(vault, "cf.zone.read", { zone: ZONE });
+  assert.equal(r.ok, false);
+  assert.match(r.audit.error ?? "", /list broke/);
+  assert.equal(r.data, undefined);
+});
+
+test("short keys: an earlier key the sweep cannot delete is reported on this tap's result, while the new read succeeds (Codex 4a-1 r1 #2)", async () => {
+  const { store, vault, cf } = await stored();
+  const id = "d".repeat(32);
+  cf.tokens.push({ id, name: `${HELPER_PREFIX}old` });
+  await store.put("helpers", [{ name: `${HELPER_PREFIX}old`, purpose: "cf.zone.read: read zone", until: new Date(NOW + 60_000).toISOString(), id }]);
+  const v = new VaultLogic(store, async (input: string, init?: RequestInit) =>
+    init?.method === "DELETE" && String(input).endsWith(`/tokens/${id}`) ? Response.json({ success: false, errors: [{ message: "delete broke" }] }, { status: 500 }) : cf.fetchFn(input, init), () => NOW);
+  const r = await readJob(v, "cf.zone.read", { zone: ZONE });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(r.leftover, [id]);
+  const { JOBS } = await import("../src/jobs.ts");
+  assert.match(JOBS["cf.zone.read"].done(r), /^Done\.[\s\S]*Also: 1 short vault key from an earlier tap could not be confirmed deleted/);
+  assert.deepEqual((await readJob(vault, "cf.zone.read", { zone: ZONE })).leftover, [], "next tap with working deletes: cleared");
+});
+
+test("read jobs: an answer is cut to the storage bound in bytes, whole rows, and says so (Codex 4a-1 r1 #5)", async () => {
+  const { store, cf } = await stored();
+  const big = Array.from({ length: 500 }, (_, i) => ({ id: `r${i}`, type: "TXT", name: `h${i}.${ZONE}`, content: "x".repeat(2000) }));
+  const fetchFn = cf.fetchFn;
+  const v = new VaultLogic(store, async (input: string, init?: RequestInit) =>
+    String(input).includes("/dns_records?") ? Response.json({ success: true, result: big }) : fetchFn(input, init), () => NOW);
+  const r = await readJob(v, "cf.dns.list", { zone: ZONE });
+  assert.equal(r.ok, true);
+  assert.equal(r.truncated, true);
+  const rows = r.data as { id: string }[];
+  assert.ok(rows.length > 0 && rows.length < 500);
+  assert.ok(new TextEncoder().encode(JSON.stringify(rows)).length <= RESULT_MAX_BYTES);
+  assert.deepEqual(rows.map((x) => x.id), big.slice(0, rows.length).map((x) => x.id), "whole rows from the start");
 });
 
 test("handed-out keys from before 4a-1: once expired, the next job deletes them", async () => {
@@ -596,7 +636,7 @@ test("cf.token.accept: the preview names the flagged key; after Ben's tap the co
   assert.equal((await vault.headcount()).unexpected.length, 1);
   cf.calls.length = 0;
   const r = await accept(vault, OURS);
-  assert.deepEqual(r, { ok: true, accepted: [OURS], master: r.master });
+  assert.deepEqual(r, { ok: true, accepted: [OURS], leftover: [], master: r.master });
   assert.ok(cf.calls.every((c) => c.method === "GET"), "changes nothing in Cloudflare");
   assert.ok(cfClean(await vault.headcount()));
   assert.deepEqual(await vault.cfPreview(), []);

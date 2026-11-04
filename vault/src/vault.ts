@@ -18,6 +18,10 @@ export const READ_JOBS = ["cf.zone.read", "cf.dns.list", "cf.audit.read"] as con
 export const DNS_MAX = 500;
 export const AUDIT_MAX = 300;
 export const AUDIT_MAX_DAYS = 7;
+// A read's answer is stored in the grant until the agent collects it. Durable Object storage holds at most
+// 128 KiB per value (FROM MEMORY; the grant also carries other fields), so the answer is cut to this many
+// bytes of JSON, whole rows at a time, and marked `truncated` (Codex 4a-1 r1 #5).
+export const RESULT_MAX_BYTES = 64_000;
 export const PROBE_RECORD = "_front-desk-probe";
 // Setup waits this long for Ben's first Face ID tap to lock the key to his passkey.
 export const PENDING_MS = 30 * 60_000;
@@ -70,6 +74,7 @@ interface HeadcountKey {
 }
 
 export interface HeadcountSetupResult {
+  leftover?: string[]; // earlier short keys this tap's sweep could not confirm deleted (R10)
   ok: boolean; // true only when the new key could list and was refused a mint
   master: { token_id: string; locked_to_passkey_now: boolean };
   key_id: string | null;
@@ -97,6 +102,7 @@ interface GhMainApp extends GhApp {
 
 // Job cf.token.accept: which unexpected keys Ben's tap added to what the audit expects.
 export interface CfAcceptResult {
+  leftover?: string[]; // earlier short keys this tap's sweep could not confirm deleted (R10)
   ok: boolean;
   accepted: string[];
   master: { token_id: string; locked_to_passkey_now: boolean };
@@ -121,13 +127,16 @@ export interface Headcount {
   // The master and the headcount key must be on the list; a list without them is not the account's.
   missing: string[];
   // The vault's own short keys still listed (a failed or lost delete). Expiry is Cloudflare's, never assumed.
-  cleanup: { id: string; expires_on: string; expired: boolean }[];
+  // `recorded`: the vault made it and deletes it at the next Cloudflare tap. Not recorded: a key from
+  // outside borrowing the helper name, which the vault never deletes (Codex 4a-1 r1 #3).
+  cleanup: { id: string; expires_on: string; expired: boolean; recorded: boolean }[];
   // GitHub against the list Ben accepted with job gh.app.baseline: every addition or removal.
   github: { ok: boolean; changes: string[]; error?: string };
   error?: string;
 }
 
 export interface ProbeResult {
+  leftover?: string[]; // earlier short keys this tap's sweep could not confirm deleted (R10)
   ok: boolean; // true only when every step below checked out
   master: { token_id: string; locked_to_passkey_now: boolean };
   zone: string;
@@ -144,6 +153,7 @@ export interface ProbeResult {
 
 // A read job's answer. Only `data` is the reading; the rest is what the vault did to get it.
 export interface ReadResult {
+  leftover?: string[]; // earlier short keys this tap's sweep could not confirm deleted (R10)
   ok: boolean; // true only when the read came back and every short key was deleted
   master: { token_id: string; locked_to_passkey_now: boolean };
   job: string;
@@ -157,6 +167,7 @@ export interface ReadResult {
 // A short key's intent, stored before it is made and kept until its delete is confirmed (R10).
 interface Helper {
   name: string;
+  purpose: string; // why the vault made it, e.g. "cf.dns.list: read DNS" (R10)
   until: string; // the expiry the vault asked for
   id?: string; // set once Cloudflare answered
 }
@@ -258,9 +269,9 @@ export class VaultLogic {
     const master = new Cloudflare(token, this.fetch);
     const facts = { token_id: m.token_id, locked_to_passkey_now: lockedNow };
     m.issued = await this.sweepIssued(master, m);
-    await this.sweepHelpers(master, m);
-    if (job === "cf.dns.txt.probe") return { ...(await this.probe(master, m, params.zone)), master: facts };
-    return { ...(await this.read(master, m, job, params)), master: facts };
+    const leftover = await this.sweepHelpers(master, m);
+    if (job === "cf.dns.txt.probe") return { ...(await this.probe(master, m, params.zone)), master: facts, leftover };
+    return { ...(await this.read(master, m, job, params)), master: facts, leftover };
   }
 
   // Job cf.token.headcount.setup: opens the master with Ben's tap and makes the headcount key.
@@ -270,8 +281,8 @@ export class VaultLogic {
     const { token, lockedNow } = await this.unlock(m, prf);
     const master = new Cloudflare(token, this.fetch);
     m.issued = await this.sweepIssued(master, m);
-    await this.sweepHelpers(master, m);
-    return { ...(await this.setupHeadcount(master, m)), master: { token_id: m.token_id, locked_to_passkey_now: lockedNow } };
+    const leftover = await this.sweepHelpers(master, m);
+    return { ...(await this.setupHeadcount(master, m)), master: { token_id: m.token_id, locked_to_passkey_now: lockedNow }, leftover };
   }
 
   // Makes the headcount key: account-wide "API Tokens Read", no expiry, no address pin (the nightly
@@ -368,7 +379,7 @@ export class VaultLogic {
     const { token, lockedNow } = await this.unlock(m, prf);
     const r: CfAcceptResult = { ok: false, accepted: [], master: { token_id: m.token_id, locked_to_passkey_now: lockedNow } };
     try {
-      await this.sweepHelpers(new Cloudflare(token, this.fetch), m);
+      r.leftover = await this.sweepHelpers(new Cloudflare(token, this.fetch), m);
       const hcIds = await this.headcountId();
       const helpers = await this.helpers();
       const listed = await listTokens(new Cloudflare(token, this.fetch), m.account_id);
@@ -413,7 +424,10 @@ export class VaultLogic {
       r.unexpected = this.unexpectedKeys(m, listed, hc.token_id, helpers);
       r.cleanup = listed
         .filter((t) => isHelper(t, helpers))
-        .map((t) => ({ id: t.id, expires_on: t.expires_on ?? "never", expired: !!t.expires_on && Date.parse(t.expires_on) <= this.now() }));
+        .map((t) => ({
+          id: t.id, expires_on: t.expires_on ?? "never", expired: !!t.expires_on && Date.parse(t.expires_on) <= this.now(),
+          recorded: helpers.some((h) => h.id === t.id || (!h.id && h.name === t.name)),
+        }));
       r.stretched = listed
         .filter((t) => issued.has(t.id) && (!t.expires_on || Date.parse(t.expires_on) > Date.parse(issued.get(t.id)!)))
         .map((t) => ({ id: t.id, expires_on: t.expires_on ?? "never" }));
@@ -601,10 +615,10 @@ export class VaultLogic {
   // The intent (unique name, asked expiry) is stored BEFORE the mint and the id right after, and the
   // entry is dropped only once the delete is confirmed, so a lost answer or a failed delete leaves a
   // record the next tap's sweep acts on (card ae6147e4 R10). The secret is never stored or returned.
-  private async withKey<T>(master: Cloudflare, account: string, r: Evidence, policy: unknown, use: (cf: Cloudflare) => Promise<T>): Promise<T> {
+  private async withKey<T>(master: Cloudflare, account: string, r: Evidence, purpose: string, policy: unknown, use: (cf: Cloudflare) => Promise<T>): Promise<T> {
     const name = `${HELPER_PREFIX}${isoSeconds(this.now())} ${hex(crypto.getRandomValues(new Uint8Array(4)))}`;
     const until = isoSeconds(this.now() + PROBE_TOKEN_MS);
-    await this.updateHelpers((list) => [...list, { name, until }]);
+    await this.updateHelpers((list) => [...list, { name, purpose, until }]);
     const minted = await master.call<{ id: string; value: string }>("POST", `/accounts/${account}/tokens`, { name, policies: [policy], expires_on: until });
     await this.updateHelpers((list) => list.map((h) => (h.name === name ? { ...h, id: minted.id } : h)));
     const entry = { id: minted.id, deleted: false };
@@ -636,14 +650,16 @@ export class VaultLogic {
   // Cloudflare, found by id, or by its unique name when the mint's answer was lost. An entry is dropped
   // only when the delete is confirmed, or when Cloudflare does not list it (it lists expired keys too,
   // so unlisted means gone or never made -- the latter only once its asked expiry has passed).
-  private async sweepHelpers(master: Cloudflare, m: Master): Promise<void> {
+  // Returns what is still recorded afterwards (id, or name while the id is unknown), so the tap's result
+  // tells Ben about earlier leftovers (Codex 4a-1 r1 #2).
+  private async sweepHelpers(master: Cloudflare, m: Master): Promise<string[]> {
     const list = await this.helpers();
-    if (!list.length) return;
+    if (!list.length) return [];
     let listed: Listed[];
     try {
       listed = await listTokens(master, m.account_id);
     } catch {
-      return; // unknown: everything stays recorded, the nightly count still shows it
+      return list.map((h) => h.id ?? h.name); // unknown: everything stays recorded, the nightly count still shows it
     }
     const done: string[] = [];
     for (const h of list) {
@@ -656,6 +672,7 @@ export class VaultLogic {
       if (gone) done.push(h.name);
     }
     await this.updateHelpers((now) => now.filter((h) => !done.includes(h.name)));
+    return list.filter((h) => !done.includes(h.name)).map((h) => h.id ?? h.name);
   }
 
   // Finds the zone with a read-only key, then adds one TXT record with a key for that zone
@@ -671,7 +688,7 @@ export class VaultLogic {
       const group = await zoneGroups(master, account);
       const zoneId = await this.findZone(master, account, r, group, zoneName);
       const oneZone = { [`com.cloudflare.api.account.zone.${zoneId}`]: "*" };
-      await this.withKey(master, account, r, { effect: "allow", resources: oneZone, permission_groups: [group("DNS Write"), group("Zone Read")] }, async (dns) => {
+      await this.withKey(master, account, r, "cf.dns.txt.probe: write test record", { effect: "allow", resources: oneZone, permission_groups: [group("DNS Write"), group("Zone Read")] }, async (dns) => {
         const find = () => dns.call<{ id: string }[]>("GET", `/zones/${zoneId}/dns_records?type=TXT&name=${encodeURIComponent(r.record)}`);
         r.before = (await find()).length;
         if (r.before !== 0) throw new VaultError("probe_record_exists");
@@ -722,7 +739,7 @@ export class VaultLogic {
   // Looks up a zone's id by name with a read-only key for all zones, deleted straight after.
   private findZone(master: Cloudflare, account: string, r: Evidence, group: (name: string) => { id: string }, zoneName: string): Promise<string> {
     const allZones = { [`com.cloudflare.api.account.${account}`]: { "com.cloudflare.api.account.zone.*": "*" } };
-    return this.withKey(master, account, r, { effect: "allow", resources: allZones, permission_groups: [group("Zone Read")] }, async (cf) => {
+    return this.withKey(master, account, r, `find zone ${zoneName}`, { effect: "allow", resources: allZones, permission_groups: [group("Zone Read")] }, async (cf) => {
       const zones = await cf.call<{ id: string; name: string }[]>("GET", `/zones?name=${encodeURIComponent(zoneName)}`);
       if (zones.length !== 1 || zones[0].name !== zoneName) throw new VaultError("zone_not_found");
       return zones[0].id;
@@ -740,37 +757,46 @@ export class VaultLogic {
         const group = await accountGroup(master, account, ACCOUNT_SETTINGS_READ, "Account Settings Read");
         const policy = { effect: "allow", resources: { [`com.cloudflare.api.account.${account}`]: "*" }, permission_groups: [group] };
         const q = `since=${encodeURIComponent(params.since)}&before=${encodeURIComponent(params.until)}`;
-        const rows = await this.withKey(master, account, r, policy, (cf) => pages<AuditRow>(cf, `/accounts/${account}/audit_logs?${q}`, AUDIT_MAX));
+        const rows = await this.withKey(master, account, r, "cf.audit.read: read change log", policy, (cf) => pages<AuditRow>(cf, `/accounts/${account}/audit_logs?${q}`, AUDIT_MAX));
         r.truncated = rows.length > AUDIT_MAX;
-        r.data = rows.slice(0, AUDIT_MAX).map((x) => ({
+        r.data = fit(r, rows.slice(0, AUDIT_MAX).map((x) => ({
           when: x.when, action: x.action?.type, result: x.action?.result, actor: x.actor?.email ?? x.actor?.type, ip: x.actor?.ip,
           resource: [x.resource?.type, x.resource?.id].filter(Boolean).join(" "),
-        }));
+        })));
       } else {
         const group = await zoneGroups(master, account);
         const zoneId = await this.findZone(master, account, r, group, params.zone);
         const oneZone = { [`com.cloudflare.api.account.zone.${zoneId}`]: "*" };
         if (job === "cf.zone.read") {
-          const z = await this.withKey(master, account, r, { effect: "allow", resources: oneZone, permission_groups: [group("Zone Read")] }, (cf) =>
+          const z = await this.withKey(master, account, r, "cf.zone.read: read zone", { effect: "allow", resources: oneZone, permission_groups: [group("Zone Read")] }, (cf) =>
             cf.call<ZoneRow>("GET", `/zones/${zoneId}`),
           );
           r.data = { id: z.id, name: z.name, status: z.status, paused: z.paused, type: z.type, plan: z.plan?.name, name_servers: z.name_servers };
         } else {
-          const rows = await this.withKey(master, account, r, { effect: "allow", resources: oneZone, permission_groups: [group("DNS Read")] }, (cf) =>
+          const rows = await this.withKey(master, account, r, "cf.dns.list: read DNS", { effect: "allow", resources: oneZone, permission_groups: [group("DNS Read")] }, (cf) =>
             pages<DnsRow>(cf, `/zones/${zoneId}/dns_records?`, DNS_MAX),
           );
           r.truncated = rows.length > DNS_MAX;
-          r.data = rows.slice(0, DNS_MAX).map((x) => ({ id: x.id, type: x.type, name: x.name, content: x.content, proxied: x.proxied, ttl: x.ttl }));
+          r.data = fit(r, rows.slice(0, DNS_MAX).map((x) => ({ id: x.id, type: x.type, name: x.name, content: x.content, proxied: x.proxied, ttl: x.ttl })));
         }
       }
     } catch (e) {
       note(r, (e as Error).message);
     }
     await audit(master, m, r, [], await this.headcountId());
-    r.ok = !r.error && r.data !== undefined && r.minted.length > 0 && r.minted.every((t) => t.deleted) && r.audit.minted_still_listed.length === 0;
+    r.ok = !r.error && !r.audit.error && r.data !== undefined && r.minted.length > 0 && r.minted.every((t) => t.deleted) && r.audit.minted_still_listed.length === 0;
     if (!r.ok) delete r.data; // an answer is handed on only when the whole job checked out
     return r;
   }
+}
+
+// Drops whole rows from the end until the JSON fits RESULT_MAX_BYTES; says so with `truncated`.
+function fit<T>(r: { truncated?: boolean }, rows: T[]): T[] {
+  const size = (x: unknown) => new TextEncoder().encode(JSON.stringify(x)).length;
+  let n = rows.length;
+  while (n > 0 && size(rows.slice(0, n)) > RESULT_MAX_BYTES) n = Math.floor(n * 0.9);
+  if (n < rows.length) r.truncated = true;
+  return rows.slice(0, n);
 }
 
 type ZoneRow = { id: string; name: string; status?: string; paused?: boolean; type?: string; plan?: { name?: string }; name_servers?: string[] };
