@@ -195,6 +195,7 @@ export class RunBook {
     return ok ? true : why;
   }
 
+  /** Marks an op that ended without an answer to release (Cloudflare refused). Best effort, its own transaction. */
   private close(id: string, op: string, state: OpState, why: string): void {
     try {
       this.store.transactionSync(() => {
@@ -206,6 +207,7 @@ export class RunBook {
     }
   }
 
+  /** Ends a run inside the caller's transaction: sets the state and bumps the generation (the fence). */
   private end(run: RunRecord, state: Exclude<RunState, "open">): void {
     run.state = state;
     run.generation += 1;
