@@ -77,3 +77,19 @@ test("restart on persisted storage: budget and intents survive; the same op id i
     await second.mf.dispose();
   }
 });
+
+test("reply lost after the release committed: the caller gets no answer, read-back finds the release saved", { timeout: 60_000 }, async () => {
+  const { mf, send } = await start(join(dir, "lost"));
+  try {
+    await send({ method: "seed", args: [run(0), 1] });
+    const [r] = await send({ method: "opReplyLost", args: [op("op-lost-0001")] });
+    assert.deepEqual(Object.keys(r), ["error"]);
+    assert.match(r.error, /reply lost/);
+    assert.ok(!JSON.stringify(r).includes("benculbert.com"), "no part of the answer reached the caller");
+    const [s] = await send({ method: "status", args: [] });
+    assert.deepEqual(s.ops.map((o: { op: string; state: string }) => [o.op, o.state]), [["op-lost-0001", "released"]], "4a-2b shows this as released, not delivered");
+    assert.equal(s.run.budget.used, 1);
+  } finally {
+    await mf.dispose();
+  }
+});

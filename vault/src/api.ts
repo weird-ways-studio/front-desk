@@ -1,6 +1,6 @@
 // The vault's RPC surface as the front desk sees it (types only; nothing runs from here).
 
-import type { OpRequest, OpResult, RunState } from "./runs.ts";
+import type { OpRequest, OpResult, RunBook, RunState } from "./runs.ts";
 import type { CfAcceptResult, GhBaselineResult, Headcount, HeadcountSetupResult, ProbeResult, ReadResult } from "./vault.ts";
 
 export type { OpRequest, OpResult, RunState };
@@ -19,5 +19,6 @@ export interface VaultRunApi {
   runApi(): Promise<{ version: number }>;
   runOp(req: OpRequest): Promise<OpResult>;
   runEnd(id: string, how: "stopped" | "finished"): Promise<{ state: RunState; generation: number }>;
+  runStatus(id: string): Promise<ReturnType<RunBook["status"]>>;
   setKeyRev(rev: number): Promise<number>;
 }

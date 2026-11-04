@@ -3,7 +3,7 @@
 // test/runs.workerd.test.ts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { RUN_ELIGIBLE, RunBook, type OpRequest, type RunRecord, type RunStore } from "../vault/src/runs.ts";
+import { RUN_ELIGIBLE, RunBook, paramsHash, type OpRequest, type RunRecord, type RunStore } from "../vault/src/runs.ts";
 
 const T0 = Date.UTC(2026, 10, 4, 12, 0, 0);
 const ZONE_ID = "z".repeat(32);
@@ -88,6 +88,17 @@ test("a good op: one call with the run's key on the frozen zone id, answer relea
   assert.equal(s.run.budget.used, 1);
   assert.deepEqual(s.ops.map((o) => o.state), ["released"]);
   assert.equal((store.map.get("intent:R1:op-00000001") as { state: string }).state, "released");
+});
+
+test("the intent holds the hash of exactly the params that were checked and dispatched", async () => {
+  const { book, cf, store } = setup();
+  const params = { zone: "benculbert.com" };
+  await book.op(req({ params }));
+  const intent = store.map.get("intent:R1:op-00000001") as { params_hash: string };
+  assert.equal(intent.params_hash, await paramsHash({ zone: "benculbert.com" }));
+  assert.notEqual(intent.params_hash, await paramsHash({ zone: "other.com" }));
+  assert.match(cf.calls[0].url, new RegExp(`/zones/${ZONE_ID}$`), "dispatched the zone that was hashed");
+  assert.equal(book.status("R1").ops[0].params_hash, intent.params_hash);
 });
 
 // [request override, run override, key present, agent text, Ben text]

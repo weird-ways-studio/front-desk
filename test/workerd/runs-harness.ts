@@ -42,6 +42,12 @@ export class HarnessBox extends DurableObject {
   op(req: never) {
     return this.book().op(req);
   }
+  // The reply is lost after the release committed: the run book finishes, then the RPC reply fails on the way
+  // back to the caller (as a dropped connection would). Nothing of the answer may reach the caller.
+  async opReplyLost(req: never) {
+    await this.book().op(req);
+    throw new Error("reply lost");
+  }
   status() {
     return { ...this.book().status("R1"), calls, intents: [...this.ctx.storage.kv.list({ prefix: "intent:" })].length };
   }
@@ -52,6 +58,7 @@ export default {
     const stub = env.BOX.get(env.BOX.idFromName("vault")) as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
     const cmds = (await request.json()) as { method: string; args: unknown[] }[];
     // Several commands in one request are sent at once, so they race inside the Durable Object.
-    return Response.json(await Promise.all(cmds.map((c) => stub[c.method](...c.args))));
+    // A failed call comes back as { error } only: whatever it was carrying is gone, as on a real lost reply.
+    return Response.json(await Promise.all(cmds.map((c) => stub[c.method](...c.args).catch((e: Error) => ({ error: String(e.message) })))));
   },
 };

@@ -57,6 +57,7 @@ interface Intent {
   run: string;
   n: number; // which unit of the budget
   job: string;
+  params_hash: string; // sha256 of the exact params admitted and dispatched (paramsHash)
   generation: number;
   at: number;
   state: OpState;
@@ -79,6 +80,13 @@ export type OpResult = { outcome: "done"; data: unknown; truncated?: boolean; ag
 
 const utc = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
 const runKey = (id: string) => `run:${id}`;
+
+/** sha256 (hex) of the params as sorted [name, value] pairs, so the same params always give the same hash. */
+export async function paramsHash(params: Record<string, string>): Promise<string> {
+  const canon = JSON.stringify(Object.keys(params).sort().map((k) => [k, String(params[k])]));
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canon)));
+  return [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
 const intentKey = (run: string, op: string) => `intent:${run}:${op}`;
 
 export class RunBook {
@@ -102,10 +110,13 @@ export class RunBook {
   }
 
   /** One op: admit (one transaction), call Cloudflare with the run's key, release (one transaction). */
-  async op(req: OpRequest): Promise<OpResult> {
+  async op(input: OpRequest): Promise<OpResult> {
+    // One captured copy: the params hashed into the intent are the params checked and dispatched.
+    const req: OpRequest = { ...input, params: { ...(input.params ?? {}) } };
+    const hash = await paramsHash(req.params); // async, so before the transaction, never inside it
     let admitted: { run: RunRecord; key: string } | OpResult;
     try {
-      admitted = this.store.transactionSync(() => this.admit(req));
+      admitted = this.store.transactionSync(() => this.admit(req, hash));
     } catch {
       return { outcome: "failed", agent: "failed: vault storage error before the call; nothing was called", ben: `job_failed: run ${req.run} op ${req.op}: vault storage error, nothing called` };
     }
@@ -142,7 +153,7 @@ export class RunBook {
 
   // Runs inside the admission transaction: no I/O, no await. Checks in a fixed order, then spends one unit
   // and writes the intent. Returns the run and its key, or the refusal.
-  private admit(req: OpRequest): { run: RunRecord; key: string } | OpResult {
+  private admit(req: OpRequest, hash: string): { run: RunRecord; key: string } | OpResult {
     const refuse = (code: string, ben: string): OpResult => ({ outcome: "refused", agent: `refused: ${code}`, ben: `refused: ${ben}` });
     const run = this.store.kv.get<RunRecord>(runKey(req.run));
     if (!run) return refuse("unknown_run", `run request for unknown run ${req.run}`);
@@ -163,7 +174,7 @@ export class RunBook {
     if (run.budget.used >= run.budget.max) return refuse(`budget_spent (${run.budget.used} of ${run.budget.max} used)`, `${R} budget spent`);
     run.budget.used += 1;
     this.store.kv.put(runKey(run.id), run);
-    const intent: Intent = { op: req.op, run: run.id, n: run.budget.used, job: req.job, generation: run.generation, at: this.now(), state: "admitted" };
+    const intent: Intent = { op: req.op, run: run.id, n: run.budget.used, job: req.job, params_hash: hash, generation: run.generation, at: this.now(), state: "admitted" };
     this.store.kv.put(intentKey(run.id, req.op), intent);
     return { run, key };
   }
@@ -225,10 +236,10 @@ export class RunBook {
   }
 
   /** What a run page shows: the record without any key value, and each op's state read back from storage. */
-  status(id: string): { run: Omit<RunRecord, "run_key_id"> & { has_key: boolean }; ops: { op: string; n: number; job: string; state: OpState; why?: string }[]; unresolved: number } {
+  status(id: string): { run: Omit<RunRecord, "run_key_id"> & { has_key: boolean }; ops: { op: string; n: number; job: string; params_hash: string; state: OpState; why?: string }[]; unresolved: number } {
     const run = this.store.kv.get<RunRecord>(runKey(id));
     if (!run) throw new VaultError("unknown_run");
-    const ops = [...this.store.kv.list<Intent>({ prefix: `intent:${id}:` })].map(([, i]) => ({ op: i.op, n: i.n, job: i.job, state: i.state, ...(i.why ? { why: i.why } : {}) }));
+    const ops = [...this.store.kv.list<Intent>({ prefix: `intent:${id}:` })].map(([, i]) => ({ op: i.op, n: i.n, job: i.job, params_hash: i.params_hash, state: i.state, ...(i.why ? { why: i.why } : {}) }));
     const { run_key_id, ...shown } = run;
     return { run: { ...shown, has_key: Boolean(run_key_id) }, ops, unresolved: ops.filter((o) => o.state === "admitted").length };
   }
