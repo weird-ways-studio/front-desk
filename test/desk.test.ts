@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { APPROVE_WINDOW_MS, CHALLENGE_TTL_MS, COLLECT_WINDOW_MS, Desk, DeskError, MemoryStore, LOG_DETAIL_MAX, headcountAlarm, type DeskHooks } from "../src/desk.ts";
+import { APPROVE_WINDOW_MS, CHALLENGE_TTL_MS, COLLECT_WINDOW_MS, Desk, DeskError, MemoryStore, LOG_DETAIL_MAX, headcountAlarm, headcountWords, type DeskHooks } from "../src/desk.ts";
 import { JOBS } from "../src/jobs.ts";
 import type { Headcount } from "../vault/src/api.ts";
 import { SoftKey } from "./softkey.ts";
@@ -261,7 +261,7 @@ test("log detail stays valid JSON and says when it shortened a long token list",
 });
 
 // Nightly headcount (C5c-2 3baea7cc): the desk logs the vault's count and tells the alarm.
-const clean: Headcount = { ok: true, tokens: 5, unexpected: [], stretched: [], missing: [], github: { ok: true, changes: [] } };
+const clean: Headcount = { ok: true, tokens: 5, unexpected: [], stretched: [], missing: [], cleanup: [], github: { ok: true, changes: [] } };
 function headcountDesk(answer: () => Promise<Headcount>) {
   const store = new MemoryStore();
   const vault = { status: async () => ({ stored: true, pending: false }), run: async () => ({}) as any, headcount: answer, ghPreview: async () => ({ changes: [], snapshot: "", base: "" }), cfPreview: async () => [] };
@@ -396,4 +396,17 @@ test("headcount setup job: takes no parameters and says it is a standing key", (
   assert.equal(job.validate(null), null);
   assert.match((job.explain as () => { does: string })().does, /standing key/);
   assert.equal(job.vault, true);
+});
+
+test("headcount words: a recorded short key 'is deleted at your next tap'; a look-alike the vault did not make is not promised (Codex 4a-1 r1 #3)", () => {
+  const words = headcountWords({
+    ...clean, ok: false,
+    cleanup: [
+      { id: "a".repeat(32), expires_on: "2026-11-03T10:05:00Z", expired: false, recorded: true },
+      { id: "b".repeat(32), expires_on: "2027-01-01T00:00:00Z", expired: false, recorded: false },
+    ],
+  });
+  assert.match(words, /short vault key not yet deleted[^\n]*deletes it at your next Cloudflare tap \["a{32}"\]/);
+  assert.match(words, /did not make[^\n]*will not delete it[^\n]*delete it in the Cloudflare dashboard \["b{32}"\]/);
+  assert.doesNotMatch(words.split("\n").find((l) => l.includes("b".repeat(32)))!, /next Cloudflare tap/);
 });

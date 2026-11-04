@@ -42,7 +42,6 @@ export type GrantStatus = "pending" | "approved" | "collected" | "stopped";
 // Where an agent request came from: the address Cloudflare saw, and the route's check of the c-box
 // signature (cboxkey.ts), run only for jobs that hand out keys.
 export interface Source {
-  ip?: string;
   checkSignature?: () => Promise<void>;
 }
 
@@ -169,6 +168,11 @@ export function headcountWords(r: Headcount, max = LOG_DETAIL_MAX): string {
     ...r.unexpected.map((k) => `Cloudflare: a key nobody asked you for, named ${name(k.name)} [${name(k.id)}]`),
     ...r.stretched.map((k) => `Cloudflare: a key whose expiry was pushed later, now ${name(k.expires_on)} [${name(k.id)}]`),
     ...r.missing.map((k) => `Cloudflare: one of the front desk's own keys is missing [${name(k)}]`),
+    ...r.cleanup.map((k) =>
+      k.recorded
+        ? `Cloudflare: a short vault key not yet deleted, ${k.expired ? "already expired" : `usable until ${name(k.expires_on)}`}; the vault deletes it at your next Cloudflare tap [${name(k.id)}]`
+        : `Cloudflare: a key named like the vault's own short keys that the vault did not make, ${k.expired ? "already expired" : `usable until ${name(k.expires_on)}`}. The vault will not delete it. If you did not make it, tell the agent now; delete it in the Cloudflare dashboard [${name(k.id)}]`,
+    ),
   ];
   const gh = plainChanges(r.github.changes).flatMap((g) => g.items.map((i) => `GitHub, ${g.heading.split(":")[0]}: ${i}`));
   const todo = ["Front desk nightly check: needs you."];
@@ -386,6 +390,9 @@ export class Desk {
   async grant(id: string): Promise<Grant> {
     const g = await this.store.get<Grant>(`grant:${id}`);
     if (!g) throw new DeskError("no_such_grant", 404);
+    // A grant stored for a job since taken off the list (cf.token.zone.read, card ae6147e4) is never
+    // approved, run or collected.
+    if (!Object.hasOwn(JOBS, g.job)) throw new DeskError("job_retired", 410);
     return g;
   }
 
@@ -399,7 +406,7 @@ export class Desk {
     const job = body.job as JobName;
     // A key for the agent is made only for a request signed with the enrolled c-box key, so a
     // stolen agent login used elsewhere gets nothing (Codex minted r1 #2, architecture review r1).
-    if ((JOBS[job] as Job).pinIp) await this.requireSigned(source, requester, job, now);
+    if ((JOBS[job] as Job).signed) await this.requireSigned(source, requester, job, now);
     // Bounds on what can wait for Ben, so a stolen login cannot flood his phone (Codex architecture r1 #4).
     const waiting = [...(await this.store.list<Grant>({ prefix: "grant:" })).values()].filter((x) => x.status === "pending" && x.expires_at > now);
     const refuseBusy = async (code: string) => {
@@ -409,8 +416,7 @@ export class Desk {
     if (waiting.filter((x) => x.requester === requester).length >= MAX_PENDING) await refuseBusy("too_many_pending");
     if (job === "cbox.key.enroll" && waiting.some((x) => x.job === "cbox.key.enroll")) await refuseBusy("enroll_pending");
     // Whatever ip the agent sent is replaced with the address Cloudflare saw.
-    const asked = (JOBS[job] as Job).pinIp ? { ...((body.params ?? {}) as object), ip: source.ip } : body.params;
-    const params: Record<string, string> | null = JOBS[job].validate(asked);
+    const params: Record<string, string> | null = JOBS[job].validate(body.params);
     if (!params) throw new DeskError("bad_params", 400);
     if (job === "cbox.key.enroll") {
       // Shown to Ben with what it replaces; approval is refused if that has changed since (stale request).
@@ -453,7 +459,7 @@ export class Desk {
     }
     const base = { id: crypto.randomUUID(), job, params, requester, expires_at: now + APPROVE_WINDOW_MS };
     const g: Grant = { ...base, reason: body.reason.trim(), created_at: now, hash: await grantHash(base), status: "pending" };
-    if ((JOBS[job] as Job).pinIp) g.cbox_rev = await keyRev(this.store);
+    if ((JOBS[job] as Job).signed) g.cbox_rev = await keyRev(this.store);
     // Recorded before the grant exists: no receipt, nothing for Ben to approve.
     const receipt = await this.record(g, "request", { params, requester, reason: g.reason, created_at: now, expires_at: g.expires_at, grant_hash: g.hash }, now);
     g.recorded = { request: receipt.sha256 };
@@ -633,7 +639,7 @@ export class Desk {
       if (!this.hooks.vault) throw new Error("vault not connected");
       r = await this.hooks.vault.headcount();
     } catch (e) {
-      r = { ok: false, tokens: -1, unexpected: [], stretched: [], missing: [], github: { ok: false, changes: [] }, error: (e as Error).message.slice(0, 120) };
+      r = { ok: false, tokens: -1, unexpected: [], stretched: [], missing: [], cleanup: [], github: { ok: false, changes: [] }, error: (e as Error).message.slice(0, 120) };
     }
     const detail = headcountWords(r);
     await this.log({ event: r.ok ? "headcount_ok" : "headcount_mismatch", detail }, now);
@@ -722,7 +728,7 @@ export class Desk {
     const first = await this.grant(id);
     if (first.requester !== requester) throw new DeskError("not_your_grant", 403);
     // A key is handed only to a signed collect from the address it is pinned to (Codex architecture r1 #2).
-    if ((JOBS[first.job] as Job).pinIp) await this.requireSigned(source, requester, first.job, now);
+    if ((JOBS[first.job] as Job).signed) await this.requireSigned(source, requester, first.job, now);
     // Re-read after the signature's crypto: everything from here to the write is storage calls only,
     // so two collects cannot both see "approved" (Codex architecture r2).
     const g = await this.grant(id);
@@ -739,12 +745,8 @@ export class Desk {
     if (g.recorded.approval === undefined) throw new DeskError("not_ready", 409);
     // A vault job is approved before the vault finishes; until its result is in, there is nothing to collect.
     if ((JOBS[g.job] as Job).vault && g.result === undefined) throw new DeskError("not_ready", 409);
-    if ((JOBS[g.job] as Job).pinIp) {
+    if ((JOBS[g.job] as Job).signed) {
       if (g.cbox_rev !== (await keyRev(this.store))) throw new DeskError("cbox_key_changed", 409);
-      if (source.ip !== g.params.ip) {
-        await this.log({ event: "refused", ...this.grantFacts(g), detail: `collect from ${String(source.ip).slice(0, 45)}, key is pinned to ${g.params.ip}` }, now);
-        throw new DeskError("address_changed", 409);
-      }
     }
     // The stored copy loses the key's secret: it is handed over this once.
     const collected: Grant = { ...g, status: "collected", collected_at: now, result: withoutSecret(g.result) };
