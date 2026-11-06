@@ -907,7 +907,9 @@ function note(r: { error?: string }, message: string): void {
 
 // The account-level permission group the headcount key gets (FROM MEMORY: "Account API Tokens Read";
 // the first live setup records the exact name, and this is narrowed to it).
-export const TOKENS_READ = /^(Account )?API Tokens Read$/;
+// The exact account-level group, as Cloudflare names it (VERIFIED 2026-11-06, API reference "List Token Permission
+// Groups", Accepted Permissions: "Account API Tokens Read"; Codex Build R r1 #1). No other name passes.
+export const TOKENS_READ = /^Account API Tokens Read$/;
 
 type Policy = { effect?: string; resources?: Record<string, unknown>; permission_groups?: { id?: string; name?: string }[] };
 type Listed = { id: string; name?: string; expires_on?: string; policies?: Policy[] };

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { MemoryStore } from "../src/desk.ts";
 import { MASTER_LABEL, RECOVERY_LABEL, open, seal, b64url, fromB64url } from "../vault/src/seal.ts";
-import { PENDING_MS, PROBE_TOKEN_MS, VaultLogic, type CfAcceptResult, type Headcount, type HeadcountSetupResult, type ProbeResult, type ReadResult, HELPER_PREFIX, RESULT_MAX_BYTES } from "../vault/src/vault.ts";
+import { PENDING_MS, PROBE_TOKEN_MS, TOKENS_READ, VaultLogic, type CfAcceptResult, type Headcount, type HeadcountSetupResult, type ProbeResult, type ReadResult, HELPER_PREFIX, RESULT_MAX_BYTES } from "../vault/src/vault.ts";
 import { handleSetup } from "../vault/src/setup.ts";
 
 const ACCOUNT = "a".repeat(32);
@@ -747,4 +747,9 @@ test("headcount: a kept exception that later widens, or the headcount key gainin
   assert.deepEqual(night.widened, [{ id: hcId, why: "headcount_key_not_list_only" }]);
   hc.policies = undefined;
   assert.deepEqual((await vault.headcount()).widened, [{ id: hcId, why: "headcount_key_not_list_only" }], "an unreadable scope never passes");
+});
+
+test("TOKENS_READ: only Cloudflare's exact account-level list-keys group passes (Codex Build R r1 #1)", () => {
+  assert.ok(TOKENS_READ.test("Account API Tokens Read"));
+  for (const other of ["API Tokens Read", "Account API Tokens Write", "Account API Tokens Read ", "x Account API Tokens Read"]) assert.ok(!TOKENS_READ.test(other), other);
 });
