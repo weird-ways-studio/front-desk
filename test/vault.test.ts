@@ -800,3 +800,19 @@ test("scope readability (Codex Build R r1b #2): a missing or unknown effect is u
     assert.deepEqual((await vault.headcount()).widened, [{ id: hcId, why: "headcount_key_not_list_only" }], `headcount key, effect ${String(effect)}`);
   }
 });
+
+test("headcount key identity (Codex Build R r2 #1): setup records its group id; a same-name group with another id alarms; a key made before Build R asks for the setup tap", async () => {
+  const { vault, cf, store } = await stored();
+  await hcSetup(vault);
+  const kept = await store.get<any>("headcount");
+  assert.equal(kept.group_id, "tok-r", "the id from Cloudflare's own group list");
+  assert.deepEqual((await vault.headcount()).widened, []);
+  const hc = cf.tokens.find((t) => t.id === kept.token_id)!;
+  hc.policies = [{ ...hc.policies![0], permission_groups: [{ id: "look-alike", name: "Account API Tokens Read" }] }];
+  assert.deepEqual((await vault.headcount()).widened, [{ id: kept.token_id, why: "headcount_key_not_list_only" }], "same name, other id");
+  hc.policies = [{ ...hc.policies![0], permission_groups: [{ id: "tok-r", name: "Account API Tokens Read" }] }];
+  await store.put("headcount", { ...kept, group_id: undefined });
+  assert.deepEqual((await vault.headcount()).widened, [{ id: kept.token_id, why: "headcount_key_needs_setup" }], "made before Build R");
+  assert.equal((await hcSetup(vault)).ok, true);
+  assert.deepEqual((await vault.headcount()).widened, [], "the setup tap records the id and the night is clean again");
+});

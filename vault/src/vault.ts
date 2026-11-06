@@ -78,6 +78,10 @@ interface HeadcountKey {
   token_id: string;
   value: string;
   made_at: number;
+  // The id of the one permission group it was made with (Account API Tokens Read), read from Cloudflare's own
+  // group list at setup. The nightly check compares the live key's group to this id, not to a name (Codex
+  // Build R r2 #1). Missing on keys made before Build R: the night alarms until Ben re-runs the setup.
+  group_id?: string;
   // Old headcount keys a replacement could not delete. Not expected by the count, so they alarm
   // nightly until the next setup deletes them.
   retired?: string[];
@@ -304,10 +308,12 @@ export class VaultLogic {
     const account = m.account_id;
     const r: Omit<HeadcountSetupResult, "master"> = { ok: false, key_id: null, lists: false, mint_refused: false, replaced: [] };
     let value: string | undefined;
+    let groupId = "";
     try {
       const groups = await master.call<{ id: string; name: string; scopes: string[] }[]>("GET", `/accounts/${account}/tokens/permission_groups`);
       const read = groups.filter((g) => TOKENS_READ.test(g.name) && g.scopes.includes("com.cloudflare.api.account"));
       if (read.length !== 1) throw new VaultError("permission_group_unclear: API Tokens Read");
+      groupId = read[0].id;
       const made = await master.call<{ id: string; value: string }>("POST", `/accounts/${account}/tokens`, {
         name: `front-desk headcount ${isoSeconds(this.now())}`,
         policies: [{ effect: "allow", resources: { [`com.cloudflare.api.account.${account}`]: "*" }, permission_groups: [{ id: read[0].id }] }],
@@ -344,7 +350,7 @@ export class VaultLogic {
     // (Codex C5c-2 r1 #2).
     const old = await this.store.get<HeadcountKey | null>("headcount");
     const olds = old ? [old.token_id, ...(old.retired ?? [])] : [];
-    await this.store.put<HeadcountKey>("headcount", { token_id: r.key_id!, value: value!, made_at: this.now(), retired: olds });
+    await this.store.put<HeadcountKey>("headcount", { token_id: r.key_id!, value: value!, made_at: this.now(), group_id: groupId, retired: olds });
     for (const id of olds) {
       const gone = await master.call("DELETE", `/accounts/${account}/tokens/${id}`).then(
         () => true,
@@ -459,7 +465,7 @@ export class VaultLogic {
         .filter((t) => issued.has(t.id) && (!t.expires_on || Date.parse(t.expires_on) > Date.parse(issued.get(t.id)!)))
         .map((t) => ({ id: t.id, expires_on: t.expires_on ?? "never" }));
       r.missing = [m.token_id, hc.token_id].filter((id) => !listed.some((t) => t.id === id));
-      r.widened = widened(m, listed, hc.token_id);
+      r.widened = widened(m, listed, hc);
       r.ok = r.unexpected.length === 0 && r.stretched.length === 0 && r.missing.length === 0 && r.cleanup.length === 0 && r.widened.length === 0 && r.github.ok;
     } catch (e) {
       note(r, (e as Error).message);
@@ -977,7 +983,7 @@ export function overCeiling(t: Listed, account: string): string | null {
 
 // The nightly check on scopes: each kept exception must still read exactly as Ben approved it and stay
 // under the ceiling; the headcount key must still hold only the one list-keys group on this account.
-function widened(m: Master, listed: Listed[], hcId: string): { id: string; why: string }[] {
+function widened(m: Master, listed: Listed[], hcKey: HeadcountKey): { id: string; why: string }[] {
   const out: { id: string; why: string }[] = [];
   for (const e of m.exceptions ?? []) {
     const t = listed.find((x) => x.id === e.id);
@@ -988,17 +994,18 @@ function widened(m: Master, listed: Listed[], hcId: string): { id: string; why: 
       if (over) out.push({ id: e.id, why: over });
     }
   }
-  const hc = listed.find((x) => x.id === hcId);
-  if (hc && !listOnly(hc, m.account_id)) out.push({ id: hcId, why: "headcount_key_not_list_only" });
+  const hc = listed.find((x) => x.id === hcKey.token_id);
+  if (hc && !hcKey.group_id) out.push({ id: hcKey.token_id, why: "headcount_key_needs_setup" });
+  else if (hc && !listOnly(hc, m.account_id, hcKey.group_id!)) out.push({ id: hcKey.token_id, why: "headcount_key_not_list_only" });
   return out;
 }
 
-// The headcount key as it was made: readable, one allow policy, one group (TOKENS_READ), the whole account and
-// nothing else. Any other shape, or one that cannot be read, fails.
-function listOnly(t: Listed, account: string): boolean {
+// The headcount key as it was made: readable, one allow policy, one group -- the exact id recorded at setup and
+// named TOKENS_READ -- the whole account and nothing else. Any other shape, or one that cannot be read, fails.
+function listOnly(t: Listed, account: string, groupId: string): boolean {
   if (scopeWords(t) === null || t.policies!.length !== 1) return false;
   const [p] = t.policies!;
-  return p.effect === "allow" && p.permission_groups!.length === 1 && TOKENS_READ.test(p.permission_groups![0].name!) &&
+  return p.effect === "allow" && p.permission_groups!.length === 1 && p.permission_groups![0].id === groupId && TOKENS_READ.test(p.permission_groups![0].name!) &&
     stable(p.resources) === stable({ [`com.cloudflare.api.account.${account}`]: "*" });
 }
 

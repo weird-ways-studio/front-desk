@@ -169,7 +169,9 @@ export function headcountWords(r: Headcount, max = LOG_DETAIL_MAX): string {
     ...r.stretched.map((k) => `Cloudflare: a key whose expiry was pushed later, now ${name(k.expires_on)} [${name(k.id)}]`),
     ...r.missing.map((k) => `Cloudflare: one of the front desk's own keys is missing [${name(k)}]`),
     ...(r.widened ?? []).map((k) =>
-      k.why === "headcount_key_not_list_only"
+      k.why === "headcount_key_needs_setup"
+        ? `Cloudflare: the nightly check's own key was made before its permission was recorded. Ask the agent for the setup tap (one Face ID) [${name(k.id)}]`
+        : k.why === "headcount_key_not_list_only"
         ? `Cloudflare: the nightly check's own key can now do more than list keys. Tell the agent now [${name(k.id)}]`
         : `Cloudflare: a key you kept can now do more than you approved, or more than read-only. If you did not widen it, tell the agent now [${name(k.id)}] (${name(k.why)})`,
     ),
