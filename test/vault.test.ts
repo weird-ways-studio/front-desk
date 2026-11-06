@@ -722,10 +722,12 @@ test("headcount: a kept exception that later widens, or the headcount key gainin
   const key = { id: OURS, name: "x", policies: policy() };
   cf.tokens.push(key);
   assert.equal((await accept(vault, OURS)).ok, true);
-  assert.ok(cfClean(await vault.headcount()));
+  // GitHub stands in as clean, so the night's verdict turns on Cloudflare alone.
+  (vault as any).ghHeadcount = async () => ({ ok: true, changes: [] });
+  assert.equal((await vault.headcount()).ok, true, "clean with the exception as approved");
   key.policies = [...policy(), ...policy("DNS Read")];
   let night = await vault.headcount();
-  assert.equal(night.ok, false);
+  assert.equal(night.ok, false, "a widened key fails the night");
   assert.deepEqual(night.widened, [{ id: OURS, why: "scope_changed_since_approved" }]);
   // Exception record says it was approved wider than the ceiling (only reachable by a stored-state edit): still alarms.
   const m = await store.get<any>("master");

@@ -702,7 +702,7 @@ test("cf.token.accept: the front desk adds the vault's unexpected keys; Ben's sc
   assert.deepEqual((await store.get<any>(`grant:${id}`)).params, { ids: "c".repeat(32), names: "observatory-backup-read", scopes: "allow Zone Read on {}" });
   const page = await (await callV(store, vault, `/approve/${id}`)).text();
   assert.match(page, /observatory-backup-read/);
-  assert.match(page, /not made by the front desk/i, "Ben's screen says the key is not the front desk's");
+  assert.match(page, /Keys not made by the front desk: 1/, "Ben's screen says the key is not the front desk's");
   assert.match(page, /allow Zone Read on/, "and shows its real scope");
   const forged = await agentPost(store, vault, "/request", { job: "cf.token.accept", params: { ids: "d".repeat(32) }, reason: "x" });
   assert.equal(forged.status, 400, "the agent cannot choose the keys");
