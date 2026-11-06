@@ -168,6 +168,13 @@ export function headcountWords(r: Headcount, max = LOG_DETAIL_MAX): string {
     ...r.unexpected.map((k) => `Cloudflare: a key nobody asked you for, named ${name(k.name)} [${name(k.id)}]`),
     ...r.stretched.map((k) => `Cloudflare: a key whose expiry was pushed later, now ${name(k.expires_on)} [${name(k.id)}]`),
     ...r.missing.map((k) => `Cloudflare: one of the front desk's own keys is missing [${name(k)}]`),
+    ...(r.widened ?? []).map((k) =>
+      k.why === "headcount_key_needs_setup"
+        ? `Cloudflare: the nightly check's own key was made before its permission was recorded. Ask the agent for the setup tap (one Face ID) [${name(k.id)}]`
+        : k.why === "headcount_key_not_list_only"
+        ? `Cloudflare: the nightly check's own key can now do more than list keys. Tell the agent now [${name(k.id)}]`
+        : `Cloudflare: a key you kept can now do more than you approved, or more than read-only. If you did not widen it, tell the agent now [${name(k.id)}] (${name(k.why)})`,
+    ),
     ...r.cleanup.map((k) =>
       k.recorded
         ? `Cloudflare: a short vault key not yet deleted, ${k.expired ? "already expired" : `usable until ${name(k.expires_on)}`}; the vault deletes it at your next Cloudflare tap [${name(k.id)}]`
@@ -451,8 +458,12 @@ export class Desk {
         });
       if (!keys.length) throw new DeskError("nothing_to_accept", 409);
       if (keys.length > 20) throw new DeskError("too_many_changes", 400);
+      // Over the ceiling (or scope unreadable): never offered to Ben's tap; the vault refuses it too.
+      const over = keys.find((k) => k.over);
+      if (over) throw new DeskError(`over_ceiling: ${over.id}: ${over.over}`, 409);
       params.ids = keys.map((k) => k.id).join(",");
       params.names = keys.map((k) => k.name).join("\n");
+      params.scopes = keys.map((k) => k.scope).join("\n");
     }
     if (typeof body.reason !== "string" || !body.reason.trim() || body.reason.length > 200) {
       throw new DeskError("bad_reason", 400);

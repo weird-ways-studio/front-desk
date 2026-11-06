@@ -58,6 +58,16 @@ interface Master {
   // Keys handed to the agent and not yet deleted. Cloudflare keeps expired keys listed, so the
   // vault deletes these once expired, at its next job, and the audit expects them (Codex minted r1 #6).
   issued?: { id: string; expires_on: string }[];
+  // Keys the front desk did not make that Ben keeps, each added only by his tap on cf.token.accept,
+  // with the scope his screen showed (cutover Build R 2c19a923 step 3). The agent cannot write this.
+  exceptions?: Exception[];
+}
+
+interface Exception {
+  id: string;
+  name: string;
+  scope: string; // scopeWords() as Ben's screen showed it
+  at: number;
 }
 
 // The nightly headcount's own key: it can list the account's keys and nothing else. Minted once by
@@ -68,6 +78,10 @@ interface HeadcountKey {
   token_id: string;
   value: string;
   made_at: number;
+  // The id of the one permission group it was made with (Account API Tokens Read), read from Cloudflare's own
+  // group list at setup. The nightly check compares the live key's group to this id, not to a name (Codex
+  // Build R r2 #1). Missing on keys made before Build R: the night alarms until Ben re-runs the setup.
+  group_id?: string;
   // Old headcount keys a replacement could not delete. Not expected by the count, so they alarm
   // nightly until the next setup deletes them.
   retired?: string[];
@@ -132,6 +146,8 @@ export interface Headcount {
   cleanup: { id: string; expires_on: string; expired: boolean; recorded: boolean }[];
   // GitHub against the list Ben accepted with job gh.app.baseline: every addition or removal.
   github: { ok: boolean; changes: string[]; error?: string };
+  // Kept keys now wider than Ben approved or than the ceiling, and a headcount key no longer list-only.
+  widened?: { id: string; why: string }[];
   error?: string;
 }
 
@@ -257,7 +273,7 @@ export class VaultLogic {
     const read = (READ_JOBS as readonly string[]).includes(job);
     if (job !== "cf.dns.txt.probe" && !read && job !== "cf.token.headcount.setup" && job !== "gh.app.baseline" && job !== "cf.token.accept") throw new VaultError("job_not_offered");
     if (job === "cf.token.headcount.setup") return this.runHeadcountSetup(prf);
-    if (job === "cf.token.accept") return this.acceptKeys(prf, params?.ids ?? "");
+    if (job === "cf.token.accept") return this.acceptKeys(prf, params?.ids ?? "", params?.scopes ?? "");
     if (job === "gh.app.baseline") return this.ghBaseline(prf, params?.snapshot ?? "", params?.base ?? "");
     // Checked here too, not only at the front desk: the vault is the last word on what it does.
     if (job === "cf.audit.read") {
@@ -292,10 +308,12 @@ export class VaultLogic {
     const account = m.account_id;
     const r: Omit<HeadcountSetupResult, "master"> = { ok: false, key_id: null, lists: false, mint_refused: false, replaced: [] };
     let value: string | undefined;
+    let groupId = "";
     try {
       const groups = await master.call<{ id: string; name: string; scopes: string[] }[]>("GET", `/accounts/${account}/tokens/permission_groups`);
       const read = groups.filter((g) => TOKENS_READ.test(g.name) && g.scopes.includes("com.cloudflare.api.account"));
       if (read.length !== 1) throw new VaultError("permission_group_unclear: API Tokens Read");
+      groupId = read[0].id;
       const made = await master.call<{ id: string; value: string }>("POST", `/accounts/${account}/tokens`, {
         name: `front-desk headcount ${isoSeconds(this.now())}`,
         policies: [{ effect: "allow", resources: { [`com.cloudflare.api.account.${account}`]: "*" }, permission_groups: [{ id: read[0].id }] }],
@@ -332,7 +350,7 @@ export class VaultLogic {
     // (Codex C5c-2 r1 #2).
     const old = await this.store.get<HeadcountKey | null>("headcount");
     const olds = old ? [old.token_id, ...(old.retired ?? [])] : [];
-    await this.store.put<HeadcountKey>("headcount", { token_id: r.key_id!, value: value!, made_at: this.now(), retired: olds });
+    await this.store.put<HeadcountKey>("headcount", { token_id: r.key_id!, value: value!, made_at: this.now(), group_id: groupId, retired: olds });
     for (const id of olds) {
       const gone = await master.call("DELETE", `/accounts/${account}/tokens/${id}`).then(
         () => true,
@@ -350,11 +368,15 @@ export class VaultLogic {
    * What job cf.token.accept would accept, read at request time with the list-only key (no tap), so
    * Ben's approval screen names every key his tap adds.
    */
-  async cfPreview(): Promise<{ id: string; name: string }[]> {
+  async cfPreview(): Promise<CfPreviewKey[]> {
     const m = await this.master();
     const hc = await this.store.get<HeadcountKey | null>("headcount");
     if (!m || !hc) throw new VaultError("headcount_not_set_up");
-    return this.unexpectedKeys(m, await listTokens(new Cloudflare(hc.value, this.fetch), m.account_id), hc.token_id, await this.helpers());
+    const listed = await listTokens(new Cloudflare(hc.value, this.fetch), m.account_id);
+    return this.unexpectedKeys(m, listed, hc.token_id, await this.helpers()).map((k) => {
+      const t = listed.find((x) => x.id === k.id)!;
+      return { ...k, scope: scopeWords(t) ?? "unreadable", over: overCeiling(t, m.account_id) };
+    });
   }
 
   // Keys in the account the vault does not expect: not in the baseline, not the master or headcount
@@ -363,17 +385,20 @@ export class VaultLogic {
   // so cf.token.accept can never adopt one (R10). A key from outside that borrows the helper name is
   // still reported every night, as cleanup, and the vault never deletes a name it did not record.
   private unexpectedKeys(m: Master, listed: Listed[], hcId: string, helpers: Helper[]): { id: string; name: string }[] {
-    const known = new Set([...m.baseline, m.token_id, hcId, ...(m.issued ?? []).map((k) => k.id)]);
+    const known = new Set([...m.baseline, m.token_id, hcId, ...(m.issued ?? []).map((k) => k.id), ...(m.exceptions ?? []).map((k) => k.id)]);
     return listed.filter((t) => !known.has(t.id) && !isHelper(t, helpers)).map((t) => ({ id: t.id, name: String(t.name ?? "").slice(0, 60) }));
   }
 
   /**
-   * Job cf.token.accept, at Ben's tap: adds exactly the key ids his screen listed to what the audit
-   * expects. Each must still be in the account and still unexpected; otherwise nothing is added.
+   * Job cf.token.accept, at Ben's tap: keeps exactly the keys his screen listed as standing exceptions.
+   * Each must still be in the account, still unexpected, still exactly the scope his screen showed, and
+   * within the ceiling (read-only, this account, nothing that touches keys); otherwise nothing is added.
+   * Keys the vault issued are already expected, so only keys it did not make ever reach here.
    */
-  private async acceptKeys(prf: string, approved: string): Promise<CfAcceptResult> {
+  private async acceptKeys(prf: string, approved: string, approvedScopes: string): Promise<CfAcceptResult> {
     const ids = approved.split(",");
-    if (!ids.length || ids.some((id) => !/^[0-9a-f]{32}$/.test(id))) throw new VaultError("bad_params");
+    const scopes = approvedScopes.split("\n");
+    if (!ids.length || ids.some((id) => !/^[0-9a-f]{32}$/.test(id)) || scopes.length !== ids.length || scopes.some((x) => !x)) throw new VaultError("bad_params");
     const m = await this.master();
     if (!m) throw new VaultError("no_master_key");
     const { token, lockedNow } = await this.unlock(m, prf);
@@ -388,9 +413,17 @@ export class VaultLogic {
       }
       const unexpected = this.unexpectedKeys(m, listed, hcIds[0] ?? "", helpers).map((k) => k.id);
       if (ids.some((id) => !unexpected.includes(id))) throw new VaultError("keys_changed_since_request: nothing accepted, ask again");
+      const keys = ids.map((id) => listed.find((t) => t.id === id)!);
+      keys.forEach((t, i) => {
+        const over = overCeiling(t, m.account_id);
+        if (over) throw new VaultError(`over_ceiling: ${t.id}: ${over}: nothing accepted`);
+        if (scopeWords(t) !== scopes[i]) throw new VaultError(`scope_changed_since_request: ${t.id}: nothing accepted, ask again`);
+      });
       // Re-read after the awaited calls: unlock may have just locked the master to the passkey.
       const now = (await this.master())!;
-      await this.store.put<Master>("master", { ...now, baseline: [...now.baseline, ...ids.filter((id) => !now.baseline.includes(id))] });
+      const at = this.now();
+      const added = keys.map((t, i) => ({ id: t.id, name: String(t.name ?? "").slice(0, 60), scope: scopes[i], at }));
+      await this.store.put<Master>("master", { ...now, exceptions: [...(now.exceptions ?? []), ...added] });
       r.accepted = ids;
       r.ok = true;
     } catch (e) {
@@ -432,7 +465,8 @@ export class VaultLogic {
         .filter((t) => issued.has(t.id) && (!t.expires_on || Date.parse(t.expires_on) > Date.parse(issued.get(t.id)!)))
         .map((t) => ({ id: t.id, expires_on: t.expires_on ?? "never" }));
       r.missing = [m.token_id, hc.token_id].filter((id) => !listed.some((t) => t.id === id));
-      r.ok = r.unexpected.length === 0 && r.stretched.length === 0 && r.missing.length === 0 && r.cleanup.length === 0 && r.github.ok;
+      r.widened = widened(m, listed, hc);
+      r.ok = r.unexpected.length === 0 && r.stretched.length === 0 && r.missing.length === 0 && r.cleanup.length === 0 && r.widened.length === 0 && r.github.ok;
     } catch (e) {
       note(r, (e as Error).message);
     }
@@ -865,7 +899,7 @@ async function audit(master: Cloudflare, m: Master, r: Evidence, expected: strin
     const ids = (await listTokens(master, m.account_id)).map((t) => t.id);
     r.audit.tokens = ids.length;
     r.audit.minted_still_listed = r.minted.map((t) => t.id).filter((id) => ids.includes(id));
-    const known = [...expected, ...standing, ...(m.issued ?? []).map((k) => k.id)];
+    const known = [...expected, ...standing, ...(m.issued ?? []).map((k) => k.id), ...(m.exceptions ?? []).map((k) => k.id)];
     r.audit.new_since_setup = ids.filter((id) => !m.baseline.includes(id) && !known.includes(id));
     if (expected.some((id) => !ids.includes(id))) note(r, "minted key not listed");
   } catch (e) {
@@ -879,9 +913,101 @@ function note(r: { error?: string }, message: string): void {
 
 // The account-level permission group the headcount key gets (FROM MEMORY: "Account API Tokens Read";
 // the first live setup records the exact name, and this is narrowed to it).
-export const TOKENS_READ = /^(Account )?API Tokens Read$/;
+// The exact account-level group, as Cloudflare names it (VERIFIED 2026-11-06, API reference "List Token Permission
+// Groups", Accepted Permissions: "Account API Tokens Read"; Codex Build R r1 #1). No other name passes.
+export const TOKENS_READ = /^Account API Tokens Read$/;
 
-type Listed = { id: string; name?: string; expires_on?: string };
+type Policy = { effect?: string; resources?: Record<string, unknown>; permission_groups?: { id?: string; name?: string }[] };
+type Listed = { id: string; name?: string; expires_on?: string; not_before?: string; condition?: unknown; policies?: Policy[] };
+
+export interface CfPreviewKey {
+  id: string;
+  name: string;
+  scope: string; // scopeWords(), or "unreadable"
+  over: string | null; // why it is over the ceiling, or null
+}
+
+// Sorted keys at every level, so one scope always reads the same.
+function stable(v: unknown): string {
+  if (!v || typeof v !== "object") return JSON.stringify(v);
+  return `{${Object.keys(v as object).sort().map((k) => `${JSON.stringify(k)}:${stable((v as Record<string, unknown>)[k])}`).join(",")}}`;
+}
+
+/**
+ * A key's real scope as Cloudflare lists it, in one fixed form: each policy's effect, its groups by name AND id
+ * (names are cosmetic and repeat across levels; Codex Build R r1b #1), its resources, and the key's own limits
+ * (address condition, not-before, expiry; r1b #3), so any change to what the key can do, from where or until when,
+ * changes the string. Null when anything cannot be read, including an effect other than allow/deny (r1b #2):
+ * unreadable never passes.
+ */
+export function scopeWords(t: Listed): string | null {
+  if (!Array.isArray(t.policies) || !t.policies.length) return null;
+  const lines: string[] = [];
+  for (const p of t.policies) {
+    const groups = p.permission_groups ?? [];
+    if (p.effect !== "allow" && p.effect !== "deny") return null;
+    if (!groups.length || groups.some((g) => typeof g.name !== "string" || !g.name || typeof g.id !== "string" || !g.id)) return null;
+    if (!p.resources || typeof p.resources !== "object") return null;
+    lines.push(`${p.effect} ${groups.map((g) => `${g.name} [${g.id}]`).sort().join(" + ")} on ${stable(p.resources)}`);
+  }
+  const limits = [
+    t.condition !== undefined && t.condition !== null ? `condition ${stable(t.condition)}` : "no address limit",
+    t.not_before ? `not before ${t.not_before}` : "",
+    `expires ${t.expires_on || "never"}`,
+  ].filter(Boolean);
+  return [...lines.sort(), ...limits].join("; ");
+}
+
+/**
+ * The ceiling for a key Ben keeps that the front desk did not make (cutover outcome 2, Codex r3 F5):
+ * read-only permission groups, on the main account and its zones only, and nothing that touches keys.
+ * Returns why a key is over it, or null. A deny only narrows, so it is not checked.
+ */
+export function overCeiling(t: Listed, account: string): string | null {
+  if (scopeWords(t) === null) return "scope_unreadable";
+  const zone = (k: string) => k.startsWith("com.cloudflare.api.account.zone.");
+  for (const p of t.policies!) {
+    if (p.effect === "deny") continue;
+    for (const g of p.permission_groups!) {
+      if (/token/i.test(g.name!)) return `touches_keys: ${g.name}`;
+      if (!/ Read$/.test(g.name!)) return `not_read_only: ${g.name}`;
+    }
+    for (const [k, v] of Object.entries(p.resources!)) {
+      const inAccount = k === `com.cloudflare.api.account.${account}` &&
+        (v === "*" || (!!v && typeof v === "object" && Object.entries(v).every(([z, s]) => zone(z) && s === "*")));
+      if (!(zone(k) && v === "*") && !inAccount) return `outside_account: ${k.slice(0, 60)}`;
+    }
+  }
+  return null;
+}
+
+// The nightly check on scopes: each kept exception must still read exactly as Ben approved it and stay
+// under the ceiling; the headcount key must still hold only the one list-keys group on this account.
+function widened(m: Master, listed: Listed[], hcKey: HeadcountKey): { id: string; why: string }[] {
+  const out: { id: string; why: string }[] = [];
+  for (const e of m.exceptions ?? []) {
+    const t = listed.find((x) => x.id === e.id);
+    if (!t) continue; // deleted: nothing left to watch
+    if (scopeWords(t) !== e.scope) out.push({ id: e.id, why: "scope_changed_since_approved" });
+    else {
+      const over = overCeiling(t, m.account_id);
+      if (over) out.push({ id: e.id, why: over });
+    }
+  }
+  const hc = listed.find((x) => x.id === hcKey.token_id);
+  if (hc && !hcKey.group_id) out.push({ id: hcKey.token_id, why: "headcount_key_needs_setup" });
+  else if (hc && !listOnly(hc, m.account_id, hcKey.group_id!)) out.push({ id: hcKey.token_id, why: "headcount_key_not_list_only" });
+  return out;
+}
+
+// The headcount key as it was made: readable, one allow policy, one group -- the exact id recorded at setup and
+// named TOKENS_READ -- the whole account and nothing else. Any other shape, or one that cannot be read, fails.
+function listOnly(t: Listed, account: string, groupId: string): boolean {
+  if (scopeWords(t) === null || t.policies!.length !== 1) return false;
+  const [p] = t.policies!;
+  return p.effect === "allow" && p.permission_groups!.length === 1 && p.permission_groups![0].id === groupId && TOKENS_READ.test(p.permission_groups![0].name!) &&
+    stable(p.resources) === stable({ [`com.cloudflare.api.account.${account}`]: "*" });
+}
 
 // Every token in the account, all pages.
 async function listTokens(cf: Cloudflare, account: string): Promise<Listed[]> {

@@ -222,11 +222,13 @@ export const JOBS = {
     explain: (p) => {
       const ids = (p.ids ?? "").split(",");
       const names = (p.names ?? "").split("\n");
+      const scopes = (p.scopes ?? "").split("\n");
       return {
-        does: `Cloudflare: tell the nightly check ${ids.length === 1 ? "this key is" : "these keys are"} yours, so it stops flagging ${ids.length === 1 ? "it" : "them"}. Nothing is made, changed or deleted in Cloudflare.`,
-        sections: [{ heading: `Keys: ${ids.length}`, items: ids.map((id, i) => `${name(names[i] ?? "")} [${id}]`) }],
+        does: `Cloudflare: keep ${ids.length === 1 ? "this key" : "these keys"} as yours, so the nightly check stops flagging ${ids.length === 1 ? "it" : "them"}. Not made by the front desk. Each is read-only; the nightly check alarms if one ever changes: what it can do, where it works from, or how long it lasts. Nothing is made, changed or deleted in Cloudflare.`,
+        sections: [{ heading: `Keys not made by the front desk: ${ids.length}`, items: ids.map((id, i) => `${name(names[i] ?? "")} [${id}]`) }],
         warn: "If you do not recognise every key, do not approve: it may be someone else's access.",
-        expect: "Face ID unlocks the vault for a moment. It checks each key is still in the account and still unexpected, then adds them to what the nightly check expects. If anything changed since this page was made, nothing is accepted and you will see why.",
+        expect: "Face ID unlocks the vault for a moment. It checks each key is still in the account, still unexpected, still exactly what Cloudflare showed when this page was made, and still read-only. Then it keeps them. If anything changed, nothing is accepted and you will see why.",
+        exact: ids.map((id, i) => `${id}: ${scopes[i] ?? ""}`).join("\n"),
       };
     },
     done: (r) => withLeftover(r, (r) =>

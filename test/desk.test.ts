@@ -410,3 +410,18 @@ test("headcount words: a recorded short key 'is deleted at your next tap'; a loo
   assert.match(words, /did not make[^\n]*will not delete it[^\n]*delete it in the Cloudflare dashboard \["b{32}"\]/);
   assert.doesNotMatch(words.split("\n").find((l) => l.includes("b".repeat(32)))!, /next Cloudflare tap/);
 });
+
+test("headcount words: a widened kept key, a headcount key with more power, and one needing the setup tap each read plainly (Build R)", () => {
+  const words = headcountWords({
+    ...clean, ok: false,
+    widened: [
+      { id: "a".repeat(32), why: "scope_changed_since_approved" },
+      { id: "b".repeat(32), why: "headcount_key_not_list_only" },
+      { id: "c".repeat(32), why: "headcount_key_needs_setup" },
+    ],
+  });
+  assert.match(words, /a key you kept can now do more than you approved[^\n]*\["a{32}"\]/);
+  assert.match(words, /nightly check's own key can now do more than list keys[^\n]*\["b{32}"\]/);
+  assert.match(words, /made before its permission was recorded[^\n]*setup tap[^\n]*\["c{32}"\]/);
+  assert.match(words, /Cloudflare: 3 key changes you did not approve/);
+});

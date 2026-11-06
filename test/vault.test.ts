@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { MemoryStore } from "../src/desk.ts";
 import { MASTER_LABEL, RECOVERY_LABEL, open, seal, b64url, fromB64url } from "../vault/src/seal.ts";
-import { PENDING_MS, PROBE_TOKEN_MS, VaultLogic, type CfAcceptResult, type Headcount, type HeadcountSetupResult, type ProbeResult, type ReadResult, HELPER_PREFIX, RESULT_MAX_BYTES } from "../vault/src/vault.ts";
+import { PENDING_MS, PROBE_TOKEN_MS, TOKENS_READ, VaultLogic, type CfAcceptResult, type Headcount, type HeadcountSetupResult, type ProbeResult, type ReadResult, HELPER_PREFIX, RESULT_MAX_BYTES } from "../vault/src/vault.ts";
 import { handleSetup } from "../vault/src/setup.ts";
 
 const ACCOUNT = "a".repeat(32);
@@ -14,12 +14,14 @@ const NOW = Date.UTC(2026, 9, 26, 23, 0, 0);
 const prf = (fill: number) => b64url(new Uint8Array(32).fill(fill));
 type Fail = "accounts2" | "accounts0" | "inactive" | "existing" | "add" | "verifyRead" | "recordDelete" | "tokenDelete" | "list" | "newToken" | "staysListed" | "offboxAllowed" | "offboxBroken" | "offboxOther403" | "hcCanMint" | "hcMint500" | "hcNoGroup" | "hcOldStays" | "lostMint";
 
+const GROUP_NAMES: Record<string, string> = { "dns-w": "DNS Write", "zone-r": "Zone Read", "dns-r": "DNS Read", "acct-set-r": "Account Settings Read", "acct-dns": "DNS Write", "tok-r": "Account API Tokens Read", "tok-r-zone": "API Tokens Read" };
+
 // A fake Cloudflare API: answers the calls the vault makes and records each with the token used.
 // `fail` makes one step go wrong, to show what the vault does then.
 function fakeCloudflare(fail?: Fail, baseline = 3) {
   const calls: { method: string; path: string; token: string; body?: any }[] = [];
   let records: { id: string }[] = fail === "existing" ? [{ id: "old" }] : [];
-  const tokens: { id: string; name?: string; expires_on?: string }[] = Array.from({ length: baseline }, (_, i) => ({ id: `t${i}` }));
+  const tokens: { id: string; name?: string; expires_on?: string; policies?: any[] }[] = Array.from({ length: baseline }, (_, i) => ({ id: `t${i}` }));
   const listOnly = new Set<string>(); // minted values that hold only the API Tokens Read group
   const hcOld: { stuck?: string } = {}; // a headcount key whose delete fails (hcOldStays)
   const live = new Map<string, string>(); // minted value -> id
@@ -52,7 +54,8 @@ function fakeCloudflare(fail?: Fail, baseline = 3) {
       if (listOnly.has(token) && fail === "hcMint500") return bad(500, "internal error");
       if (listOnly.has(token) && fail !== "hcCanMint") return bad(403, "Unauthorized to access requested resource");
       const id = `minted${++n}`;
-      tokens.push({ id, name: body?.name, expires_on: body?.expires_on });
+      const named = (body.policies as any[]).map((p) => ({ ...p, permission_groups: p.permission_groups.map((g: { id: string }) => ({ id: g.id, name: GROUP_NAMES[g.id] })) }));
+      tokens.push({ id, name: body?.name, expires_on: body?.expires_on, policies: named });
       // The token exists, but the answer never reaches the vault (lost on the way back).
       if (fail === "lostMint" && n === 1) return bad(502, "bad gateway");
       if (body?.policies?.[0]?.permission_groups?.every((g: { id: string }) => g.id === "tok-r")) listOnly.add(`V${n}`.padEnd(40, "v"));
@@ -370,7 +373,7 @@ test("short keys: an intent never made is dropped only after its asked expiry; a
   const night = await vault.headcount();
   assert.equal(night.ok, false);
   assert.deepEqual(night.cleanup.map((k) => [k.id, k.recorded]), [["f".repeat(32), false]], "not recorded: the vault will not delete it");
-  assert.match((await accept(vault, "f".repeat(32))).error ?? "", /helper_key_not_acceptable/);
+  assert.match((await accept(vault, "f".repeat(32), 7, "x")).error ?? "", /helper_key_not_acceptable/);
 });
 
 test("short keys: cf.token.accept refuses a recorded short key by its id, even under another name", async () => {
@@ -381,7 +384,7 @@ test("short keys: cf.token.accept refuses a recorded short key by its id, even u
   await store.put("helpers", [{ name: `${HELPER_PREFIX}x`, until: new Date(NOW + 60_000).toISOString(), id }]);
   const stuck = new VaultLogic(store, async (input: string, init?: RequestInit) =>
     init?.method === "DELETE" ? Response.json({ success: false, errors: [{ message: "delete broke" }] }, { status: 500 }) : cf.fetchFn(input, init), () => NOW);
-  const r = (await stuck.run("cf.token.accept", { ids: id }, prf(7))) as CfAcceptResult;
+  const r = (await stuck.run("cf.token.accept", { ids: id, scopes: "x" }, prf(7))) as CfAcceptResult;
   assert.equal(r.ok, false);
   assert.match(r.error ?? "", /helper_key_not_acceptable/);
   assert.ok(!(await store.get<any>("master")).baseline.includes(id));
@@ -551,7 +554,7 @@ test("headcount: a clean account counts ok, using only the list-only key", async
   cf.calls.length = 0;
   const r = await vault.headcount();
   // Cloudflare is clean; GitHub is not set up in these tests, so the night as a whole fails closed.
-  assert.deepEqual(r, { ok: false, tokens: 4, unexpected: [], stretched: [], missing: [], cleanup: [], github: { ok: false, changes: [], error: "github_not_set_up" } });
+  assert.deepEqual(r, { ok: false, tokens: 4, unexpected: [], stretched: [], missing: [], cleanup: [], widened: [], github: { ok: false, changes: [], error: "github_not_set_up" } });
   assert.ok(cf.calls.every((c) => cf.listOnly.has(c.token) && c.method === "GET"), "reads only, never with the master");
 });
 
@@ -624,20 +627,30 @@ test("headcount setup again: an old key that will not delete makes the result no
   assert.ok(cfClean(await vault.headcount()));
 });
 
-// Job cf.token.accept: Ben tells the nightly count a flagged key is ours.
+// Job cf.token.accept: Ben keeps a flagged key he made himself, as a standing exception.
 const OURS = "0".repeat(31) + "1";
-const accept = (vault: VaultLogic, ids: string, fill = 7) => vault.run("cf.token.accept", { ids }, prf(fill)) as Promise<CfAcceptResult>;
+// A key as Cloudflare lists it: read-only on this account's zones unless told otherwise.
+const policy = (group = "Zone Read", resources: Record<string, unknown> = { [`com.cloudflare.api.account.${ACCOUNT}`]: { "com.cloudflare.api.account.zone.*": "*" } }) => [
+  { effect: "allow", resources, permission_groups: [{ id: "g", name: group }] },
+];
+// Ben's tap carries the scopes his screen showed (the desk copies them from cfPreview at /request).
+const accept = async (vault: VaultLogic, ids: string, fill = 7, scopes?: string) =>
+  vault.run("cf.token.accept", { ids, scopes: scopes ?? (await vault.cfPreview().catch(() => [])).map((k) => k.scope).join("\n") }, prf(fill)) as Promise<CfAcceptResult>;
+const SCOPE = `allow Zone Read [g] on {"com.cloudflare.api.account.${ACCOUNT}":{"com.cloudflare.api.account.zone.*":"*"}}; no address limit; expires never`;
 
-test("cf.token.accept: the preview names the flagged key; after Ben's tap the count and the jobs' audit expect it", async () => {
-  const { vault, cf } = await stored();
+test("cf.token.accept: the preview names the flagged key and its real scope; after Ben's tap it is a standing exception the count and audit expect", async () => {
+  const { vault, cf, store } = await stored();
   await hcSetup(vault);
-  cf.tokens.push({ id: OURS, name: "observatory-backup-read" });
-  assert.deepEqual(await vault.cfPreview(), [{ id: OURS, name: "observatory-backup-read" }]);
+  cf.tokens.push({ id: OURS, name: "observatory-backup-read", policies: policy() });
+  assert.deepEqual(await vault.cfPreview(), [{ id: OURS, name: "observatory-backup-read", scope: SCOPE, over: null }]);
   assert.equal((await vault.headcount()).unexpected.length, 1);
   cf.calls.length = 0;
   const r = await accept(vault, OURS);
   assert.deepEqual(r, { ok: true, accepted: [OURS], leftover: [], master: r.master });
   assert.ok(cf.calls.every((c) => c.method === "GET"), "changes nothing in Cloudflare");
+  const m = await store.get<any>("master");
+  assert.deepEqual(m.exceptions.map((e: any) => [e.id, e.scope]), [[OURS, SCOPE]]);
+  assert.ok(!m.baseline.includes(OURS), "an exception, not part of the setup baseline");
   assert.ok(cfClean(await vault.headcount()));
   assert.deepEqual(await vault.cfPreview(), []);
   const p = await probe(vault);
@@ -647,24 +660,159 @@ test("cf.token.accept: the preview names the flagged key; after Ben's tap the co
 test("cf.token.accept: nothing is accepted for a key that is gone, already expected, or not on Ben's screen", async () => {
   const { vault, cf, store } = await stored();
   await hcSetup(vault);
-  const before = (await store.get<any>("master")).baseline;
-  const gone = await accept(vault, OURS);
+  const gone = await accept(vault, OURS, 7, SCOPE);
   assert.equal(gone.ok, false);
   assert.match(gone.error ?? "", /keys_changed_since_request/);
-  cf.tokens.push({ id: OURS, name: "x" });
+  cf.tokens.push({ id: OURS, name: "x", policies: policy() });
   await assert.rejects(accept(vault, `${OURS},not-an-id`), /bad_params/);
   await assert.rejects(accept(vault, ""), /bad_params/);
-  assert.deepEqual((await store.get<any>("master")).baseline, before, "nothing added by a refused tap");
+  await assert.rejects(vault.run("cf.token.accept", { ids: OURS }, prf(7)), /bad_params/, "no scope from Ben's screen, no accept");
+  assert.equal((await store.get<any>("master")).exceptions, undefined, "nothing added by a refused tap");
   assert.equal((await accept(vault, OURS)).ok, true);
-  const again = await accept(vault, OURS);
+  const again = await accept(vault, OURS, 7, SCOPE);
   assert.match(again.error ?? "", /keys_changed_since_request/, "an already expected key is not on any new screen");
-  assert.equal((await store.get<any>("master")).baseline.filter((id: string) => id === OURS).length, 1);
+  assert.equal((await store.get<any>("master")).exceptions.length, 1);
+});
+
+test("cf.token.accept: refused over the ceiling -- write, anything touching keys, another account, or a scope it cannot read", async () => {
+  const cases: [string, any[] | undefined, RegExp][] = [
+    ["write", policy("DNS Write"), /over_ceiling: .*not_read_only: DNS Write/],
+    ["edit", policy("Access: Apps and Policies Edit"), /not_read_only/],
+    ["keys", policy("Account API Tokens Read"), /touches_keys/],
+    ["other account", policy("Zone Read", { [`com.cloudflare.api.account.${"c".repeat(32)}`]: "*" }), /outside_account/],
+    ["user scope", policy("Zone Read", { "com.cloudflare.api.user.u1": "*" }), /outside_account/],
+    ["unreadable", undefined, /scope_unreadable/],
+  ];
+  for (const [label, pol, why] of cases) {
+    const { vault, cf, store } = await stored();
+    await hcSetup(vault);
+    cf.tokens.push({ id: OURS, name: label, policies: pol });
+    const [seen] = await vault.cfPreview();
+    assert.match(seen.over ?? "", new RegExp(why.source.replace("over_ceiling: .*", "")), `${label}: preview flags it`);
+    const r = await accept(vault, OURS);
+    assert.equal(r.ok, false, label);
+    assert.match(r.error ?? "", why, label);
+    assert.equal((await store.get<any>("master")).exceptions, undefined, `${label}: nothing kept`);
+  }
+});
+
+test("cf.token.accept: refused when the key's scope changed after Ben's screen was made (wider than his approval)", async () => {
+  const { vault, cf, store } = await stored();
+  await hcSetup(vault);
+  const key = { id: OURS, name: "x", policies: policy() };
+  cf.tokens.push(key);
+  const shown = (await vault.cfPreview())[0].scope;
+  key.policies = [...policy(), ...policy("DNS Read")]; // still under the ceiling, but more than Ben saw
+  const r = await accept(vault, OURS, 7, shown);
+  assert.match(r.error ?? "", /scope_changed_since_request/);
+  assert.equal((await store.get<any>("master")).exceptions, undefined);
 });
 
 test("cf.token.accept: needs Ben's passkey secret; a wrong one changes nothing", async () => {
   const { vault, cf, store } = await stored();
   await hcSetup(vault);
-  cf.tokens.push({ id: OURS, name: "x" });
+  cf.tokens.push({ id: OURS, name: "x", policies: policy() });
   await assert.rejects(accept(vault, OURS, 9));
-  assert.ok(!(await store.get<any>("master")).baseline.includes(OURS));
+  assert.equal((await store.get<any>("master")).exceptions, undefined);
+});
+
+test("headcount: a kept exception that later widens, or the headcount key gaining power, alarms", async () => {
+  const { vault, cf, store } = await stored();
+  await hcSetup(vault);
+  const key = { id: OURS, name: "x", policies: policy() };
+  cf.tokens.push(key);
+  assert.equal((await accept(vault, OURS)).ok, true);
+  // GitHub stands in as clean, so the night's verdict turns on Cloudflare alone.
+  (vault as any).ghHeadcount = async () => ({ ok: true, changes: [] });
+  assert.equal((await vault.headcount()).ok, true, "clean with the exception as approved");
+  key.policies = [...policy(), ...policy("DNS Read")];
+  let night = await vault.headcount();
+  assert.equal(night.ok, false, "a widened key fails the night");
+  assert.deepEqual(night.widened, [{ id: OURS, why: "scope_changed_since_approved" }]);
+  // Exception record says it was approved wider than the ceiling (only reachable by a stored-state edit): still alarms.
+  const m = await store.get<any>("master");
+  m.exceptions[0].scope = `allow DNS Write [g] on {"com.cloudflare.api.account.${ACCOUNT}":"*"}; no address limit; expires never`;
+  await store.put("master", m);
+  key.policies = policy("DNS Write", { [`com.cloudflare.api.account.${ACCOUNT}`]: "*" });
+  night = await vault.headcount();
+  assert.deepEqual(night.widened, [{ id: OURS, why: "not_read_only: DNS Write" }]);
+  // The headcount key itself.
+  const hcId = (await store.get<any>("headcount")).token_id;
+  key.policies = policy();
+  m.exceptions[0].scope = SCOPE;
+  await store.put("master", m);
+  const hc = cf.tokens.find((t) => t.id === hcId)!;
+  hc.policies = [...hc.policies!, ...policy("DNS Read")];
+  night = await vault.headcount();
+  assert.deepEqual(night.widened, [{ id: hcId, why: "headcount_key_not_list_only" }]);
+  hc.policies = undefined;
+  assert.deepEqual((await vault.headcount()).widened, [{ id: hcId, why: "headcount_key_not_list_only" }], "an unreadable scope never passes");
+});
+
+test("TOKENS_READ: only Cloudflare's exact account-level list-keys group passes (Codex Build R r1 #1)", () => {
+  assert.ok(TOKENS_READ.test("Account API Tokens Read"));
+  for (const other of ["API Tokens Read", "Account API Tokens Write", "Account API Tokens Read ", "x Account API Tokens Read"]) assert.ok(!TOKENS_READ.test(other), other);
+});
+
+test("scope identity (Codex Build R r1b #1-#3): a same-name group with another id, an unknown effect, or a lifted address or time limit counts as a change", async () => {
+  // Before the tap: what Ben saw no longer matches.
+  {
+    const { vault, cf, store } = await stored();
+    await hcSetup(vault);
+    const key: any = { id: OURS, name: "x", policies: policy() };
+    cf.tokens.push(key);
+    const shown = (await vault.cfPreview())[0].scope;
+    key.policies = [{ ...policy()[0], permission_groups: [{ id: "zone-level-logs", name: "Zone Read" }] }];
+    assert.match((await accept(vault, OURS, 7, shown)).error ?? "", /scope_changed_since_request/, "same name, other id");
+    assert.equal((await store.get<any>("master")).exceptions, undefined);
+  }
+  // After the tap: the nightly count alarms on each kind of change.
+  const changes: [string, (k: any) => void][] = [
+    ["same name, other id", (k) => (k.policies = [{ ...policy()[0], permission_groups: [{ id: "other", name: "Zone Read" }] }])],
+    ["address limit lifted", (k) => delete k.condition],
+    ["expiry pushed later", (k) => (k.expires_on = "2099-01-01T00:00:00Z")],
+    ["not-before changed", (k) => (k.not_before = "2026-01-01T00:00:00Z")],
+  ];
+  for (const [label, change] of changes) {
+    const { vault, cf } = await stored();
+    await hcSetup(vault);
+    const key: any = { id: OURS, name: "x", policies: policy(), condition: { request_ip: { in: ["198.51.100.7/32"] } }, expires_on: "2027-01-01T00:00:00Z" };
+    cf.tokens.push(key);
+    const [seen] = await vault.cfPreview();
+    assert.match(seen.scope, /condition .*198\.51\.100\.7\/32.*expires 2027-01-01/, `${label}: the screen shows the key's limits`);
+    assert.equal((await accept(vault, OURS)).ok, true, label);
+    assert.deepEqual((await vault.headcount()).widened, [], `${label}: clean as approved`);
+    change(key);
+    assert.deepEqual((await vault.headcount()).widened, [{ id: OURS, why: "scope_changed_since_approved" }], label);
+  }
+});
+
+test("scope readability (Codex Build R r1b #2): a missing or unknown effect is unreadable -- refused at the tap and alarmed at night", async () => {
+  for (const effect of [undefined, "", "permit"]) {
+    const { vault, cf, store } = await stored();
+    await hcSetup(vault);
+    cf.tokens.push({ id: OURS, name: "x", policies: [{ ...policy()[0], effect }] });
+    assert.match((await accept(vault, OURS, 7, "x")).error ?? "", /over_ceiling: .*scope_unreadable/, String(effect));
+    assert.equal((await store.get<any>("master")).exceptions, undefined);
+    const hcId = (await store.get<any>("headcount")).token_id;
+    const hc = cf.tokens.find((t) => t.id === hcId)!;
+    hc.policies = [{ ...hc.policies![0], effect }];
+    assert.deepEqual((await vault.headcount()).widened, [{ id: hcId, why: "headcount_key_not_list_only" }], `headcount key, effect ${String(effect)}`);
+  }
+});
+
+test("headcount key identity (Codex Build R r2 #1): setup records its group id; a same-name group with another id alarms; a key made before Build R asks for the setup tap", async () => {
+  const { vault, cf, store } = await stored();
+  await hcSetup(vault);
+  const kept = await store.get<any>("headcount");
+  assert.equal(kept.group_id, "tok-r", "the id from Cloudflare's own group list");
+  assert.deepEqual((await vault.headcount()).widened, []);
+  const hc = cf.tokens.find((t) => t.id === kept.token_id)!;
+  hc.policies = [{ ...hc.policies![0], permission_groups: [{ id: "look-alike", name: "Account API Tokens Read" }] }];
+  assert.deepEqual((await vault.headcount()).widened, [{ id: kept.token_id, why: "headcount_key_not_list_only" }], "same name, other id");
+  hc.policies = [{ ...hc.policies![0], permission_groups: [{ id: "tok-r", name: "Account API Tokens Read" }] }];
+  await store.put("headcount", { ...kept, group_id: undefined });
+  assert.deepEqual((await vault.headcount()).widened, [{ id: kept.token_id, why: "headcount_key_needs_setup" }], "made before Build R");
+  assert.equal((await hcSetup(vault)).ok, true);
+  assert.deepEqual((await vault.headcount()).widened, [], "the setup tap records the id and the night is clean again");
 });
