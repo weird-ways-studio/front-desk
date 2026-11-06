@@ -636,7 +636,7 @@ const policy = (group = "Zone Read", resources: Record<string, unknown> = { [`co
 // Ben's tap carries the scopes his screen showed (the desk copies them from cfPreview at /request).
 const accept = async (vault: VaultLogic, ids: string, fill = 7, scopes?: string) =>
   vault.run("cf.token.accept", { ids, scopes: scopes ?? (await vault.cfPreview().catch(() => [])).map((k) => k.scope).join("\n") }, prf(fill)) as Promise<CfAcceptResult>;
-const SCOPE = `allow Zone Read on {"com.cloudflare.api.account.${ACCOUNT}":{"com.cloudflare.api.account.zone.*":"*"}}`;
+const SCOPE = `allow Zone Read [g] on {"com.cloudflare.api.account.${ACCOUNT}":{"com.cloudflare.api.account.zone.*":"*"}}; no address limit; expires never`;
 
 test("cf.token.accept: the preview names the flagged key and its real scope; after Ben's tap it is a standing exception the count and audit expect", async () => {
   const { vault, cf, store } = await stored();
@@ -731,7 +731,7 @@ test("headcount: a kept exception that later widens, or the headcount key gainin
   assert.deepEqual(night.widened, [{ id: OURS, why: "scope_changed_since_approved" }]);
   // Exception record says it was approved wider than the ceiling (only reachable by a stored-state edit): still alarms.
   const m = await store.get<any>("master");
-  m.exceptions[0].scope = `allow DNS Write on {"com.cloudflare.api.account.${ACCOUNT}":"*"}`;
+  m.exceptions[0].scope = `allow DNS Write [g] on {"com.cloudflare.api.account.${ACCOUNT}":"*"}; no address limit; expires never`;
   await store.put("master", m);
   key.policies = policy("DNS Write", { [`com.cloudflare.api.account.${ACCOUNT}`]: "*" });
   night = await vault.headcount();
@@ -752,4 +752,51 @@ test("headcount: a kept exception that later widens, or the headcount key gainin
 test("TOKENS_READ: only Cloudflare's exact account-level list-keys group passes (Codex Build R r1 #1)", () => {
   assert.ok(TOKENS_READ.test("Account API Tokens Read"));
   for (const other of ["API Tokens Read", "Account API Tokens Write", "Account API Tokens Read ", "x Account API Tokens Read"]) assert.ok(!TOKENS_READ.test(other), other);
+});
+
+test("scope identity (Codex Build R r1b #1-#3): a same-name group with another id, an unknown effect, or a lifted address or time limit counts as a change", async () => {
+  // Before the tap: what Ben saw no longer matches.
+  {
+    const { vault, cf, store } = await stored();
+    await hcSetup(vault);
+    const key: any = { id: OURS, name: "x", policies: policy() };
+    cf.tokens.push(key);
+    const shown = (await vault.cfPreview())[0].scope;
+    key.policies = [{ ...policy()[0], permission_groups: [{ id: "zone-level-logs", name: "Zone Read" }] }];
+    assert.match((await accept(vault, OURS, 7, shown)).error ?? "", /scope_changed_since_request/, "same name, other id");
+    assert.equal((await store.get<any>("master")).exceptions, undefined);
+  }
+  // After the tap: the nightly count alarms on each kind of change.
+  const changes: [string, (k: any) => void][] = [
+    ["same name, other id", (k) => (k.policies = [{ ...policy()[0], permission_groups: [{ id: "other", name: "Zone Read" }] }])],
+    ["address limit lifted", (k) => delete k.condition],
+    ["expiry pushed later", (k) => (k.expires_on = "2099-01-01T00:00:00Z")],
+    ["not-before changed", (k) => (k.not_before = "2026-01-01T00:00:00Z")],
+  ];
+  for (const [label, change] of changes) {
+    const { vault, cf } = await stored();
+    await hcSetup(vault);
+    const key: any = { id: OURS, name: "x", policies: policy(), condition: { request_ip: { in: ["198.51.100.7/32"] } }, expires_on: "2027-01-01T00:00:00Z" };
+    cf.tokens.push(key);
+    const [seen] = await vault.cfPreview();
+    assert.match(seen.scope, /condition .*198\.51\.100\.7\/32.*expires 2027-01-01/, `${label}: the screen shows the key's limits`);
+    assert.equal((await accept(vault, OURS)).ok, true, label);
+    assert.deepEqual((await vault.headcount()).widened, [], `${label}: clean as approved`);
+    change(key);
+    assert.deepEqual((await vault.headcount()).widened, [{ id: OURS, why: "scope_changed_since_approved" }], label);
+  }
+});
+
+test("scope readability (Codex Build R r1b #2): a missing or unknown effect is unreadable -- refused at the tap and alarmed at night", async () => {
+  for (const effect of [undefined, "", "permit"]) {
+    const { vault, cf, store } = await stored();
+    await hcSetup(vault);
+    cf.tokens.push({ id: OURS, name: "x", policies: [{ ...policy()[0], effect }] });
+    assert.match((await accept(vault, OURS, 7, "x")).error ?? "", /over_ceiling: .*scope_unreadable/, String(effect));
+    assert.equal((await store.get<any>("master")).exceptions, undefined);
+    const hcId = (await store.get<any>("headcount")).token_id;
+    const hc = cf.tokens.find((t) => t.id === hcId)!;
+    hc.policies = [{ ...hc.policies![0], effect }];
+    assert.deepEqual((await vault.headcount()).widened, [{ id: hcId, why: "headcount_key_not_list_only" }], `headcount key, effect ${String(effect)}`);
+  }
 });

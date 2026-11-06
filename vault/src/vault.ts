@@ -912,7 +912,7 @@ function note(r: { error?: string }, message: string): void {
 export const TOKENS_READ = /^Account API Tokens Read$/;
 
 type Policy = { effect?: string; resources?: Record<string, unknown>; permission_groups?: { id?: string; name?: string }[] };
-type Listed = { id: string; name?: string; expires_on?: string; policies?: Policy[] };
+type Listed = { id: string; name?: string; expires_on?: string; not_before?: string; condition?: unknown; policies?: Policy[] };
 
 export interface CfPreviewKey {
   id: string;
@@ -927,16 +927,29 @@ function stable(v: unknown): string {
   return `{${Object.keys(v as object).sort().map((k) => `${JSON.stringify(k)}:${stable((v as Record<string, unknown>)[k])}`).join(",")}}`;
 }
 
-/** A key's real scope as Cloudflare lists it, in one fixed form. Null when it cannot be read: unreadable never passes. */
+/**
+ * A key's real scope as Cloudflare lists it, in one fixed form: each policy's effect, its groups by name AND id
+ * (names are cosmetic and repeat across levels; Codex Build R r1b #1), its resources, and the key's own limits
+ * (address condition, not-before, expiry; r1b #3), so any change to what the key can do, from where or until when,
+ * changes the string. Null when anything cannot be read, including an effect other than allow/deny (r1b #2):
+ * unreadable never passes.
+ */
 export function scopeWords(t: Listed): string | null {
   if (!Array.isArray(t.policies) || !t.policies.length) return null;
   const lines: string[] = [];
   for (const p of t.policies) {
     const groups = p.permission_groups ?? [];
-    if (!groups.length || groups.some((g) => typeof g.name !== "string" || !g.name) || !p.resources || typeof p.resources !== "object") return null;
-    lines.push(`${p.effect === "deny" ? "deny" : "allow"} ${groups.map((g) => g.name).sort().join(" + ")} on ${stable(p.resources)}`);
+    if (p.effect !== "allow" && p.effect !== "deny") return null;
+    if (!groups.length || groups.some((g) => typeof g.name !== "string" || !g.name || typeof g.id !== "string" || !g.id)) return null;
+    if (!p.resources || typeof p.resources !== "object") return null;
+    lines.push(`${p.effect} ${groups.map((g) => `${g.name} [${g.id}]`).sort().join(" + ")} on ${stable(p.resources)}`);
   }
-  return lines.sort().join("; ");
+  const limits = [
+    t.condition !== undefined && t.condition !== null ? `condition ${stable(t.condition)}` : "no address limit",
+    t.not_before ? `not before ${t.not_before}` : "",
+    `expires ${t.expires_on || "never"}`,
+  ].filter(Boolean);
+  return [...lines.sort(), ...limits].join("; ");
 }
 
 /**
@@ -976,16 +989,17 @@ function widened(m: Master, listed: Listed[], hcId: string): { id: string; why: 
     }
   }
   const hc = listed.find((x) => x.id === hcId);
-  if (hc && scopeWords(hc) !== `allow ${listOnlyGroup(hc) ?? "?"} on ${stable({ [`com.cloudflare.api.account.${m.account_id}`]: "*" })}`) {
-    out.push({ id: hcId, why: "headcount_key_not_list_only" });
-  }
+  if (hc && !listOnly(hc, m.account_id)) out.push({ id: hcId, why: "headcount_key_not_list_only" });
   return out;
 }
 
-// The headcount key's one group name, if it is the API Tokens Read group (TOKENS_READ).
-function listOnlyGroup(t: Listed): string | undefined {
-  const g = t.policies?.[0]?.permission_groups?.[0]?.name;
-  return g && TOKENS_READ.test(g) ? g : undefined;
+// The headcount key as it was made: readable, one allow policy, one group (TOKENS_READ), the whole account and
+// nothing else. Any other shape, or one that cannot be read, fails.
+function listOnly(t: Listed, account: string): boolean {
+  if (scopeWords(t) === null || t.policies!.length !== 1) return false;
+  const [p] = t.policies!;
+  return p.effect === "allow" && p.permission_groups!.length === 1 && TOKENS_READ.test(p.permission_groups![0].name!) &&
+    stable(p.resources) === stable({ [`com.cloudflare.api.account.${account}`]: "*" });
 }
 
 // Every token in the account, all pages.
