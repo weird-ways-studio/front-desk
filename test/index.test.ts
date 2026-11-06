@@ -257,7 +257,7 @@ function fakeVault(stored = false) {
       return { changes: ["members +someone"], snapshot: "s".repeat(64), base: "b".repeat(64) };
     },
     async cfPreview() {
-      return [{ id: "c".repeat(32), name: "observatory-backup-read" }];
+      return [{ id: "c".repeat(32), name: "observatory-backup-read", scope: "allow Zone Read on {}", over: null as string | null }];
     },
   };
 }
@@ -699,10 +699,21 @@ test("cf.token.accept: the front desk adds the vault's unexpected keys; Ben's sc
   const res = await agentPost(store, vault, "/request", { job: "cf.token.accept", params: {}, reason: "accept the Observatory key" });
   assert.equal(res.status, 201);
   const { id } = (await res.json()) as { id: string };
-  assert.deepEqual((await store.get<any>(`grant:${id}`)).params, { ids: "c".repeat(32), names: "observatory-backup-read" });
-  assert.match(await (await callV(store, vault, `/approve/${id}`)).text(), /observatory-backup-read/);
+  assert.deepEqual((await store.get<any>(`grant:${id}`)).params, { ids: "c".repeat(32), names: "observatory-backup-read", scopes: "allow Zone Read on {}" });
+  const page = await (await callV(store, vault, `/approve/${id}`)).text();
+  assert.match(page, /observatory-backup-read/);
+  assert.match(page, /not made by the front desk/i, "Ben's screen says the key is not the front desk's");
+  assert.match(page, /allow Zone Read on/, "and shows its real scope");
   const forged = await agentPost(store, vault, "/request", { job: "cf.token.accept", params: { ids: "d".repeat(32) }, reason: "x" });
   assert.equal(forged.status, 400, "the agent cannot choose the keys");
+});
+
+test("cf.token.accept: a key over the ceiling is never put in front of Ben's tap", async () => {
+  const { store } = await enrolled();
+  const over = { ...fakeVault(true), cfPreview: async () => [{ id: "c".repeat(32), name: "wide", scope: "allow DNS Write on {}", over: "not_read_only: DNS Write" as string | null }] };
+  const res = await agentPost(store, over, "/request", { job: "cf.token.accept", params: {}, reason: "x" });
+  assert.equal(res.status, 409);
+  assert.match(await res.text(), /over_ceiling: c{32}: not_read_only: DNS Write/);
 });
 
 test("cf.token.accept: refused when nothing is unexpected, or the vault cannot list keys", async () => {
