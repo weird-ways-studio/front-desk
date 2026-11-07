@@ -22,7 +22,6 @@ export const AUDIT_MAX_DAYS = 7;
 // 128 KiB per value (FROM MEMORY; the grant also carries other fields), so the answer is cut to this many
 // bytes of JSON, whole rows at a time, and marked `truncated` (Codex 4a-1 r1 #5).
 export const RESULT_MAX_BYTES = 64_000;
-export const PROBE_RECORD = "_front-desk-probe";
 // Setup waits this long for Ben's first Face ID tap to lock the key to his passkey.
 export const PENDING_MS = 30 * 60_000;
 const PENDING_LABEL = "front-desk pending-key v1";
@@ -151,22 +150,6 @@ export interface Headcount {
   error?: string;
 }
 
-export interface ProbeResult {
-  leftover?: string[]; // earlier short keys this tap's sweep could not confirm deleted (R10)
-  ok: boolean; // true only when every step below checked out
-  master: { token_id: string; locked_to_passkey_now: boolean };
-  zone: string;
-  record: string;
-  before: number;
-  added: boolean;
-  seen_after_add: boolean;
-  removed: boolean;
-  after: number;
-  minted: { id: string; deleted: boolean }[];
-  audit: { tokens: number; minted_still_listed: string[]; new_since_setup: string[]; error?: string };
-  error?: string;
-}
-
 // A read job's answer. Only `data` is the reading; the rest is what the vault did to get it.
 export interface ReadResult {
   leftover?: string[]; // earlier short keys this tap's sweep could not confirm deleted (R10)
@@ -188,7 +171,7 @@ interface Helper {
   id?: string; // set once Cloudflare answered
 }
 
-type Evidence = { minted: { id: string; deleted: boolean }[]; error?: string; audit: ProbeResult["audit"] };
+type Evidence = { minted: { id: string; deleted: boolean }[]; error?: string; audit: ReadResult["audit"] };
 
 const hex = (bytes: Uint8Array) => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 const isoSeconds = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -269,9 +252,9 @@ export class VaultLogic {
   }
 
   /** Runs one job from the fixed list with the master key opened by Ben's passkey secret. */
-  async run(job: string, params: Record<string, string>, prf: string): Promise<ProbeResult | ReadResult | HeadcountSetupResult | GhBaselineResult | CfAcceptResult> {
+  async run(job: string, params: Record<string, string>, prf: string): Promise<ReadResult | HeadcountSetupResult | GhBaselineResult | CfAcceptResult> {
     const read = (READ_JOBS as readonly string[]).includes(job);
-    if (job !== "cf.dns.txt.probe" && !read && job !== "cf.token.headcount.setup" && job !== "gh.app.baseline" && job !== "cf.token.accept") throw new VaultError("job_not_offered");
+    if (!read && job !== "cf.token.headcount.setup" && job !== "gh.app.baseline" && job !== "cf.token.accept") throw new VaultError("job_not_offered");
     if (job === "cf.token.headcount.setup") return this.runHeadcountSetup(prf);
     if (job === "cf.token.accept") return this.acceptKeys(prf, params?.ids ?? "", params?.scopes ?? "");
     if (job === "gh.app.baseline") return this.ghBaseline(prf, params?.snapshot ?? "", params?.base ?? "");
@@ -286,7 +269,6 @@ export class VaultLogic {
     const facts = { token_id: m.token_id, locked_to_passkey_now: lockedNow };
     m.issued = await this.sweepIssued(master, m);
     const leftover = await this.sweepHelpers(master, m);
-    if (job === "cf.dns.txt.probe") return { ...(await this.probe(master, m, params.zone)), master: facts, leftover };
     return { ...(await this.read(master, m, job, params)), master: facts, leftover };
   }
 
@@ -707,44 +689,6 @@ export class VaultLogic {
     }
     await this.updateHelpers((now) => now.filter((h) => !done.includes(h.name)));
     return list.filter((h) => !done.includes(h.name)).map((h) => h.id ?? h.name);
-  }
-
-  // Finds the zone with a read-only key, then adds one TXT record with a key for that zone
-  // only, checks it, and removes it -- removal is tried even if a check failed. Then lists
-  // every token in the account and compares with the setup baseline (Ben's QB check).
-  private async probe(master: Cloudflare, m: Master, zoneName: string): Promise<Omit<ProbeResult, "master">> {
-    const account = m.account_id;
-    const r: Omit<ProbeResult, "master"> = {
-      ok: false, zone: zoneName, record: `${PROBE_RECORD}.${zoneName}`, before: -1, added: false, seen_after_add: false,
-      removed: false, after: -1, minted: [], audit: { tokens: -1, minted_still_listed: [], new_since_setup: [] },
-    };
-    try {
-      const group = await zoneGroups(master, account);
-      const zoneId = await this.findZone(master, account, r, group, zoneName);
-      const oneZone = { [`com.cloudflare.api.account.zone.${zoneId}`]: "*" };
-      await this.withKey(master, account, r, "cf.dns.txt.probe: write test record", { effect: "allow", resources: oneZone, permission_groups: [group("DNS Write"), group("Zone Read")] }, async (dns) => {
-        const find = () => dns.call<{ id: string }[]>("GET", `/zones/${zoneId}/dns_records?type=TXT&name=${encodeURIComponent(r.record)}`);
-        r.before = (await find()).length;
-        if (r.before !== 0) throw new VaultError("probe_record_exists");
-        const content = `"front desk probe ${hex(crypto.getRandomValues(new Uint8Array(8)))}"`;
-        const rec = await dns.call<{ id: string }>("POST", `/zones/${zoneId}/dns_records`, { type: "TXT", name: r.record, content, ttl: 60 });
-        r.added = true;
-        try {
-          r.seen_after_add = (await find()).some((x) => x.id === rec.id);
-        } finally {
-          await dns.call("DELETE", `/zones/${zoneId}/dns_records/${rec.id}`);
-          r.removed = true;
-          r.after = (await find()).length;
-        }
-      });
-    } catch (e) {
-      note(r, (e as Error).message);
-    }
-    await audit(master, m, r, [], await this.headcountId());
-    r.ok =
-      !r.error && !r.audit.error && r.before === 0 && r.added && r.seen_after_add && r.removed && r.after === 0 &&
-      r.minted.length === 2 && r.minted.every((t) => t.deleted) && r.audit.minted_still_listed.length === 0 && r.audit.new_since_setup.length === 0;
-    return r;
   }
 
   // Deletes handed-out keys past their expiry and returns the ones still live. A failed delete

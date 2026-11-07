@@ -107,7 +107,7 @@ const refusals: [string, Partial<OpRequest>, Partial<RunRecord>, boolean, string
   ["run has no key", {}, {}, false, "refused: no_run_key", "refused: run R1 has no key"],
   ["card not on list", { card: "card-z" }, {}, true, "refused: card_not_in_run", "refused: card card-z is not in run R1"],
   ["job not on frozen list", { job: "cf.dns.list" }, { jobs: ["cf.zone.read"] }, true, "refused: job_not_in_run", "refused: job cf.dns.list is not in run R1"],
-  ["job frozen but not run-eligible", { job: "cf.dns.txt.probe" }, { jobs: ["cf.dns.txt.probe"] }, true, "refused: job_not_in_run", "refused: job cf.dns.txt.probe is not in run R1"],
+  ["job frozen but not run-eligible", { job: "cf.token.accept" }, { jobs: ["cf.token.accept"] }, true, "refused: job_not_in_run", "refused: job cf.token.accept is not in run R1"],
   ["zone outside the run", { params: { zone: "other.com" } }, {}, true, "refused: params_outside_run (zone)", "refused: run R1: zone outside the run"],
   ["extra param", { params: { zone: "benculbert.com", account: "x" } }, {}, true, "refused: params_outside_run (account)", "refused: run R1: account outside the run"],
   ["audit window too long", { job: "cf.audit.read", params: { since: "2026-10-01T00:00:00Z", until: "2026-11-04T00:00:00Z" } }, {}, true, "refused: params_outside_run (since)", "refused: run R1: since outside the run"],

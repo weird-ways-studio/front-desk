@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { MemoryStore } from "../src/desk.ts";
 import { MASTER_LABEL, RECOVERY_LABEL, open, seal, b64url, fromB64url } from "../vault/src/seal.ts";
-import { PENDING_MS, PROBE_TOKEN_MS, TOKENS_READ, VaultLogic, type CfAcceptResult, type Headcount, type HeadcountSetupResult, type ProbeResult, type ReadResult, HELPER_PREFIX, RESULT_MAX_BYTES } from "../vault/src/vault.ts";
+import { PENDING_MS, PROBE_TOKEN_MS, TOKENS_READ, VaultLogic, type CfAcceptResult, type Headcount, type HeadcountSetupResult, type ReadResult, HELPER_PREFIX, RESULT_MAX_BYTES } from "../vault/src/vault.ts";
 import { handleSetup } from "../vault/src/setup.ts";
 
 const ACCOUNT = "a".repeat(32);
@@ -12,7 +12,7 @@ const ZONE = "benculbert.com";
 const PARENT = "P".repeat(40);
 const NOW = Date.UTC(2026, 9, 26, 23, 0, 0);
 const prf = (fill: number) => b64url(new Uint8Array(32).fill(fill));
-type Fail = "accounts2" | "accounts0" | "inactive" | "existing" | "add" | "verifyRead" | "recordDelete" | "tokenDelete" | "list" | "newToken" | "staysListed" | "offboxAllowed" | "offboxBroken" | "offboxOther403" | "hcCanMint" | "hcMint500" | "hcNoGroup" | "hcOldStays" | "lostMint";
+type Fail = "accounts2" | "accounts0" | "inactive" | "tokenDelete" | "list" | "newToken" | "offboxAllowed" | "offboxBroken" | "offboxOther403" | "hcCanMint" | "hcMint500" | "hcNoGroup" | "hcOldStays" | "lostMint";
 
 const GROUP_NAMES: Record<string, string> = { "dns-w": "DNS Write", "zone-r": "Zone Read", "dns-r": "DNS Read", "acct-set-r": "Account Settings Read", "acct-dns": "DNS Write", "tok-r": "Account API Tokens Read", "tok-r-zone": "API Tokens Read" };
 
@@ -20,14 +20,13 @@ const GROUP_NAMES: Record<string, string> = { "dns-w": "DNS Write", "zone-r": "Z
 // `fail` makes one step go wrong, to show what the vault does then.
 function fakeCloudflare(fail?: Fail, baseline = 3) {
   const calls: { method: string; path: string; token: string; body?: any }[] = [];
-  let records: { id: string }[] = fail === "existing" ? [{ id: "old" }] : [];
+  const records: { id: string }[] = [];
   const tokens: { id: string; name?: string; expires_on?: string; policies?: any[] }[] = Array.from({ length: baseline }, (_, i) => ({ id: `t${i}` }));
   const listOnly = new Set<string>(); // minted values that hold only the API Tokens Read group
   const hcOld: { stuck?: string } = {}; // a headcount key whose delete fails (hcOldStays)
   const live = new Map<string, string>(); // minted value -> id
   const pinned = new Map<string, string>(); // minted value -> the one address it works from
   let n = 0;
-  let finds = 0;
   const ok = (result: unknown) => Response.json({ success: true, result });
   const bad = (status: number, message: string) => Response.json({ success: false, errors: [{ message }] }, { status });
   const fetchFn = async (input: string, init?: RequestInit) => {
@@ -90,19 +89,7 @@ function fakeCloudflare(fail?: Fail, baseline = 3) {
       return ok([{ when: "2026-11-02T10:00:00Z", action: { type: "update", result: true }, actor: { email: "ben@example.com", ip: "198.51.100.1" }, resource: { type: "zone", id: ZONE_ID }, metadata: { big: "x" } }]);
     }
     if (method === "GET" && path.startsWith(`/zones/${ZONE_ID}/dns_records?`)) {
-      finds++;
-      if (fail === "verifyRead" && finds === 2) return bad(500, "read broke");
       return ok(records);
-    }
-    if (method === "POST" && path === `/zones/${ZONE_ID}/dns_records`) {
-      if (fail === "add") return bad(500, "nope");
-      records.push({ id: "rec1" });
-      return ok({ id: "rec1" });
-    }
-    if (method === "DELETE" && path === `/zones/${ZONE_ID}/dns_records/rec1`) {
-      if (fail === "recordDelete") return bad(500, "record delete broke");
-      if (fail !== "staysListed") records = records.filter((r) => r.id !== "rec1");
-      return ok({ id: "rec1" });
     }
     return bad(404, `unexpected ${method} ${path}`);
   };
@@ -118,7 +105,8 @@ async function stored(fail?: Fail, baseline = 3) {
   cf.calls.length = 0;
   return { store, vault, out, cf, clock };
 }
-const probe = (vault: VaultLogic) => vault.run("cf.dns.txt.probe", { zone: ZONE }, prf(7)) as Promise<ProbeResult>;
+// The generic vault job for unlock and audit tests: a read (cf.dns.txt.probe was cut, card c653a0fd).
+const probe = (vault: VaultLogic, secret = prf(7)) => vault.run("cf.zone.read", { zone: ZONE }, secret) as Promise<ReadResult>;
 
 test("seal: opens with the same secret and label only; an altered box never opens", async () => {
   const secret = fromB64url(prf(1));
@@ -154,13 +142,13 @@ test("first Face ID tap locks the key to the passkey and forgets the one-time ke
   assert.equal(await open(fromB64url(prf(7)), MASTER_LABEL, master.by_passkey), PARENT);
   assert.deepEqual(await vault.status(), { stored: true, pending: false, token_id: "t0" });
   assert.equal((await probe(vault)).master.locked_to_passkey_now, false);
-  await assert.rejects(vault.run("cf.dns.txt.probe", { zone: ZONE }, prf(8)), /wrong_secret/);
+  await assert.rejects(probe(vault, prf(8)), /wrong_secret/);
 });
 
 test("two first taps at once: only one locks the key, and the other cannot replace it", async () => {
   const { store, vault } = await stored();
-  const results = await Promise.allSettled([vault.run("cf.dns.txt.probe", { zone: ZONE }, prf(1)), vault.run("cf.dns.txt.probe", { zone: ZONE }, prf(2))]);
-  const won = results.filter((r) => r.status === "fulfilled" && (r.value as ProbeResult).master.locked_to_passkey_now);
+  const results = await Promise.allSettled([probe(vault, prf(1)), probe(vault, prf(2))]);
+  const won = results.filter((r) => r.status === "fulfilled" && (r.value as ReadResult).master.locked_to_passkey_now);
   const lost = results.filter((r) => r.status === "rejected" && /already_locked/.test(String(r.reason)));
   assert.equal(won.length, 1);
   assert.equal(lost.length, 1);
@@ -187,57 +175,44 @@ test("setup refuses: not a token, no single account, inactive token", async () =
   await assert.rejects(fresh("inactive").setup(PARENT), /token_not_active/);
 });
 
-test("probe: zone found with a read key, record added then removed with a one-zone key, both keys deleted, audit clean", async () => {
-  const { vault, cf } = await stored(undefined, 60);
-  const r = await probe(vault);
-  assert.equal(r.ok, true, JSON.stringify(r));
-  assert.deepEqual([r.before, r.added, r.seen_after_add, r.removed, r.after], [0, true, true, true, 0]);
-  assert.deepEqual(r.minted, [{ id: "minted1", deleted: true }, { id: "minted2", deleted: true }]);
-  assert.deepEqual(r.audit, { tokens: 60, minted_still_listed: [], new_since_setup: [] });
-  const mints = cf.calls.filter((c) => c.method === "POST" && c.path.endsWith("/tokens"));
-  for (const m of mints) {
-    assert.equal(m.token, PARENT);
-    assert.equal(Date.parse(m.body.expires_on), NOW + PROBE_TOKEN_MS);
-  }
-  assert.deepEqual(mints[0].body.policies[0].permission_groups, [{ id: "zone-r" }], "the finding key can only read");
-  assert.deepEqual(Object.keys(mints[1].body.policies[0].resources), [`com.cloudflare.api.account.zone.${ZONE_ID}`], "the editing key covers one zone");
-  // Zone and DNS calls use minted keys, never the master key.
-  for (const c of cf.calls.filter((c) => c.path.startsWith("/zones"))) assert.notEqual(c.token, PARENT);
-});
-
-test("probe refuses before any Cloudflare call: wrong passkey secret, unknown job, zone not on the list, no master key", async () => {
+test("vault refuses before any Cloudflare call: wrong passkey secret, unknown or cut job, zone not on the list, no master key", async () => {
   const { vault, cf } = await stored();
   await probe(vault); // locks the key to prf(7)
   cf.calls.length = 0;
-  await assert.rejects(vault.run("cf.dns.txt.probe", { zone: ZONE }, b64url(new Uint8Array(16))), /bad_secret/);
-  await assert.rejects(vault.run("cf.dns.txt.probe", { zone: ZONE }, prf(8)), /wrong_secret/);
+  await assert.rejects(probe(vault, b64url(new Uint8Array(16))), /bad_secret/);
+  await assert.rejects(probe(vault, prf(8)), /wrong_secret/);
   await assert.rejects(vault.run("cf.access.edit", { zone: ZONE }, prf(7)), /job_not_offered/);
-  await assert.rejects(vault.run("cf.dns.txt.probe", { zone: "example.com" }, prf(7)), /zone_not_offered/);
+  // Cut 2026-11-08 (card c653a0fd): the DNS-write test job is no longer offered by the vault.
+  await assert.rejects(vault.run("cf.dns.txt.probe", { zone: ZONE }, prf(7)), /job_not_offered/);
+  await assert.rejects(vault.run("cf.zone.read", { zone: "example.com" }, prf(7)), /zone_not_offered/);
   assert.equal(cf.calls.length, 0);
   const empty = new VaultLogic(new MemoryStore(), cf.fetchFn, () => NOW);
   await assert.rejects(probe(empty), /no_master_key/);
 });
 
-// Every way a step can go wrong: not ok, keys still deleted, the record never left behind
-// when the vault could remove it, and the evidence kept.
-for (const [fail, check] of [
-  ["existing", (r: any, cf: any) => { assert.equal(r.error, "probe_record_exists"); assert.equal(r.added, false); assert.equal(cf.records().length, 1, "the existing record is left alone"); }],
-  ["add", (r: any) => { assert.match(r.error, /^cf_500: nope/); assert.equal(r.added, false); }],
-  ["verifyRead", (r: any, cf: any) => { assert.match(r.error, /read broke/); assert.equal(r.removed, true); assert.equal(cf.records().length, 0, "the record is removed even though the check failed"); }],
-  ["recordDelete", (r: any, cf: any) => { assert.match(r.error, /record delete broke/); assert.equal(r.removed, false); assert.equal(cf.records().length, 1); }],
-  ["tokenDelete", (r: any) => { assert.match(r.error, /token delete failed/); assert.ok(r.minted.every((t: any) => !t.deleted)); assert.ok(r.audit.minted_still_listed.length > 0); }],
-  ["list", (r: any) => { assert.match(r.audit.error, /list broke/); assert.equal(r.removed, true, "job evidence kept beside the audit failure"); }],
-  ["staysListed", (r: any) => { assert.equal(r.removed, true); assert.equal(r.after, 1, "Cloudflare said deleted but still lists it"); assert.equal(r.error, undefined); }],
-  ["newToken", (r: any) => { assert.deepEqual(r.audit.new_since_setup, ["surprise"]); assert.equal(r.error, undefined); }],
-] as const) {
-  test(`probe when ${fail} goes wrong: not ok, evidence kept`, async () => {
-    const { vault, cf } = await stored(fail);
-    const r = await probe(vault);
-    assert.equal(r.ok, false);
-    if (fail !== "tokenDelete") assert.ok(r.minted.every((t) => t.deleted), "minted keys are always deleted");
-    check(r, cf);
-  });
-}
+// Every way a read job's bookkeeping can go wrong (moved here from the cut cf.dns.txt.probe, card c653a0fd).
+test("read job when a short key will not delete: not ok, no answer handed on, the key stays listed", async () => {
+  const r = await probe((await stored("tokenDelete")).vault);
+  assert.equal(r.ok, false);
+  assert.match(r.error ?? "", /token delete failed/);
+  assert.ok(r.minted.every((t) => !t.deleted));
+  assert.ok(r.audit.minted_still_listed.length > 0);
+  assert.equal(r.data, undefined, "an answer is handed on only when the whole job checked out");
+});
+
+test("read job when the token list fails: not ok, no answer handed on, the reason kept", async () => {
+  const r = await probe((await stored("list")).vault);
+  assert.equal(r.ok, false);
+  assert.match(r.audit.error ?? "", /list broke/);
+  assert.ok(r.minted.every((t) => t.deleted), "minted keys are still deleted");
+  assert.equal(r.data, undefined);
+});
+
+test("read job when an unknown key appears: the read stands and the evidence names the key (the nightly count alarms on it)", async () => {
+  const r = await probe((await stored("newToken")).vault);
+  assert.deepEqual(r.audit.new_since_setup, ["surprise"]);
+  assert.equal(r.ok, true);
+});
 
 // The vault's own setup page (vault/src/setup.ts).
 const VAULT = "https://vault.example";
@@ -599,7 +574,7 @@ test("headcount: a list failure is not ok", async () => {
   assert.equal(r.missing.length, 2);
 });
 
-test("after headcount setup, the jobs' own audit expects the headcount key (probe and reads still pass)", async () => {
+test("after headcount setup, the jobs' own audit expects the headcount key (reads still pass)", async () => {
   const { vault } = await stored();
   await hcSetup(vault);
   const p = await probe(vault);
