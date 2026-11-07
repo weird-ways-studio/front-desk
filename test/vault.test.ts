@@ -238,6 +238,18 @@ test("read jobs: each reads with short keys of a fixed policy, deletes them, and
     assert.deepEqual(reader.body.policies, [{ effect: "allow", resources, permission_groups: [{ id: group }] }], job);
     assert.equal(reader.body.expires_on, new Date(NOW + PROBE_TOKEN_MS).toISOString().replace(/\.\d{3}Z$/, "Z"), job);
     assert.ok(reader.body.name.startsWith(HELPER_PREFIX), job);
+    // Every short key (the zone finder too) is made with the master, lives PROBE_TOKEN_MS, and has a fixed policy;
+    // zone and audit calls never use the master itself (moved from the cut probe test, Codex c653a0fd r1).
+    const expiry = new Date(NOW + PROBE_TOKEN_MS).toISOString().replace(/\.\d{3}Z$/, "Z");
+    for (const m of minted(cf)) {
+      assert.equal(m.token, PARENT, `${job}: short keys are made with the master`);
+      assert.equal(m.body.expires_on, expiry, `${job}: every short key expires after ${PROBE_TOKEN_MS} ms`);
+      assert.ok(m.body.name.startsWith(HELPER_PREFIX), job);
+    }
+    if (job !== "cf.audit.read") assert.deepEqual(minted(cf)[0].body.policies[0].permission_groups, [{ id: "zone-r" }], `${job}: the zone finder can only read`);
+    const reads = cf.calls.filter((c) => c.path.startsWith("/zones") || c.path.includes("/audit_logs"));
+    assert.ok(reads.length > 0, job);
+    for (const c of reads) assert.notEqual(c.token, PARENT, `${job}: ${c.method} ${c.path} uses a short key, never the master`);
     assert.ok(r.minted.length >= 1 && r.minted.every((t) => t.deleted), `${job}: every short key deleted`);
     assert.ok(minted(cf).every((c) => !cf.tokens.some((t) => t.name === c.body.name)), `${job}: none left at Cloudflare`);
     assert.ok(![...cf.live.keys()].some((v) => JSON.stringify(r).includes(v)), `${job}: no key value in the result`);
