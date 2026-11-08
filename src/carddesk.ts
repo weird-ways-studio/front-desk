@@ -124,6 +124,7 @@ export class CardDesk extends Desk {
     }
   }
 
+  /** The body of POST /card, run only while this requester holds the one request slot (R5). */
   private async newCard(input: unknown, requester: string, now: number): Promise<{ card: DeskCard; grants: Grant[] }> {
     const refuse = async (code: string, status = 400) => {
       await this.log({ event: "refused", requester, detail: `card: ${code}` }, now);
