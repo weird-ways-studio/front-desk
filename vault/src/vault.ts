@@ -18,6 +18,10 @@ export const HELPER_PREFIX = "front-desk probe ";
 // result inside one storage value; a cut list says so (`truncated`).
 export const READ_JOBS = ["cf.zone.read", "cf.dns.list", "cf.audit.read"] as const;
 export const DNS_MAX = 500;
+// Deletes each cleanup sweep (sweepIssued, sweepHelpers) sends per tap: a backlog never makes one tap's
+// Cloudflare calls unbounded (card 85818ab1 F9, Codex r1 R7). What is left stays recorded, shows in the tap's
+// result and the nightly count, and is tried again at the next tap.
+export const SWEEP_DELETES = 2;
 export const AUDIT_MAX = 300;
 export const AUDIT_MAX_DAYS = 7;
 // A read's answer is stored in the grant until the agent collects it. Durable Object storage holds at most
@@ -700,12 +704,14 @@ export class VaultLogic {
       return list.map((h) => h.id ?? h.name); // unknown: everything stays recorded, the nightly count still shows it
     }
     const done: string[] = [];
+    let sent = 0;
     for (const h of list) {
       const found = listed.find((t) => (h.id ? t.id === h.id : t.name === h.name));
       if (!found) {
         if (h.id || Date.parse(h.until) <= this.now()) done.push(h.name);
         continue;
       }
+      if (sent++ >= SWEEP_DELETES) continue;
       const gone = await master.call("DELETE", `/accounts/${m.account_id}/tokens/${found.id}`).then(() => true, (e: Error) => /^cf_404/.test(e.message));
       if (gone) done.push(h.name);
     }
@@ -717,8 +723,10 @@ export class VaultLogic {
   // keeps the key on the list, so the audit still expects it and the next job tries again.
   private async sweepIssued(master: Cloudflare, m: Master): Promise<{ id: string; expires_on: string }[]> {
     const gone: string[] = [];
+    let sent = 0;
     for (const k of m.issued ?? []) {
       if (Date.parse(k.expires_on) > this.now()) continue;
+      if (sent++ >= SWEEP_DELETES) break;
       const deleted = await master.call("DELETE", `/accounts/${m.account_id}/tokens/${k.id}`).then(() => true, (e: Error) => /^cf_404/.test(e.message));
       if (deleted) gone.push(k.id);
     }

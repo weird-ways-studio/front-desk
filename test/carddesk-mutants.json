@@ -294,5 +294,21 @@
   "const closed_at = c.closed_at;",
   "R4: the vault forgets the card (pruned) or cannot be read: an answer past its window is not returned, and is erased",
   "test/carddesk.test.ts"
+ ],
+ [
+  "vault-sweep-issued-cap",
+  "vault/src/vault.ts",
+  "      if (sent++ >= SWEEP_DELETES) break;\n",
+  "",
+  "F9: a cleanup backlog adds a fixed number of calls per tap (SWEEP_DELETES per sweep); the rest waits for later taps",
+  "test/vault.test.ts"
+ ],
+ [
+  "vault-sweep-helpers-cap",
+  "vault/src/vault.ts",
+  "      if (sent++ >= SWEEP_DELETES) continue;\n",
+  "",
+  "F9: a cleanup backlog adds a fixed number of calls per tap (SWEEP_DELETES per sweep); the rest waits for later taps",
+  "test/vault.test.ts"
  ]
 ]

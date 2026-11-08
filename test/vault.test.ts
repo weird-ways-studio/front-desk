@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { MemoryStore } from "../src/desk.ts";
 import { MASTER_LABEL, RECOVERY_LABEL, open, seal, b64url, fromB64url } from "../vault/src/seal.ts";
-import { PENDING_MS, PROBE_TOKEN_MS, TOKENS_READ, VaultLogic, type CfAcceptResult, type Headcount, type HeadcountSetupResult, type ReadResult, HELPER_PREFIX, RESULT_MAX_BYTES } from "../vault/src/vault.ts";
+import { PENDING_MS, PROBE_TOKEN_MS, TOKENS_READ, VaultLogic, type CfAcceptResult, type Headcount, type HeadcountSetupResult, type ReadResult, HELPER_PREFIX, RESULT_MAX_BYTES, SWEEP_DELETES } from "../vault/src/vault.ts";
 import { handleSetup } from "../vault/src/setup.ts";
 
 const ACCOUNT = "a".repeat(32);
@@ -832,4 +832,42 @@ test("F9: one cf.dns.list card entry at DNS_MAX makes a fixed, counted number of
   // Measured 2026-11-08: permission groups, mint + delete for the zone lookup key, zone lookup, mint + delete for the DNS
   // key, the leftover-key list, and 6 DNS pages (1000 rows: pages 1-6 until more than 500 are held).
   assert.equal(fetches, 13, `measured: ${JSON.stringify(byKind)} + 6 DNS pages`);
+});
+
+// F9 with a planted cleanup backlog (Codex build r1 R7): five expired handed-out keys and five leftover short keys.
+// Each sweep sends at most SWEEP_DELETES deletes per tap; the rest stay recorded and go at later taps.
+test("F9: a cleanup backlog adds a fixed number of calls per tap (SWEEP_DELETES per sweep); the rest waits for later taps", async () => {
+  const { store, cf, clock } = await stored();
+  let fetches = 0;
+  const rows = Array.from({ length: 1000 }, (_, i) => ({ id: `r${i}`, type: "A", name: `h${i}.${ZONE}`, content: "192.0.2.1" }));
+  const v = testVault(store, async (input: string, init?: RequestInit) => {
+    fetches++;
+    const u = new URL(String(input));
+    if (u.pathname.includes("/dns_records")) {
+      const page = Number(u.searchParams.get("page")), per = Number(u.searchParams.get("per_page"));
+      return Response.json({ success: true, result: rows.slice((page - 1) * per, page * per) });
+    }
+    return cf.fetchFn(input as string, init);
+  }, () => clock.now);
+  await readJob(v, "cf.zone.read", { zone: ZONE });
+  const exp = new Date(clock.now + 60_000).toISOString();
+  const issued = Array.from({ length: 5 }, (_, i) => ({ id: `${"a".repeat(31)}${i}`, expires_on: exp }));
+  const helpers = Array.from({ length: 5 }, (_, i) => ({ name: `${HELPER_PREFIX}old${i}`, until: exp, id: `${"b".repeat(31)}${i}` }));
+  for (const k of issued) cf.tokens.push({ id: k.id, expires_on: exp });
+  for (const h of helpers) cf.tokens.push({ id: h.id, name: h.name });
+  await store.put("master", { ...(await store.get<any>("master")), issued });
+  await store.put("helpers", helpers);
+  clock.now += 2 * 60_000;
+  fetches = 0;
+  const r = (await v.runCardEntry("cf.dns.list", { zone: ZONE }, prf(7))) as ReadResult;
+  assert.equal(r.ok, true);
+  // 13 as measured above + 2 handed-out deletes + 1 token-list page for the short-key sweep + 2 short-key deletes.
+  assert.equal(fetches, 13 + SWEEP_DELETES + 1 + SWEEP_DELETES);
+  assert.equal((await store.get<any>("master")).issued.length, 5 - SWEEP_DELETES, "the rest stays recorded");
+  assert.equal((await store.get<any[]>("helpers"))!.length, 5 - SWEEP_DELETES);
+  assert.equal(r.leftover?.length, 5 - SWEEP_DELETES, "and is shown on this tap's result");
+  // Safeguard working: later taps keep clearing it.
+  for (let i = 0; i < 2; i++) await v.runCardEntry("cf.dns.list", { zone: ZONE }, prf(7));
+  assert.equal((await store.get<any>("master")).issued.length, 0);
+  assert.deepEqual(await store.get<any[]>("helpers"), []);
 });
