@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { Desk, MemoryStore, grantHash, vaultStage, type Grant } from "../src/desk.ts";
 import { JOBS } from "../src/jobs.ts";
-import { ALREADY_USED, REFUSED_BEFORE_RUN, USED_GRACE_MS, checkSigned, type SignedRun } from "../vault/src/approval.ts";
+import { ALREADY_USED, REFUSED_BEFORE_RUN, TOO_OLD, USED_GRACE_MS, checkSigned, type SignedRun } from "../vault/src/approval.ts";
 import { approvalCheck, grantHashOf, PASSKEY_PIN, type PasskeyPin } from "../vault/src/passkey.ts";
 import { VaultLogic } from "../vault/src/vault.ts";
 import { FakeRecorder } from "./fakerecorder.ts";
@@ -183,6 +183,25 @@ test("expiry: allowed up to expires_at + 5 minutes, refused after", async () => 
   await assert.rejects(vaultAt({ now: T + USED_GRACE_MS + 1 }).vault.run(s), /^Error: expired$/);
 });
 
+test("a grant that ran, replayed after it is too old: refused, and Ben is not told nothing ran (Codex build r1 #1)", async () => {
+  const { vault, clock } = vaultAt();
+  const a = await signed("cf.zone.read", ZONE, PRF, until(0));
+  await assert.rejects(vault.run(a), PASSED);
+  clock.now = T + USED_GRACE_MS + 1;
+  await assert.rejects(vault.run(await signed("cf.zone.read", ZONE, PRF, until(USED_GRACE_MS * 2))), PASSED); // prunes A
+  const late = await vault.run(a).catch((e: Error) => e.message);
+  assert.equal(late, TOO_OLD);
+  assert.match(JOBS["cf.zone.read"].done({ error: late, vault_stage: vaultStage(late as string) }), /^This approval is too old to use\. It may have run once already/);
+});
+
+test("a grant still in the used list is reported already_used even when it is also too old", async () => {
+  const { vault, clock } = vaultAt();
+  const a = await signed("cf.zone.read", ZONE, PRF, until(0));
+  await assert.rejects(vault.run(a), PASSED);
+  clock.now = T + USED_GRACE_MS + 1; // nothing pruned yet: no other admission ran
+  await assert.rejects(vault.run(a), /^Error: already_used$/);
+});
+
 test("the clock is read again after the crypto: an answer checked in time but admitted late is refused", async () => {
   const { vault, clock } = vaultAt();
   const s = await signed("cf.zone.read", ZONE, PRF, until(0));
@@ -191,18 +210,45 @@ test("the clock is read again after the crypto: an answer checked in time but ad
   await assert.rejects(pending, /^Error: expired$/);
 });
 
-test("pruning: an id is forgotten only once its grant is past expiry, so a paused replay of it is refused", async () => {
+/**
+ * Holds the NEXT signature check (crypto.subtle.verify) until release(): a real pause inside the vault's
+ * verification, so another call can run its admission step meanwhile (Codex build r1 #2).
+ */
+function pauseNextVerify() {
+  const original = crypto.subtle.verify;
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let entered!: () => void;
+  const inside = new Promise<void>((r) => (entered = r));
+  crypto.subtle.verify = (async (...args: Parameters<SubtleCrypto["verify"]>) => {
+    crypto.subtle.verify = original;
+    entered();
+    await gate;
+    return original.apply(crypto.subtle, args);
+  }) as SubtleCrypto["verify"];
+  return { inside, release, restore: () => (crypto.subtle.verify = original) };
+}
+
+test("pruning: a replay paused inside verification, while another admission prunes its id, is refused on resume", async () => {
   const { vault, store, clock } = vaultAt();
   const a = await signed("cf.zone.read", ZONE, PRF, until(0));
+  const b = await signed("cf.zone.read", ZONE, PRF, until(USED_GRACE_MS * 2));
   await assert.rejects(vault.run(a), PASSED);
-  // A replay of A starts (its crypto in flight) while A is still within its time...
-  const replay = assert.rejects(vault.run(a), /^Error: expired$/, "the replay resumes after the prune and is refused");
-  // ...meanwhile time passes and another grant's admission prunes A's id.
-  clock.now = T + USED_GRACE_MS + 1;
-  await assert.rejects(vault.run(await signed("cf.zone.read", ZONE, PRF, until(USED_GRACE_MS * 2))), PASSED);
-  assert.equal((await store.get<Map<string, number>>("used"))!.has(a.grant.id), false, "A was pruned");
-  await replay;
-  assert.equal((await store.get<Map<string, number>>("used"))!.size, 1, "the list stays small");
+  const pause = pauseNextVerify();
+  try {
+    // The replay of A starts while A is still within its time, and stops inside its signature check.
+    const replay = vault.run(a).then(() => "ran", (e: Error) => e.message);
+    await pause.inside;
+    assert.equal((await store.get<Map<string, number>>("used"))!.has(a.grant.id), true, "A still listed while the replay is paused");
+    // Meanwhile time passes and B's admission prunes A's id.
+    clock.now = T + USED_GRACE_MS + 1;
+    await assert.rejects(vault.run(b), PASSED);
+    assert.deepEqual([...(await store.get<Map<string, number>>("used"))!.keys()], [b.grant.id], "A was pruned before the replay resumed");
+    pause.release();
+    assert.equal(await replay, TOO_OLD, "the resumed replay is refused, not run");
+  } finally {
+    pause.restore();
+  }
 });
 
 test("pruning and expiry share one boundary: at the last allowed moment the id is still kept, so a replay is already_used", async () => {
@@ -220,27 +266,39 @@ test("result words: each before-admission code says nothing ran; already_used sa
   const words = (error: string) => JOBS["cf.zone.read"].done({ error, vault_stage: vaultStage(error) });
   for (const code of REFUSED_BEFORE_RUN) assert.match(words(code), /^Nothing ran\. The vault refused this approval: .+\. Ask for it again\. \[/, code);
   assert.match(words(ALREADY_USED), /^This approval was already used once, so it may have run\. Check its result before asking again\./);
+  assert.match(words(TOO_OLD), /^This approval is too old to use\. It may have run once already, so check its result before asking again\./);
+  assert.doesNotMatch(words(TOO_OLD), /Nothing ran|Ask for it again/);
   for (const other of ["no_master_key", "cf_500: boom", "Error: bad_assertion", "bad_assertion ", "expired: late", "", "job_not_offered"]) {
     assert.match(words(other), /^It is not known whether this ran\. Check its result before asking again\./, JSON.stringify(other));
   }
   // Every vault job's words follow the same three messages.
   for (const job of Object.keys(JOBS) as (keyof typeof JOBS)[]) {
     if (!(JOBS[job] as { vault?: true }).vault) continue;
-    assert.match(JOBS[job].done({ error: "expired", vault_stage: "before" }), /^Nothing ran\./, job);
+    assert.match(JOBS[job].done({ error: "bad_assertion", vault_stage: "before" }), /^Nothing ran\./, job);
     assert.match(JOBS[job].done({ error: "x", vault_stage: "unknown" }), /^It is not known whether this ran\./, job);
+  }
+});
+
+test("deploy window, old desk + new vault: the old desk's words for a wrong_shape result say Not done, never 'Nothing ran' (Codex build r1 #3)", () => {
+  // An old desk stores {error} without vault_stage; that path (notDone) is unchanged from origin/main.
+  for (const job of Object.keys(JOBS) as (keyof typeof JOBS)[]) {
+    if (!(JOBS[job] as { vault?: true }).vault) continue;
+    const w = JOBS[job].done({ error: "wrong_shape" });
+    assert.match(w, /^Not done\. .*Tell the agent the words in brackets: \[wrong_shape\]/, job);
   }
 });
 
 test("vaultStage matches the exact message only, never a part of it", () => {
   for (const code of REFUSED_BEFORE_RUN) assert.equal(vaultStage(code), "before", code);
   assert.equal(vaultStage(ALREADY_USED), "used");
+  assert.equal(vaultStage(TOO_OLD), "old");
   for (const m of ["Error: bad_assertion", "bad_assertion ", "expired: late", "wrong_shape\n", "not already_used", "", "no_master_key"]) assert.equal(vaultStage(m), "unknown", JSON.stringify(m));
 });
 
 test("the before-admission codes are thrown only by the vault's check, never later in a job", () => {
   for (const f of ["vault.ts", "runs.ts", "github.ts", "cloudflare.ts", "seal.ts", "setup.ts", "ghsetup.ts", "index.ts"]) {
     const src = readFileSync(`vault/src/${f}`, "utf8");
-    for (const code of [...REFUSED_BEFORE_RUN, ALREADY_USED]) assert.ok(!src.includes(`VaultError("${code}")`), `${f} throws ${code}`);
+    for (const code of [...REFUSED_BEFORE_RUN, ALREADY_USED, TOO_OLD]) assert.ok(!src.includes(`VaultError("${code}")`), `${f} throws ${code}`);
   }
 });
 

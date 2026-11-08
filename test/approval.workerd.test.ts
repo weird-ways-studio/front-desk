@@ -59,6 +59,29 @@ test("restart on persisted storage: the used list survives and the same grant is
   }
 });
 
+test("a replay paused inside verification while another admission prunes its id is refused on resume (Codex build r1 #2)", { timeout: 60_000 }, async () => {
+  const { mf, send } = await start(join(dir, "pause"));
+  try {
+    const a = await signed("cf.zone.read", { zone: "benculbert.com" }, PRF, { expires_at: T });
+    const b = await signed("cf.zone.read", { zone: "benculbert.com" }, PRF, { expires_at: T + 600_000 });
+    await send({ method: "setClock", args: [T] });
+    assert.equal((await send({ method: "run", args: [a, TEST_PIN, T] }))[0].error, "no_master_key");
+    await send({ method: "pauseNextVerify", args: [] });
+    const replay = send({ method: "run", args: [a, TEST_PIN, T] }); // not awaited: it stops inside verify
+    for (let i = 0; i < 200 && !(await send({ method: "paused", args: [] }))[0].ok; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal((await send({ method: "paused", args: [] }))[0].ok, true, "the replay is paused inside its signature check");
+    assert.deepEqual((await send({ method: "used", args: [] }))[0].ok.ids, [a.grant.id]);
+    await send({ method: "setClock", args: [T + 300_001] });
+    assert.equal((await send({ method: "run", args: [b, TEST_PIN, T] }))[0].error, "no_master_key");
+    assert.deepEqual((await send({ method: "used", args: [] }))[0].ok.ids, [b.grant.id], "A pruned while the replay waits");
+    await send({ method: "release", args: [] });
+    assert.equal((await replay)[0].error, "expired", "the resumed replay is refused, not run");
+    assert.equal((await send({ method: "used", args: [] }))[0].ok.calls, 0);
+  } finally {
+    await mf.dispose();
+  }
+});
+
 test("an old-shape call reaches the real vault as wrong_shape and uses nothing", { timeout: 60_000 }, async () => {
   const { mf, send } = await start(join(dir, "old"));
   try {

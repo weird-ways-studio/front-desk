@@ -14,8 +14,8 @@ import { ascii, name, plainChanges } from "./ghplain.ts";
 import { JOBS, type Job, type JobName } from "./jobs.ts";
 import { currentKey, fingerprint, keyRev, type CboxKey } from "./cboxkey.ts";
 import type { Headcount, VaultApi } from "../vault/src/api.ts";
-import { ALREADY_USED, APPROVAL_API_VERSION, REFUSED_BEFORE_RUN } from "../vault/src/approval.ts";
-export type VaultStage = "before" | "used" | "unknown";
+import { ALREADY_USED, APPROVAL_API_VERSION, REFUSED_BEFORE_RUN, TOO_OLD } from "../vault/src/approval.ts";
+export type VaultStage = "before" | "used" | "old" | "unknown";
 import { RecorderError, type Receipt, type Recorder, type Stage } from "./recorder.ts";
 
 export const APPROVE_WINDOW_MS = 10 * 60_000; // ask -> approve
@@ -314,10 +314,12 @@ const isVault = (job: JobName) => (JOBS[job] as Job).vault === true;
 /**
  * Where a failed vault call stopped, from its exact error message only (card bb86abf0 R6): "before" = a
  * vault refusal raised before it recorded the grant as used, so nothing ran; "used" = the grant was already
- * used once, so it may have run; anything else, including an unknown message, is "unknown".
+ * used once, so it may have run; "old" = too old to admit, which does not tell whether it ran before;
+ * anything else, including an unknown message, is "unknown".
  */
 export function vaultStage(message: string): VaultStage {
   if ((REFUSED_BEFORE_RUN as readonly string[]).includes(message)) return "before";
+  if (message === TOO_OLD) return "old";
   return message === ALREADY_USED ? "used" : "unknown";
 }
 

@@ -61,13 +61,13 @@ const REFUSAL_WORDS: Record<string, string> = {
   no_pin: "no passkey is pinned in the vault",
   bad_grant: "the request's details were not in the form the vault accepts",
   bad_assertion: "your Face ID answer did not check out for this exact request",
-  expired: "the approval was too old",
 };
 
 // A vault call that threw (vault_stage set by Desk.approve): three messages, by where the vault stopped.
 function stageWords(r: Failed): string | null {
   const why = typeof r.error === "string" ? r.error : "unknown";
   if (r.vault_stage === "before" && Object.hasOwn(REFUSAL_WORDS, why)) return `Nothing ran. The vault refused this approval: ${REFUSAL_WORDS[why]}. Ask for it again. [${why}]`;
+  if (r.vault_stage === "old") return `This approval is too old to use. It may have run once already, so check its result before asking again. [${why}]`;
   if (r.vault_stage === "used") return `This approval was already used once, so it may have run. Check its result before asking again. [${why}]`;
   if (r.vault_stage !== undefined) return `It is not known whether this ran. Check its result before asking again. [${why}]`;
   return null;

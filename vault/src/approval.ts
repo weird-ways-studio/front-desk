@@ -12,10 +12,14 @@ export interface SignedRun {
   prf: string;
 }
 
-// Raised only BEFORE the admission step writes `used`, so nothing ran when the desk sees one of these (R6).
-export const REFUSED_BEFORE_RUN = ["wrong_shape", "no_pin", "bad_grant", "bad_assertion", "expired"] as const;
+// Raised only BEFORE the admission step writes `used`, so this call started nothing (R6). The desk calls the
+// vault once per grant (it marks the grant approved first), so for the grant on Ben's screen nothing ran.
+export const REFUSED_BEFORE_RUN = ["wrong_shape", "no_pin", "bad_grant", "bad_assertion"] as const;
 // The grant is already in `used`: it may have run once.
 export const ALREADY_USED = "already_used";
+// Too old to admit. Not proof that nothing ran: an id leaves `used` only once its grant is this old, so a late
+// replay of a grant that did run also lands here (Codex build r1 #1).
+export const TOO_OLD = "expired";
 // A grant is good for this long after its own expiry (approve window + recording + the run), and its id is
 // kept in `used` exactly that long: one boundary for both, so a forgotten id belongs to an expired grant (R1).
 export const USED_GRACE_MS = 5 * 60_000;
@@ -61,9 +65,9 @@ export async function checkSigned(req: unknown, extra: number, pin: PasskeyPin |
  * boundary, and records this one before anything is opened.
  */
 export async function admit(store: UsedStore, id: string, expiresAt: number, now: number): Promise<void> {
-  if (now > expiresAt + USED_GRACE_MS) throw new VaultError("expired");
   const used = (await store.get<Map<string, number>>("used")) ?? new Map<string, number>();
   if (used.has(id)) throw new VaultError(ALREADY_USED);
+  if (now > expiresAt + USED_GRACE_MS) throw new VaultError(TOO_OLD);
   for (const [k, exp] of used) if (now > exp + USED_GRACE_MS) used.delete(k);
   used.set(id, expiresAt);
   await store.put("used", used);
