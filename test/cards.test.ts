@@ -3,7 +3,7 @@
 // test/cards-mutants.test.ts. Real-runtime proofs (transactions, alarm, restart): test/cards.workerd.test.ts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ANSWER_HOLD_MS, BOOK_KEEP_MS, CARD_CAP, CARD_JOBS, CardBook } from "../vault/src/cards.ts";
+import { ANSWER_HOLD_MS, BOOK_KEEP_MS, CARD_CAP, CARD_JOBS, CardBook, JOBS_VERSION } from "../vault/src/cards.ts";
 import { VaultLogic } from "../vault/src/vault.ts";
 import { approvalBody, cardBook, makeCard, openReq, PRF, runReq, TestRecorder } from "./cardsign.ts";
 import { SoftKey } from "./softkey.ts";
@@ -88,7 +88,9 @@ test("open (c)(d): a tap over another hash, another passkey, or a grant hash -> 
 
 test("open (e): ineligible job, jobs version, cap, deadline past expiry + 15 min", async () => {
   await openRefused("job_not_on_cards", async ({ book }) => book.open(openReq(await makeCard(T, [["cbox.key.enroll", { key: "k" }]]))));
-  await openRefused("version_changed", async ({ book }) => book.open(openReq(await makeCard(T, two(), { jobsVersion: 2 }))));
+  // T16 (card 77ec1e64): JOBS_VERSION is 2 now that gh.repo.create is on cards; a card made under version 1 is refused.
+  assert.equal(JOBS_VERSION, 2);
+  await openRefused("version_changed", async ({ book }) => book.open(openReq(await makeCard(T, two(), { jobsVersion: 1 }))));
   const three = await makeCard(T, [...two(), ["test.echo", { word: "a" }]]);
   await openRefused("too_many_entries", ({ book }) => book.open(openReq(three)));
   assert.equal(CARD_CAP, 2);
@@ -237,7 +239,7 @@ test("T9/T10: a jobs-version change or a c-box key change between entries refuse
   const c = await makeCard(T, two());
   await book.open(openReq(c));
   await book.run(await runReq(c, 0, rec));
-  const v2 = new CardBook(store, async () => ({ ok: true }), TEST_PIN, { now: () => clock.now, recorderKey: rec.pub, jobsVersion: 2 });
+  const v2 = new CardBook(store, async () => ({ ok: true }), TEST_PIN, { now: () => clock.now, recorderKey: rec.pub, jobsVersion: JOBS_VERSION + 1 });
   await assert.rejects(v2.run(await runReq(c, 1, rec)), refused("version_changed"));
   await assert.rejects(book.run(await runReq(c, 1, rec, { key_rev: 2 })), refused("key_changed"), "the desk's key generation moved");
   store.kv.put("cbox_rev", 2);

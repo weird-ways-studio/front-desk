@@ -1,11 +1,12 @@
 {
- "source": "observatory @76f2837",
+ "source": "observatory @4f96e85",
  "recorder_key": "AeN3/Dl3QicxXBObHVyLdhMmWGoDpjVO44LoB0sRV+s=",
  "card_eligible": [
   "test.echo",
   "cf.zone.read",
   "cf.dns.list",
-  "cf.audit.read"
+  "cf.audit.read",
+  "gh.repo.create"
  ],
  "card_run_ms": 900000,
  "card_max": 5,
@@ -278,9 +279,98 @@
    "stage": "approval",
    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
    "recorded_at": "2027-01-15T08:00:00.000Z",
-   "sig": "HgefAsAOh7bJtdIjootOkzwVOK/29BhtbUVHch2KeHoFmd4qVnicsyQ0FnuSqw6pwYtNMPEm8y/karyEA3rsDg=="
+   "sig": "MtTrOJ86HW12zoWuig7Ww4TU9t7tirkTLsUMySU2RSH8VkghVEDRu1jGASFbJ49RqVQhpZxZDfFgicwppEJvCQ=="
   },
-  "key": "o5vay4er3MLh0VfoadnCEgfSIZxCfd1dIdl3X4LfvfY=",
+  "key": "3zgNSngGknFL+jOftxyB9QV4/+32XNlyxZ+/yS5UwgI=",
   "sealed": "eyJraW5kIjoicmVjZWlwdC92MSIsInYiOjEsInNlcSI6NDIsImtleSI6InJlY29yZHMvdjEvMDAwMDAwMDAwMDQyLmNhcmQtMDAwMS1hYmNkLmFwcHJvdmFsLmpzb24iLCJncmFudCI6ImNhcmQtMDAwMS1hYmNkIiwic3RhZ2UiOiJhcHByb3ZhbCIsInNoYTI1NiI6ImRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJyZWNvcmRlZF9hdCI6IjIwMjctMDEtMTVUMDg6MDA6MDAuMDAwWiJ9"
- }
+ },
+ "repo_ids": [
+  {
+   "name": "done with digits",
+   "body": {
+    "job": "gh.repo.create",
+    "outcome": "done",
+    "repo_id": "123456"
+   },
+   "verdict": null
+  },
+  {
+   "name": "done without repo_id",
+   "body": {
+    "job": "gh.repo.create",
+    "outcome": "done"
+   },
+   "verdict": "a done gh.repo.create result must carry GitHub's repo_id (digits)"
+  },
+  {
+   "name": "done with a number, not a string",
+   "body": {
+    "job": "gh.repo.create",
+    "outcome": "done",
+    "repo_id": 123456
+   },
+   "verdict": "a done gh.repo.create result must carry GitHub's repo_id (digits)"
+  },
+  {
+   "name": "done with leading zero",
+   "body": {
+    "job": "gh.repo.create",
+    "outcome": "done",
+    "repo_id": "0123"
+   },
+   "verdict": "a done gh.repo.create result must carry GitHub's repo_id (digits)"
+  },
+  {
+   "name": "done with letters",
+   "body": {
+    "job": "gh.repo.create",
+    "outcome": "done",
+    "repo_id": "12a"
+   },
+   "verdict": "a done gh.repo.create result must carry GitHub's repo_id (digits)"
+  },
+  {
+   "name": "done with 21 digits",
+   "body": {
+    "job": "gh.repo.create",
+    "outcome": "done",
+    "repo_id": "111111111111111111111"
+   },
+   "verdict": "a done gh.repo.create result must carry GitHub's repo_id (digits)"
+  },
+  {
+   "name": "failed with repo_id",
+   "body": {
+    "job": "gh.repo.create",
+    "outcome": "failed",
+    "repo_id": "123456"
+   },
+   "verdict": "only a done gh.repo.create result may carry a repo_id"
+  },
+  {
+   "name": "unknown without repo_id",
+   "body": {
+    "job": "gh.repo.create",
+    "outcome": "unknown"
+   },
+   "verdict": null
+  },
+  {
+   "name": "other job with repo_id",
+   "body": {
+    "job": "test.echo",
+    "outcome": "done",
+    "repo_id": "123456"
+   },
+   "verdict": "only a done gh.repo.create result may carry a repo_id"
+  },
+  {
+   "name": "other job without",
+   "body": {
+    "job": "test.echo",
+    "outcome": "done"
+   },
+   "verdict": null
+  }
+ ]
 }

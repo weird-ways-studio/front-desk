@@ -4,7 +4,7 @@
 import { b64url, grantHash } from "../src/desk.ts";
 import { canonical, type PasskeyPin } from "../vault/src/passkey.ts";
 import { cardHashOf, receiptSealed, type Manifest, type Receipt } from "../vault/src/cardcopy.ts";
-import { CardBook, type CardGrant, type CardOptions, type CardStore, type RunEntry } from "../vault/src/cards.ts";
+import { CardBook, JOBS_VERSION, type CardGrant, type CardOptions, type CardStore, type RunEntry } from "../vault/src/cards.ts";
 import { TEST_KEY, TEST_ORIGIN, TEST_PIN, TEST_RP } from "./vaultsign.ts";
 import type { SoftKey } from "./softkey.ts";
 
@@ -40,7 +40,7 @@ export async function makeCard(t: number, jobs: [string, Record<string, string>]
   const requester = o.requester ?? "c-box agent";
   const grants: CardGrant[] = jobs.map(([job, params]) => ({ id: `g-card-${++n}-xxxx`, job, params, requester, expires_at: t + 10 * 60_000 }));
   const hashes = await Promise.all(grants.map((g) => grantHash(g as Parameters<typeof grantHash>[0])));
-  const manifest: Manifest = { kind: "card/v1", card: o.card ?? `c-card-${++n}-xxxx`, requester, entries: hashes, deadline: o.deadline ?? t + 25 * 60_000, jobs_version: o.jobsVersion ?? 1 };
+  const manifest: Manifest = { kind: "card/v1", card: o.card ?? `c-card-${++n}-xxxx`, requester, entries: hashes, deadline: o.deadline ?? t + 25 * 60_000, jobs_version: o.jobsVersion ?? JOBS_VERSION };
   const cardHash = await cardHashOf(manifest);
   const signFor = o.signHash ?? cardHash;
   const challenge = b64url(new Uint8Array([...crypto.getRandomValues(new Uint8Array(16)), ...signFor.match(/../g)!.map((h) => parseInt(h, 16))]));

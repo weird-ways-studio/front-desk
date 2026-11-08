@@ -12,10 +12,11 @@ const API = "https://api.github.com";
 const enc = new TextEncoder();
 
 // What each App may do. The headcount App only reads; its key is kept unsealed for the nightly run.
-// The main App's key is sealed to Ben's passkey; its jobs come in C6a-2.
+// The main App (the repo-maker) has its key sealed to Ben's passkey. repository_creation joins for job gh.repo.create
+// (card 77ec1e64): Ben adds it on GitHub only AFTER this vault is deployed, or checkApp would refuse the App meanwhile.
 export const PERMISSIONS = {
   headcount: { organization_administration: "read", members: "read", organization_personal_access_tokens: "read", administration: "read", metadata: "read" },
-  main: { administration: "write", contents: "write", metadata: "read" },
+  main: { administration: "write", contents: "write", metadata: "read", repository_creation: "write" },
 } as const;
 export type AppKind = keyof typeof PERMISSIONS;
 
@@ -81,7 +82,15 @@ export class GitHub {
 
   /** Calls one endpoint and returns its JSON, or throws gh_<status>: <message>. */
   async call<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const res = await this.fetch(API + path, {
+    const res = await this.send(method, path, body);
+    const json = (await res.json().catch(() => ({}))) as { message?: string };
+    if (!res.ok) throw new VaultError(`gh_${res.status}: ${String(json.message ?? "no message").slice(0, 100)}`);
+    return json as T;
+  }
+
+  /** The raw answer, for callers that must tell statuses apart (ghrepo.ts: a create reply, a revoke probe). */
+  send(method: string, path: string, body?: unknown): Promise<Response> {
+    return this.fetch(API + path, {
       method,
       headers: {
         accept: "application/vnd.github+json",
@@ -93,9 +102,6 @@ export class GitHub {
       },
       body: body ? JSON.stringify(body) : undefined,
     });
-    const json = (await res.json().catch(() => ({}))) as { message?: string };
-    if (!res.ok) throw new VaultError(`gh_${res.status}: ${String(json.message ?? "no message").slice(0, 100)}`);
-    return json as T;
   }
 }
 
@@ -145,6 +151,9 @@ export function installationKey(app: GitHub, installationId: number, narrow?: { 
 // page fails closed rather than counting half (the org has 2 members and 23 repos today).
 export interface GhSnapshot {
   repos: string[]; // "name:private|public" -- a repo leaving the watcher's view shows here
+  // "name:GitHub repository id" (card 77ec1e64 finding 1): a repo deleted and re-made under the same name between
+  // two nights has a new id, so it shows here even though `repos` is unchanged. Job-made repos are matched by id.
+  repo_ids: string[];
   members: string[];
   owners: string[]; // members with the org owner role -- a promotion keeps the member list unchanged
   outside: string[];
@@ -165,12 +174,15 @@ export async function snapshot(gh: GitHub): Promise<GhSnapshot> {
     return items;
   };
   const login = (u: { login: string }) => u.login;
-  const repos = await page<{ name: string; private: boolean }>(`/orgs/${ORG}/repos?type=all`);
+  const repos = await page<{ name: string; private: boolean; id: unknown }>(`/orgs/${ORG}/repos?type=all`);
+  // An id that is not a positive whole number cannot be matched: the list fails closed, never half-counted.
+  if (!repos.every((r) => Number.isSafeInteger(r.id) && (r.id as number) > 0)) throw new VaultError("bad_repo_id");
   const installs = await gh.call<{ installations: { id: number; app_slug: string; repository_selection: string; permissions: Record<string, string> }[] }>("GET", `/orgs/${ORG}/installations?per_page=100`);
   if (installs.installations.length >= 100) throw new VaultError("too_many: installations");
   const perms = (p: Record<string, string>) => Object.keys(p ?? {}).sort().map((k) => `${k}=${p[k]}`).join(",");
   const s: GhSnapshot = {
     repos: repos.map((r) => `${r.name}:${r.private ? "private" : "public"}`),
+    repo_ids: repos.map((r) => `${r.name}:${r.id}`),
     members: (await page<{ login: string }>(`/orgs/${ORG}/members`)).map(login),
     owners: (await page<{ login: string }>(`/orgs/${ORG}/members?role=admin`)).map(login),
     outside: (await page<{ login: string }>(`/orgs/${ORG}/outside_collaborators`)).map(login),

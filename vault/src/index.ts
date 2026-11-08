@@ -79,6 +79,14 @@ export class VaultBox extends DurableObject<Env> {
   cardAck(card: string, index: number) {
     return this.cards().ack(card, index);
   }
+  // gh.repo.create (card 77ec1e64): the durable record of a repo an entry made, and the recorder's receipt for its
+  // done result, after which the vault adds it to the nightly list (cards.ts repoRecorded).
+  repoFacts(grant: string) {
+    return this.cards().repoFacts(grant);
+  }
+  repoRecorded(grant: unknown, body: unknown, receipt: unknown, ...rest: unknown[]) {
+    return this.cards().repoRecorded(grant, body, receipt, ...rest);
+  }
   // Called by the Cloudflare runtime when the time set by storage.setAlarm arrives (cards.ts armBy/rearm), never by
   // a request: closes cards left open past their deadline, drops held answers, prunes old books.
   async alarm() {
@@ -151,5 +159,11 @@ export default class Vault extends WorkerEntrypoint<Env> {
   }
   cardAck(card: string, index: number) {
     return this.box().cardAck(card, index);
+  }
+  repoFacts(grant: string) {
+    return this.box().repoFacts(grant);
+  }
+  repoRecorded(grant: unknown, body: unknown, receipt: unknown, ...rest: unknown[]) {
+    return this.box().repoRecorded(grant, body, receipt, ...rest);
   }
 }

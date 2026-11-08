@@ -206,8 +206,9 @@ export function cardView(status: number | null, j: unknown): { ok: boolean; head
     dispatching: "Running",
     waiting: "Waiting for your tap",
   };
-  const es = r.entries as { does?: unknown; state?: unknown }[];
-  const lines = es.map((e, i) => `${i + 1}. ${String(e.does)} -- ${words[String(e.state)] ?? "Unclear"}`);
+  const es = r.entries as { does?: unknown; state?: unknown; summary?: unknown }[];
+  // A card-only job's own sentence (gh.repo.create) replaces the general word: it says what is known of its result.
+  const lines = es.map((e, i) => `${i + 1}. ${String(e.does)} -- ${typeof e.summary === "string" ? e.summary : (words[String(e.state)] ?? "Unclear")}`);
   const states = es.map((e) => String(e.state));
   if (r.vault_unread === true && !states.every((s) => s === "done")) return { ok: false, head: "Unclear", text: `The front desk could not read the vault just now, so this shows only what it last confirmed. ${again}.`, lines };
   if (states.every((s) => s === "done")) return { ok: true, head: "Done", text: "Every job ran, in order. The agent collects the answers now; nothing else to do.", lines };
