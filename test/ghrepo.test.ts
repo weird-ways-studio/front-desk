@@ -22,7 +22,7 @@ const refused = (code: string) => new RegExp(`^Error: ${code}`);
 type Fault =
   | "bypass" | "noBypassField" | "noRule" | "twoRules" | "exists" | "exists500" | "mintRefused"
   | "createLost" | "create500" | "create422" | "createPublic" | "createNoId" | "createLate" | "revokeFails" | "wideApp" | "notAll"
-  | "create422dup" | "create403" | "create409" | "create400" | "create422raw" | "createWholeSecond";
+  | "create422dup" | "create422code" | "create403" | "create409" | "create400" | "create422raw" | "createWholeSecond";
 
 const pem = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs1", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey as string;
 
@@ -83,6 +83,7 @@ function fakeGitHub(clock: { now: number }, faults: Fault[] = []) {
         if (has("create500")) return json({ message: "Server Error" }, 502);
         if (has("create422")) return json({ message: "Repository creation failed." }, 422);
         if (has("create422dup")) return json({ message: "Repository creation failed.", errors: [{ resource: "Repository", code: "custom", field: "name", message: "name already exists on this account" }] }, 422);
+        if (has("create422code")) return json({ message: "Validation Failed", errors: [{ resource: "Repository", field: "name", code: "already_exists" }] }, 422);
         if (has("create403")) return json({ message: "Forbidden" }, 403);
         if (has("create409")) return json({ message: "Conflict" }, 409);
         if (has("create400")) return json({ message: "Bad Request" }, 400);
@@ -418,7 +419,7 @@ test("6.2: two repo cards racing -> both repos added, no line lost", async () =>
 
 // ---- Codex build r1 #3: only documented, readable refusals count as "nothing made" ----
 test("r1 #3: a 422 naming the name as taken (lost race after the existence check) -> failed repo_exists; 403 and a readable 422 -> failed", async () => {
-  for (const [f, code] of [["create422dup", "repo_exists"], ["create403", "create_refused: gh_403"], ["create422", "create_refused: gh_422"]] as const) {
+  for (const [f, code] of [["create422dup", "repo_exists"], ["create422code", "repo_exists"], ["create403", "create_refused: gh_403"], ["create422", "create_refused: gh_422"]] as const) {
     const s = await setup([f]);
     const { state, answer } = await runRepo(s);
     assert.equal(state, "failed", f);
@@ -453,8 +454,16 @@ test("r1 #1: an ineligible creation (late, or already listed) stores ok null and
     assert.equal(state, "unknown", label);
     assert.deepEqual({ ok: answer.ok, eligible: answer.eligible, created: answer.created }, { ok: null, eligible: false, created: "confirmed" }, label);
     const said = JOBS["gh.repo.create"].done(answer);
-    assert.match(said, /^Not done as planned: weird-ways-studio\/new-app exists, but the nightly check will not add it by itself/, label);
-    assert.doesNotMatch(said, /^Done/, label);
+    // The whole sentence, per reason (Codex build r2 N1): the listed case must not promise an alarm.
+    assert.equal(said, label === "listed"
+      ? "Not done as planned: weird-ways-studio/new-app exists and was already on the nightly check's list with this same id, so nothing was added and the check expects it. Tell the agent: the repo is there. [created: already_listed]"
+      : "Not done as planned: weird-ways-studio/new-app exists, but the nightly check will not add it by itself (GitHub says it was made outside this card's time). Tonight's alarm names it; if it is yours, accept it with the GitHub list approval. [created: not_eligible: window]", label);
+    // What the sentence claims about tonight matches what the nightly count does.
+    s.store.kv.put("gh.app.headcount", { id: 101, slug: "x", key: "k", installation: 1010 });
+    const listed = s.store.kv.get<GhSnapshot>("gh.baseline")!;
+    (s.vault as any).ghRead = async () => ({ ...listed, repos: [...new Set([...listed.repos, "new-app:private"])].sort(), repo_ids: [...new Set([...listed.repo_ids, `new-app:${REPO_ID}`])].sort() });
+    const night = (await (s.vault as any).ghHeadcount()).changes as string[];
+    assert.equal(night.includes("repo_result_unrecorded: new-app"), label !== "listed", `${label}: ${night}`);
   }
 });
 

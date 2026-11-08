@@ -57,7 +57,9 @@ interface Book {
  * entry settled `done` from `dispatching` with GitHub's created_at inside [card open, card deadline] and the id not yet
  * in the baseline -- only then may `repoRecorded` add it to the nightly list, once the recorder has receipted it.
  */
-export interface GhCreated { grant: string; card: string; name: string; repo_id: string; created_at: string; eligible: boolean; recorded: boolean }
+export interface GhCreated { grant: string; card: string; name: string; repo_id: string; created_at: string; eligible: boolean; recorded: boolean; why?: Ineligible }
+/** Why a made repo is not eligible (Codex build r2 N1): the words Ben reads, and whether the nightly alarm names it, differ. */
+export type Ineligible = "listed" | "window" | "repeat" | "bad_id" | "late";
 export interface CardView {
   card: string;
   deadline: number;
@@ -259,7 +261,7 @@ export class CardBook {
       if (e.state !== "dispatching") {
         e.late = state;
         kv.put(book(card), b);
-        if (repo) kv.put(created(e.grant.id), { ...repo, eligible: false }); // made after the alarm closed it: never eligible (Z2)
+        if (repo) kv.put(created(e.grant.id), { ...repo, eligible: false, why: repo.why ?? "late" }); // made after the alarm closed it: never eligible (Z2)
         return { state: e.state, card: this.view(b, now) };
       }
       if (repo) {
@@ -268,7 +270,7 @@ export class CardBook {
           // A repo the nightly list will not accept: the card ends, the checker alerts (X1). The stored answer says so,
           // so no sentence built from it can say "Done" (Codex build r1 #1).
           state = "unknown";
-          answer = { ...(answer as object), ok: null, eligible: false };
+          answer = { ...(answer as object), ok: null, eligible: false, why: repo.why };
         }
       }
       e.state = state;
@@ -296,10 +298,16 @@ export class CardBook {
     const at = Date.parse(a.created_at);
     const base = this.store.kv.get<GhSnapshot | null>("gh.baseline");
     const line = `${a.name}:${a.repo_id}`;
-    // Settled from `dispatching` is decided by the caller: the late path (alarm already closed it) stores eligible: false.
+    // Settled from `dispatching` is decided by the caller: the late path (alarm already closed it) stores why: "late".
     // GitHub's created_at has whole seconds: the window starts at the whole second the card opened (Codex build r1 #4).
-    const eligible = Number.isFinite(at) && at >= Math.floor(b.opened_at / 1000) * 1000 && at <= b.deadline && repoIdRefusal({ job: REPO_JOB, outcome: "done", repo_id: a.repo_id }) === undefined && this.store.kv.get(created(e.grant.id)) === undefined && !(base?.repo_ids ?? []).includes(line);
-    return { grant: e.grant.id, card: b.card, name: a.name, repo_id: a.repo_id, created_at: a.created_at, eligible, recorded: false };
+    const inWindow = Number.isFinite(at) && at >= Math.floor(b.opened_at / 1000) * 1000 && at <= b.deadline;
+    const why: Ineligible | undefined =
+      (base?.repo_ids ?? []).includes(line) ? "listed"
+      : !inWindow ? "window"
+      : this.store.kv.get(created(e.grant.id)) !== undefined ? "repeat"
+      : repoIdRefusal({ job: REPO_JOB, outcome: "done", repo_id: a.repo_id }) !== undefined ? "bad_id"
+      : undefined;
+    return { grant: e.grant.id, card: b.card, name: a.name, repo_id: a.repo_id, created_at: a.created_at, eligible: why === undefined, recorded: false, ...(why ? { why } : {}) };
   }
 
   /** The durable repo record for a grant, so the desk can build the frozen result body after the answer is erased (Y1). */

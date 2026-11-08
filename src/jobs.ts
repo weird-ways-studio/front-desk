@@ -118,7 +118,12 @@ function repoDone(result: unknown): string {
   const keys = (r?.keys ?? []).some((k) => k.revoke !== "proven") ? " One of the vault's short repo-maker keys could not be proven deleted; it stops working by itself within the hour." : "";
   // No answer, or the vault refused before the job ran: the shared words (stageWords, notDone).
   if (!r || typeof r !== "object" || r.created === undefined) return (r?.ok === true ? null : notDone(result, () => "Nothing was made.")) ?? unknown("no facts");
-  if (r.created === "confirmed" && (r as { eligible?: unknown }).eligible === false) return `Not done as planned: weird-ways-studio/${r.name} exists, but the nightly check will not add it by itself (it was made outside the card's time, or is already listed). Tonight's alarm names it; if it is yours, accept it with the GitHub list approval.${keys} [created: not_eligible]`;
+  if (r.created === "confirmed" && (r as { eligible?: unknown }).eligible === false) {
+    // Each reason gets its own words: an already-listed repo raises no alarm (Codex build r2 N1).
+    const why = String((r as { why?: unknown }).why ?? "unknown");
+    if (why === "listed") return `Not done as planned: weird-ways-studio/${r.name} exists and was already on the nightly check's list with this same id, so nothing was added and the check expects it. Tell the agent: the repo is there.${keys} [created: already_listed]`;
+    return `Not done as planned: weird-ways-studio/${r.name} exists, but the nightly check will not add it by itself (${why === "window" ? "GitHub says it was made outside this card's time" : "its record could not be checked"}). Tonight's alarm names it; if it is yours, accept it with the GitHub list approval.${keys} [created: not_eligible: ${why}]`;
+  }
   if (r.created === "confirmed") return `Done. weird-ways-studio/${r.name} exists, empty and private. Tonight's check expects it once the Observatory has recorded this result; until then the nightly alarm names it.${keys} Nothing else to do.`;
   if (r.created === "absent") return r.refusal === "repo_exists" ? `Not done. A repository with that name already exists, so nothing was made.${keys} Tell the agent the words in brackets: [repo_exists]` : `Not done. Nothing was made.${keys} Tell the agent the words in brackets: [${String(r.refusal ?? "a check did not pass")}]`;
   return unknown(String(r.created));

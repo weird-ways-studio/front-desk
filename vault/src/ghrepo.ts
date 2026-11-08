@@ -90,12 +90,15 @@ async function bypassEmpty(gh: GitHub): Promise<void> {
  * for this endpoint count -- 403 Forbidden and 422 Validation failed -- and only with a readable error body; anything
  * else (another status, an unreadable body) leaves `unknown`. A 422 whose error names the `name` field as already
  * existing is the race where another repo took the name after the existence check: `repo_exists` (rule v7 recovery).
- * The error-body shape is FROM MEMORY of GitHub's validation errors; an unmatched 422 still refuses, as create_refused.
+ * The structured code is VERIFIED in GitHub's REST troubleshooting docs ("Validation failed": already_exists); the exact
+ * live payload of this endpoint is not. An unmatched 422 still refuses, as create_refused.
  */
 export function definiteRefusal(status: number, body: { message?: unknown; errors?: unknown } | undefined): string | undefined {
   if ((status !== 403 && status !== 422) || typeof body?.message !== "string") return undefined;
-  const errs = Array.isArray(body.errors) ? (body.errors as { field?: unknown; message?: unknown }[]) : [];
-  if (status === 422 && errs.some((e) => e?.field === "name" && typeof e.message === "string" && /already exists/i.test(e.message))) return "repo_exists";
+  const errs = Array.isArray(body.errors) ? (body.errors as { field?: unknown; code?: unknown; message?: unknown }[]) : [];
+  // GitHub's documented structured code `already_exists`, or its `custom` form whose message says so (Codex build r2 #3).
+  const taken = (e: { field?: unknown; code?: unknown; message?: unknown }) => e?.field === "name" && (e.code === "already_exists" || (typeof e.message === "string" && /already exists/i.test(e.message)));
+  if (status === 422 && errs.some(taken)) return "repo_exists";
   return `create_refused: gh_${status}`;
 }
 
