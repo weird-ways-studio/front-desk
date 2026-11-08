@@ -6,7 +6,7 @@
 import { Cloudflare, type Fetch } from "./cloudflare.ts";
 import { STUDIO_ZONES } from "./zones.ts";
 import { GitHub, appJwt, canonical, checkApp, checkInstallation, convert, diff, installationKey, pkcs8FromPem, sha256Hex, snapshot, type AppKind, type GhSnapshot } from "./github.ts";
-import { admit, checkSigned } from "./approval.ts";
+import { CARD_GRANT, admit, checkSigned } from "./approval.ts";
 import { PASSKEY_PIN, type PasskeyPin } from "./passkey.ts";
 import { MASTER_LABEL, RECOVERY_LABEL, VaultError, b64url, fromB64url, open, seal, secretBytes, type Sealed } from "./seal.ts";
 
@@ -263,9 +263,18 @@ export class VaultLogic {
    */
   async run(req: unknown, ...rest: unknown[]): Promise<ReadResult | HeadcountSetupResult | GhBaselineResult | CfAcceptResult> {
     const signed = await checkSigned(req, rest.length, this.pin);
+    // A grant on a card runs only through the card book (cards.ts), never standalone (card 85818ab1 T8). Storage
+    // calls only from here through admit(), which the Durable Object does not interleave with cardOpen.
+    if ((await this.store.get(`cardgrant:${signed.grant.id}`)) !== undefined) throw new VaultError(CARD_GRANT);
     // After the crypto: one storage-only step, with the clock read again (approval.ts admit).
     await admit(this.store, signed.grant.id, signed.grant.expires_at, this.now());
     return this.runJob(signed.grant.job, signed.grant.params, signed.prf);
+  }
+
+  /** One card entry's read (cards.ts CardBook.call): today's tap path, for the card-eligible reads only. */
+  runCardEntry(job: string, params: Record<string, string>, prf: string) {
+    if (!(READ_JOBS as readonly string[]).includes(job)) throw new VaultError("job_not_on_cards");
+    return this.runJob(job, params, prf);
   }
 
   private async runJob(job: string, params: Record<string, string>, prf: string): Promise<ReadResult | HeadcountSetupResult | GhBaselineResult | CfAcceptResult> {

@@ -24,3 +24,15 @@ export interface VaultRunApi {
   runStatus(id: string): Promise<ReturnType<RunBook["status"]>>;
   setKeyRev(rev: number): Promise<number>;
 }
+
+// Cards (card 85818ab1; rules in cards.ts).
+import type { CardOpen, CardRun, CardView, EntryState } from "./cards.ts";
+export type { CardOpen, CardRun, CardView, EntryState };
+export interface VaultCardApi {
+  cardApi(): Promise<{ version: number; jobs_version: number; cap: number }>;
+  cardOpen(req: CardOpen): Promise<CardView>;
+  cardRun(req: CardRun): Promise<{ state: EntryState; answer?: unknown; card: CardView }>;
+  cardStop(card: string): Promise<CardView>;
+  cardStatus(card: string): Promise<CardView>;
+  cardAck(card: string, index: number): Promise<boolean>;
+}

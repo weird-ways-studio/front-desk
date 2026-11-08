@@ -61,6 +61,7 @@ const REFUSAL_WORDS: Record<string, string> = {
   no_pin: "no passkey is pinned in the vault",
   bad_grant: "the request's details were not in the form the vault accepts",
   bad_assertion: "your Face ID answer did not check out for this exact request",
+  card_grant: "this request is part of a card, and runs only from the card's own page",
 };
 
 // A vault call that threw (vault_stage set by Desk.approve): three messages, by where the vault stopped.

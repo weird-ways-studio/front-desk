@@ -10,6 +10,8 @@ import { emailOf, handleSetup } from "./setup.ts";
 import { VaultLogic } from "./vault.ts";
 import { APPROVAL_API_VERSION } from "./approval.ts";
 import { RUN_API_VERSION, RunBook, type OpRequest } from "./runs.ts";
+import { CARD_API_VERSION, CARD_CAP, CardBook, JOBS_VERSION } from "./cards.ts";
+import { PASSKEY_PIN } from "./passkey.ts";
 
 interface Env {
   BOX: DurableObjectNamespace<VaultBox>;
@@ -56,6 +58,31 @@ export class VaultBox extends DurableObject<Env> {
   }
   setKeyRev(rev: number) {
     return this.runs().setKeyRev(rev);
+  }
+  // Cards (card 85818ab1; rules in cards.ts). Each entry's read goes through VaultLogic.runCardEntry: today's tap path.
+  private cards() {
+    const logic = this.logic();
+    return new CardBook(this.ctx.storage, (job, params, prf) => logic.runCardEntry(job, params, prf), PASSKEY_PIN);
+  }
+  cardOpen(req: unknown, ...rest: unknown[]) {
+    return this.cards().open(req, ...rest);
+  }
+  cardRun(req: unknown, ...rest: unknown[]) {
+    return this.cards().run(req, ...rest);
+  }
+  cardStop(card: string) {
+    return this.cards().stop(card);
+  }
+  cardStatus(card: string) {
+    return this.cards().status(card);
+  }
+  cardAck(card: string, index: number) {
+    return this.cards().ack(card, index);
+  }
+  // Called by the Cloudflare runtime when the time set by storage.setAlarm arrives (cards.ts armBy/rearm), never by
+  // a request: closes cards left open past their deadline, drops held answers, prunes old books.
+  async alarm() {
+    await this.cards().alarm();
   }
 }
 
@@ -105,5 +132,24 @@ export default class Vault extends WorkerEntrypoint<Env> {
   // Called by the desk whenever the c-box key is removed or replaced, before it acknowledges the change (D3).
   setKeyRev(rev: number) {
     return this.box().setKeyRev(rev);
+  }
+  // Cards (card 85818ab1). The desk checks cardApi() first: another version, or a vault without cards, sends nothing.
+  cardApi() {
+    return { version: CARD_API_VERSION, jobs_version: JOBS_VERSION, cap: CARD_CAP };
+  }
+  cardOpen(req: unknown, ...rest: unknown[]) {
+    return this.box().cardOpen(req, ...rest);
+  }
+  cardRun(req: unknown, ...rest: unknown[]) {
+    return this.box().cardRun(req, ...rest);
+  }
+  cardStop(card: string) {
+    return this.box().cardStop(card);
+  }
+  cardStatus(card: string) {
+    return this.box().cardStatus(card);
+  }
+  cardAck(card: string, index: number) {
+    return this.box().cardAck(card, index);
   }
 }

@@ -14,7 +14,9 @@ export interface SignedRun {
 
 // Raised only BEFORE the admission step writes `used`, so this call started nothing (R6). The desk calls the
 // vault once per grant (it marks the grant approved first), so for the grant on Ben's screen nothing ran.
-export const REFUSED_BEFORE_RUN = ["wrong_shape", "no_pin", "bad_grant", "bad_assertion"] as const;
+export const REFUSED_BEFORE_RUN = ["wrong_shape", "no_pin", "bad_grant", "bad_assertion", "card_grant"] as const;
+// The grant is on a card (vault/src/cards.ts): it runs only through the card book. Refused before admission.
+export const CARD_GRANT = "card_grant";
 // The grant is already in `used`: it may have run once.
 export const ALREADY_USED = "already_used";
 // Too old to admit. Not proof that nothing ran: an id leaves `used` only once its grant is this old, so a late
