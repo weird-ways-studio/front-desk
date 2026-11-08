@@ -66,7 +66,9 @@ const REFUSAL_WORDS: Record<string, string> = {
 // A vault call that threw (vault_stage set by Desk.approve): three messages, by where the vault stopped.
 function stageWords(r: Failed): string | null {
   const why = typeof r.error === "string" ? r.error : "unknown";
-  if (r.vault_stage === "before" && Object.hasOwn(REFUSAL_WORDS, why)) return `Nothing ran. The vault refused this approval: ${REFUSAL_WORDS[why]}. Ask for it again. [${why}]`;
+  // Scoped to this attempt: the vault refused before recording the grant, so this attempt started nothing. It
+  // cannot say no earlier attempt ran (a buggy desk could call twice), so Ben checks first (Codex build r2 #1).
+  if (r.vault_stage === "before" && Object.hasOwn(REFUSAL_WORDS, why)) return `This attempt did not run: the vault refused it because ${REFUSAL_WORDS[why]}. Check this request's result, then ask for it again if nothing happened. [${why}]`;
   if (r.vault_stage === "old") return `This approval is too old to use. It may have run once already, so check its result before asking again. [${why}]`;
   if (r.vault_stage === "used") return `This approval was already used once, so it may have run. Check its result before asking again. [${why}]`;
   if (r.vault_stage !== undefined) return `It is not known whether this ran. Check its result before asking again. [${why}]`;

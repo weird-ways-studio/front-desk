@@ -194,6 +194,17 @@ test("a grant that ran, replayed after it is too old: refused, and Ben is not to
   assert.match(JOBS["cf.zone.read"].done({ error: late, vault_stage: vaultStage(late as string) }), /^This approval is too old to use\. It may have run once already/);
 });
 
+test("a grant that ran, retried with altered values: refused bad_assertion, and Ben is told to check before asking again (Codex build r2 #1)", async () => {
+  const { vault } = vaultAt();
+  const a = await signed("cf.zone.read", ZONE, PRF, until(60_000));
+  await assert.rejects(vault.run(a), PASSED);
+  const retry = await vault.run({ ...a, grant: { ...a.grant, params: { zone: "weirdways.studio" } } }).catch((e: Error) => e.message);
+  assert.equal(retry, "bad_assertion");
+  const words = JOBS["cf.zone.read"].done({ error: retry, vault_stage: vaultStage(retry as string) });
+  assert.doesNotMatch(words, /Nothing ran/);
+  assert.match(words, /^This attempt did not run: .*Check this request's result, then ask for it again if nothing happened\./);
+});
+
 test("a grant still in the used list is reported already_used even when it is also too old", async () => {
   const { vault, clock } = vaultAt();
   const a = await signed("cf.zone.read", ZONE, PRF, until(0));
@@ -264,7 +275,7 @@ test("pruning and expiry share one boundary: at the last allowed moment the id i
 // ---- R6: the three result messages, chosen by the exact code ----
 test("result words: each before-admission code says nothing ran; already_used says it may have run; anything else is unknown", () => {
   const words = (error: string) => JOBS["cf.zone.read"].done({ error, vault_stage: vaultStage(error) });
-  for (const code of REFUSED_BEFORE_RUN) assert.match(words(code), /^Nothing ran\. The vault refused this approval: .+\. Ask for it again\. \[/, code);
+  for (const code of REFUSED_BEFORE_RUN) assert.match(words(code), /^This attempt did not run: the vault refused it because .+\. Check this request's result, then ask for it again if nothing happened\. \[/, code);
   assert.match(words(ALREADY_USED), /^This approval was already used once, so it may have run\. Check its result before asking again\./);
   assert.match(words(TOO_OLD), /^This approval is too old to use\. It may have run once already, so check its result before asking again\./);
   assert.doesNotMatch(words(TOO_OLD), /Nothing ran|Ask for it again/);
@@ -274,7 +285,7 @@ test("result words: each before-admission code says nothing ran; already_used sa
   // Every vault job's words follow the same three messages.
   for (const job of Object.keys(JOBS) as (keyof typeof JOBS)[]) {
     if (!(JOBS[job] as { vault?: true }).vault) continue;
-    assert.match(JOBS[job].done({ error: "bad_assertion", vault_stage: "before" }), /^Nothing ran\./, job);
+    assert.match(JOBS[job].done({ error: "bad_assertion", vault_stage: "before" }), /^This attempt did not run:/, job);
     assert.match(JOBS[job].done({ error: "x", vault_stage: "unknown" }), /^It is not known whether this ran\./, job);
   }
 });
@@ -330,9 +341,9 @@ test("desk -> real vault: the desk's call passes the vault's own check (gets to 
   assert.equal(await grantHash(seen!.grant as Grant), g.hash);
 });
 
-test("desk -> vault refusing before admission: Ben reads 'Nothing ran ... Ask for it again'", async () => {
+test("desk -> vault refusing before admission: Ben reads 'This attempt did not run ... Check this request's result'", async () => {
   const { desk, g, answer } = await deskWith(async () => ({ approvalApi: async () => ({ version: 1 }), run: async () => { throw new Error("bad_assertion"); } }));
-  assert.match(summary(await desk.approve(g.id, answer as never, T)), /^Nothing ran\./);
+  assert.match(summary(await desk.approve(g.id, answer as never, T)), /^This attempt did not run:/);
 });
 
 test("desk -> old vault (no approvalApi): run is never called, and it reads as wrong_shape", async () => {
@@ -341,10 +352,10 @@ test("desk -> old vault (no approvalApi): run is never called, and it reads as w
   const done = await desk.approve(g.id, answer as never, T);
   assert.equal(ran, 0);
   assert.deepEqual(done.result, { error: "wrong_shape", vault_stage: "before" });
-  assert.match(summary(done), /^Nothing ran\. The vault refused this approval: the front desk and the vault were on different versions/);
+  assert.match(summary(done), /^This attempt did not run: the vault refused it because the front desk and the vault were on different versions/);
 });
 
-test("desk -> vault failures that are not a known before-admission code read as unknown, never 'Nothing ran'", async () => {
+test("desk -> vault failures that are not a known before-admission code read as unknown, never 'This attempt did not run'", async () => {
   const throws: unknown[] = [new Error("cf_500: provider down"), new Error("Error: bad_assertion"), "bad_assertion", { message: "bad_assertion" }, new Error("already_used ")];
   for (const t of throws) {
     const { desk, g, answer } = await deskWith(async () => ({ approvalApi: async () => ({ version: 1 }), run: async () => { throw t; } }));
