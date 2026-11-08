@@ -208,5 +208,157 @@
   "if ((await store.get(`cardgrant:${id}`)) !== undefined) throw new VaultError(CARD_GRANT);",
   "",
   "T8: vault.run refuses a grant held by a card (card_grant), even with a valid tap for that grant"
+ ],
+ [
+  "c4-name",
+  "vault/src/ghrepo.ts",
+  "  if (!validRepoName(name)) return { ...r, refusal: \"bad_params\" };\n",
+  "",
+  "T3: a correctly signed card holding a bad name fails bad_params with ZERO GitHub calls",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-bypass-actors",
+  "vault/src/ghrepo.ts",
+  "  if (actors.length) throw new VaultError(",
+  "  if (false) throw new VaultError(",
+  "T8: a bypass actor on protect-main, a missing bypass field, no rule or two rules -> failed before create; the rule key is still deleted",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-bypass-field",
+  "vault/src/ghrepo.ts",
+  "  if (!Array.isArray(actors)) throw new VaultError(\"bypass_unreadable: no bypass list shown\");\n",
+  "",
+  "T8: a bypass actor on protect-main, a missing bypass field, no rule or two rules -> failed before create; the rule key is still deleted",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-exists",
+  "vault/src/ghrepo.ts",
+  "      if (exists === 200) throw new VaultError(\"repo_exists\");\n",
+  "",
+  "T10: an existing repo -> failed repo_exists, no create; an unreadable existence answer -> failed, no create",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-exists-404only",
+  "vault/src/ghrepo.ts",
+  "      if (exists !== 404) throw new VaultError(`existence_unreadable: ${exists}`);\n",
+  "",
+  "T10: an existing repo -> failed repo_exists, no create; an unreadable existence answer -> failed, no create",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-reply-private",
+  "vault/src/ghrepo.ts",
+  "const asAsked = body.private === true && ",
+  "const asAsked = ",
+  "T9: a reply that is public, or has no id -> created not_as_asked -> unknown; no record is eligible",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-reply-5xx",
+  "vault/src/ghrepo.ts",
+  "      if (res.status !== 201 || !body) {",
+  "      if (!body) {",
+  "T9: a lost or 5xx create reply -> unknown, the card ends, facts kept, keys still deleted; a 4xx -> failed absent",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-probe",
+  "vault/src/ghrepo.ts",
+  "facts.revoke = facts.probe_status === 401 ? \"proven\" : \"unproven\";",
+  "facts.revoke = \"proven\";",
+  "X4: both revokes failing after a create keeps created confirmed and the id; every key still gets its DELETE and probe",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-narrow-create",
+  "vault/src/ghrepo.ts",
+  "export const CREATE_PERMS = { repository_creation: \"write\", metadata: \"read\" } as const;",
+  "export const CREATE_PERMS = { repository_creation: \"write\", metadata: \"read\", administration: \"write\" } as const;",
+  "one tap makes the repo: private, empty, by name and id; 13 GitHub calls; both keys narrowed, deleted and probed 401 (F9 X5)",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-window",
+  "vault/src/cards.ts",
+  "at >= b.opened_at && at <= b.deadline && ",
+  "",
+  "T15: GitHub's created_at outside [card open, deadline] -> unknown, the record is never eligible, repoRecorded refuses",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-eligible-baseline",
+  "vault/src/cards.ts",
+  " && !(base?.repo_ids ?? []).includes(line);",
+  ";",
+  "T11: the same id already in the baseline at settle -> unknown, never added twice; a second card's record is its own",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-recorded-sha",
+  "vault/src/cards.ts",
+  " || rc!.grant !== grant || (await sha256(body)) !== rc!.sha256) throw new VaultError(\"bad_receipt\");",
+  " || rc!.grant !== grant) throw new VaultError(\"bad_receipt\");",
+  "Z3: a genuine receipt with an altered body, a forged or borrowed receipt, another stage -> refused, no line",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-recorded-sig",
+  "vault/src/cards.ts",
+  "    if (!(await this.receiptOk(rc)) || rc!.stage !== \"result\"",
+  "    if (rc!.stage !== \"result\"",
+  "Z3: a genuine receipt with an altered body, a forged or borrowed receipt, another stage -> refused, no line",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-recorded-repoid",
+  "vault/src/cards.ts",
+  " || r.repo_id !== first.repo_id) throw new VaultError(\"bad_result\");",
+  ") throw new VaultError(\"bad_result\");",
+  "Z3: a genuine receipt with an altered body, a forged or borrowed receipt, another stage -> refused, no line",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-recorded-once",
+  "vault/src/cards.ts",
+  "      if (c.recorded) return { recorded: \"already\" as const };\n",
+  "",
+  "T11/Y1: the recorder's receipt over the exact done body adds exactly two lines, once; a planted change still alarms",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-recorded-eligible",
+  "vault/src/cards.ts",
+  "      if (!c.eligible) throw new VaultError(\"repo_not_eligible\");\n",
+  "",
+  "T15: GitHub's created_at outside [card open, deadline] -> unknown, the record is never eligible, repoRecorded refuses",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-nightly-unrecorded",
+  "vault/src/vault.ts",
+  "r.changes.push(`repo_result_unrecorded: ${c.name}`);",
+  "void c;",
+  "Y1: the nightly GitHub count names a job-made repo the recorder has not receipted, until it is in the list",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-runjob",
+  "vault/src/vault.ts",
+  "    if (job === \"gh.repo.create\") return this.repoCreate(params, prf);\n    if (!(READ_JOBS",
+  "    if (!(READ_JOBS",
+  "T3: a correctly signed card holding a bad name fails bad_params with ZERO GitHub calls",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-baseline-sync",
+  "vault/src/vault.ts",
+  "        if (canonical(this.store.kv.get<GhSnapshot | null>(\"gh.baseline\") ?? null) !== oldText) throw new VaultError(\"baseline_changed_since_request: nothing recorded, ask again\");\n",
+  "",
+  "X2/T12: a repo line written right after gh.app.baseline read the list makes that tap refuse; the repo line survives",
+  "test/github.test.ts"
  ]
 ]

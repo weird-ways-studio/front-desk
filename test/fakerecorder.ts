@@ -5,6 +5,7 @@
 
 import type { Receipt, Recorder, Stage } from "../src/recorder.ts";
 import { RecorderError, recordBody } from "../src/recorder.ts";
+import { repoIdRefusal } from "../vault/src/cardcopy.ts";
 
 /** Signs receipts as the real recorder does (test/cardsign.ts TestRecorder), so the vault's receipt check can run. */
 export interface Signer { receipt(grant: string, stage: string, body: string, over?: { seq?: number; recorded_at?: string }): Promise<object> }
@@ -48,6 +49,9 @@ export class FakeRecorder {
   private async commit(record: { grant: string; stage: Stage; [k: string]: unknown }, body: string): Promise<Receipt> {
     if (new TextEncoder().encode(body).length > MAX_RECORD_BYTES) throw new RecorderError("recorder answered 413");
     if (secretish(record)) throw new RecorderError("recorder answered 400");
+    // The Observatory's own rule (src/card.ts repoIdRefusal @4f96e85, copied in vault/src/cardcopy.ts): a done
+    // gh.repo.create result needs repo_id digits; no other result may carry one (card 77ec1e64 T17).
+    if (record.stage === "result" && repoIdRefusal(JSON.parse(body)) !== undefined) throw new RecorderError("recorder answered 400");
     const sha = await sha256Hex(body);
     const mine = this.records.filter((r) => r.grant === record.grant);
     const same = mine.find((r) => r.stage === record.stage);

@@ -389,3 +389,29 @@ test("only GitHub's exact permission refusal counts as the read-only App being r
     "gh_422: The level of access for permissions requested are not granted to this installation. Retry later",
   ]) assert.equal(GH_ESCALATION_REFUSAL.test(other), false, other);
 });
+
+// ---- Card 77ec1e64 X2 / T12: ghBaseline's write is one sync compare-and-write ----
+test("X2/T12: a repo line written right after gh.app.baseline read the list makes that tap refuse; the repo line survives", async () => {
+  const { vault, store } = await connected();
+  assert.equal((await baseline(vault)).ok, true, "a first list");
+  const shown = await vault.ghPreview();
+  // The other writer (CardBook.repoRecorded) lands between ghBaseline's read of the list and its write.
+  const get = store.get.bind(store);
+  let armed = true;
+  (store as any).get = async (k: string) => {
+    const v = await get(k);
+    if (k === "gh.baseline" && armed) {
+      armed = false;
+      const b = store.kv.get<any>("gh.baseline");
+      store.kv.put("gh.baseline", { ...b, repos: [...b.repos, "new-app:private"], repo_ids: [...b.repo_ids, "new-app:777"] });
+    }
+    return v;
+  };
+  const r = await baseline(vault, 7, shown);
+  assert.equal(r.ok, false);
+  assert.match(r.error ?? "", /^baseline_changed_since_request/);
+  assert.ok(store.kv.get<any>("gh.baseline").repo_ids.includes("new-app:777"), "the repo line was not overwritten");
+  // Asked again against the list as it now is, the tap goes through (and the repo line is now Ben's to accept or not).
+  (store as any).get = get;
+  assert.equal((await baseline(vault)).ok, true);
+});

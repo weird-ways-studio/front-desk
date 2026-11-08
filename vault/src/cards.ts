@@ -282,7 +282,7 @@ export class CardBook {
 
   /**
    * Inside settle's transaction: the record of a repo GitHub reported as made (`done` with an id and a time), or
-   * undefined. Eligible only if settled from `dispatching`, created inside [open, deadline] by GitHub's clock, the
+   * undefined. Eligible (the late path in settle overrides it to false, so only an entry settled from `dispatching`) only if created inside [open, deadline] by GitHub's clock, the
    * grant has no record yet, and the id is not already in the baseline (X1, Z2, T15).
    */
   private repoMade(b: Book, e: Entry, state: EntryState, answer: unknown): GhCreated | undefined {
@@ -291,7 +291,8 @@ export class CardBook {
     const at = Date.parse(a.created_at);
     const base = this.store.kv.get<GhSnapshot | null>("gh.baseline");
     const line = `${a.name}:${a.repo_id}`;
-    const eligible = e.state === "dispatching" && Number.isFinite(at) && at >= b.opened_at && at <= b.deadline && repoIdRefusal({ job: REPO_JOB, outcome: "done", repo_id: a.repo_id }) === undefined && this.store.kv.get(created(e.grant.id)) === undefined && !(base?.repo_ids ?? []).includes(line);
+    // Settled from `dispatching` is decided by the caller: the late path (alarm already closed it) stores eligible: false.
+    const eligible = Number.isFinite(at) && at >= b.opened_at && at <= b.deadline && repoIdRefusal({ job: REPO_JOB, outcome: "done", repo_id: a.repo_id }) === undefined && this.store.kv.get(created(e.grant.id)) === undefined && !(base?.repo_ids ?? []).includes(line);
     return { grant: e.grant.id, card: b.card, name: a.name, repo_id: a.repo_id, created_at: a.created_at, eligible, recorded: false };
   }
 

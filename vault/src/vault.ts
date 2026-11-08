@@ -7,7 +7,7 @@ import { Cloudflare, type Fetch } from "./cloudflare.ts";
 import { STUDIO_ZONES } from "./zones.ts";
 import { GitHub, appJwt, canonical, checkApp, checkInstallation, convert, diff, installationKey, pkcs8FromPem, sha256Hex, snapshot, type AppKind, type GhSnapshot } from "./github.ts";
 import { admit, checkSigned } from "./approval.ts";
-import { createRepo, validRepoName, type RepoCreateResult } from "./ghrepo.ts";
+import { createRepo, type RepoCreateResult } from "./ghrepo.ts";
 import type { GhCreated } from "./cards.ts";
 import { PASSKEY_PIN, type PasskeyPin } from "./passkey.ts";
 import { MASTER_LABEL, RECOVERY_LABEL, VaultError, b64url, fromB64url, open, seal, secretBytes, type Sealed } from "./seal.ts";
@@ -295,7 +295,8 @@ export class VaultLogic {
    * name (X3), an App not set up and locked to Ben's passkey, or no accepted GitHub list (C6a-2 2.1).
    */
   private async repoCreate(params: Record<string, string>, prf: string): Promise<RepoCreateResult> {
-    if (!params || Object.keys(params).join() !== "name" || !validRepoName(params.name)) throw new VaultError("bad_params");
+    // The name itself is checked once, first thing in createRepo, before any network call (X3).
+    if (!params || Object.keys(params).join() !== "name" || typeof params.name !== "string") throw new VaultError("bad_params");
     const secret = secretBytes(prf);
     const main = await this.ghMain();
     if (!main?.by_passkey || !main.installation) throw new VaultError("github_not_set_up");
