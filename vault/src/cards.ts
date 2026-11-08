@@ -264,7 +264,12 @@ export class CardBook {
       }
       if (repo) {
         kv.put(created(e.grant.id), repo);
-        if (!repo.eligible) state = "unknown"; // a repo the nightly list will not accept: the card ends, the checker alerts (X1)
+        if (!repo.eligible) {
+          // A repo the nightly list will not accept: the card ends, the checker alerts (X1). The stored answer says so,
+          // so no sentence built from it can say "Done" (Codex build r1 #1).
+          state = "unknown";
+          answer = { ...(answer as object), ok: null, eligible: false };
+        }
       }
       e.state = state;
       e.at = now;
@@ -292,7 +297,8 @@ export class CardBook {
     const base = this.store.kv.get<GhSnapshot | null>("gh.baseline");
     const line = `${a.name}:${a.repo_id}`;
     // Settled from `dispatching` is decided by the caller: the late path (alarm already closed it) stores eligible: false.
-    const eligible = Number.isFinite(at) && at >= b.opened_at && at <= b.deadline && repoIdRefusal({ job: REPO_JOB, outcome: "done", repo_id: a.repo_id }) === undefined && this.store.kv.get(created(e.grant.id)) === undefined && !(base?.repo_ids ?? []).includes(line);
+    // GitHub's created_at has whole seconds: the window starts at the whole second the card opened (Codex build r1 #4).
+    const eligible = Number.isFinite(at) && at >= Math.floor(b.opened_at / 1000) * 1000 && at <= b.deadline && repoIdRefusal({ job: REPO_JOB, outcome: "done", repo_id: a.repo_id }) === undefined && this.store.kv.get(created(e.grant.id)) === undefined && !(base?.repo_ids ?? []).includes(line);
     return { grant: e.grant.id, card: b.card, name: a.name, repo_id: a.repo_id, created_at: a.created_at, eligible, recorded: false };
   }
 

@@ -754,3 +754,16 @@ test("Z1: a vault answer that is not a confirmation (an older vault, an odd repl
     assert.equal((await store.get<any>(`grant:${grants[0].id}`)).vault_ack, undefined, `${JSON.stringify(odd)}: not taken as confirmed`);
   }
 });
+
+test("r1 #1 (desk): an entry settled unknown because the repo cannot be listed shows the job's own not-done sentence, never Done", async () => {
+  const runs: string[] = [];
+  const r = await rig({ runEntry: async (job, params) => (runs.push(job), { ...REPO_ANSWER, name: params.name, created_at: new Date(T0 + 60 * 60_000).toISOString() }) });
+  r.vb.store.kv.put("gh.baseline", REPO_BASE);
+  const { card } = await r.desk.requestCard({ entries: [repoEntry()] }, "agent", T0, signedSrc);
+  const rep = await tap(r.desk, card.id);
+  assert.equal(rep.entries[0].state, "unknown");
+  assert.match(rep.entries[0].summary ?? "", /^Not done as planned/);
+  const view = cardView(200, { report: rep });
+  assert.doesNotMatch(view.lines[0], /-- Done/);
+  assert.equal(view.head, "Unclear");
+});

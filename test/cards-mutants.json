@@ -284,7 +284,7 @@
  [
   "c4-window",
   "vault/src/cards.ts",
-  "at >= b.opened_at && at <= b.deadline && ",
+  "at >= Math.floor(b.opened_at / 1000) * 1000 && at <= b.deadline && ",
   "",
   "T15: GitHub's created_at outside [card open, deadline] -> unknown, the record is never eligible, repoRecorded refuses",
   "test/ghrepo.test.ts"
@@ -360,5 +360,45 @@
   "",
   "X2/T12: a repo line written right after gh.app.baseline read the list makes that tap refuse; the repo line survives",
   "test/github.test.ts"
+ ],
+ [
+  "c4-window-second",
+  "vault/src/cards.ts",
+  "at >= Math.floor(b.opened_at / 1000) * 1000 &&",
+  "at >= b.opened_at &&",
+  "r1 #4: a repo made in the same second the card opened, reported in whole seconds, is inside the window",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-ineligible-answer",
+  "vault/src/cards.ts",
+  "          answer = { ...(answer as object), ok: null, eligible: false };\n",
+  "",
+  "r1 #1: an ineligible creation (late, or already listed) stores ok null and eligible false, so no sentence says Done",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-refusal-narrow",
+  "vault/src/ghrepo.ts",
+  "  if ((status !== 403 && status !== 422) || typeof body?.message !== \"string\") return undefined;",
+  "  if (status < 400 || status >= 500) return undefined;",
+  "r1 #3: any other 4xx, or a 422 with no readable body -> unknown (it may exist), never absent",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-dup-name",
+  "vault/src/ghrepo.ts",
+  "/already exists/i.test(e.message))) return \"repo_exists\";",
+  "false)) return \"repo_exists\";",
+  "r1 #3: a 422 naming the name as taken (lost race after the existence check) -> failed repo_exists; 403 and a readable 422 -> failed",
+  "test/ghrepo.test.ts"
+ ],
+ [
+  "c4-nightly-eligible",
+  "vault/src/vault.ts",
+  "if (c.eligible ? !c.recorded : !(base.repo_ids",
+  "if (false ? !c.recorded : !(base.repo_ids",
+  "r1 #2: an eligible repo Ben accepted into the list still alarms repo_result_unrecorded until the receipt; an ineligible one clears once accepted",
+  "test/ghrepo.test.ts"
  ]
 ]

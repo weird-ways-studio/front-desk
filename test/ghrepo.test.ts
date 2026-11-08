@@ -21,7 +21,8 @@ const refused = (code: string) => new RegExp(`^Error: ${code}`);
 
 type Fault =
   | "bypass" | "noBypassField" | "noRule" | "twoRules" | "exists" | "exists500" | "mintRefused"
-  | "createLost" | "create500" | "create422" | "createPublic" | "createNoId" | "createLate" | "revokeFails" | "wideApp" | "notAll";
+  | "createLost" | "create500" | "create422" | "createPublic" | "createNoId" | "createLate" | "revokeFails" | "wideApp" | "notAll"
+  | "create422dup" | "create403" | "create409" | "create400" | "create422raw" | "createWholeSecond";
 
 const pem = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs1", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey as string;
 
@@ -81,7 +82,12 @@ function fakeGitHub(clock: { now: number }, faults: Fault[] = []) {
         if (has("createLost")) throw new TypeError("network connection lost");
         if (has("create500")) return json({ message: "Server Error" }, 502);
         if (has("create422")) return json({ message: "Repository creation failed." }, 422);
-        const at = has("createLate") ? clock.now + 60 * 60_000 : clock.now;
+        if (has("create422dup")) return json({ message: "Repository creation failed.", errors: [{ resource: "Repository", code: "custom", field: "name", message: "name already exists on this account" }] }, 422);
+        if (has("create403")) return json({ message: "Forbidden" }, 403);
+        if (has("create409")) return json({ message: "Conflict" }, 409);
+        if (has("create400")) return json({ message: "Bad Request" }, 400);
+        if (has("create422raw")) return new Response("<html>oops</html>", { status: 422 });
+        const at = has("createLate") ? clock.now + 60 * 60_000 : has("createWholeSecond") ? Math.floor(clock.now / 1000) * 1000 : clock.now;
         return json({ ...(has("createNoId") ? {} : { id: REPO_ID }), name: body.name, private: !has("createPublic"), owner: { login: ORG }, created_at: new Date(at).toISOString() }, 201);
       }
     }
@@ -408,4 +414,68 @@ test("6.2: two repo cards racing -> both repos added, no line lost", async () =>
   await Promise.all([s.book.repoRecorded(a.c.grants[0].id, ra.body, ra.receipt), s.book.repoRecorded(b.c.grants[0].id, rb.body, rb.receipt)]);
   const ids = s.store.kv.get<GhSnapshot>("gh.baseline")!.repo_ids;
   assert.ok(ids.includes(`new-app:${REPO_ID}`) && ids.includes("other-app:777002"), JSON.stringify(ids));
+});
+
+// ---- Codex build r1 #3: only documented, readable refusals count as "nothing made" ----
+test("r1 #3: a 422 naming the name as taken (lost race after the existence check) -> failed repo_exists; 403 and a readable 422 -> failed", async () => {
+  for (const [f, code] of [["create422dup", "repo_exists"], ["create403", "create_refused: gh_403"], ["create422", "create_refused: gh_422"]] as const) {
+    const s = await setup([f]);
+    const { state, answer } = await runRepo(s);
+    assert.equal(state, "failed", f);
+    assert.deepEqual({ created: answer.created, refusal: answer.refusal }, { created: "absent", refusal: code }, f);
+  }
+});
+
+test("r1 #3: any other 4xx, or a 422 with no readable body -> unknown (it may exist), never absent", async () => {
+  for (const f of ["create409", "create400", "create422raw"] as const) {
+    const s = await setup([f]);
+    const { state, answer } = await runRepo(s);
+    assert.equal(state, "unknown", f);
+    assert.equal(answer.created, "unknown", f);
+    assert.match(answer.notes.join(" "), /unexpected answer 4\d\d/, f);
+  }
+});
+
+// ---- Codex build r1 #4: GitHub's whole-second created_at ----
+test("r1 #4: a repo made in the same second the card opened, reported in whole seconds, is inside the window", async () => {
+  const s = await setup(["createWholeSecond"]);
+  s.clock.now = T + 700; // the card opens 0.7 s into the second; GitHub reports the second itself
+  const { state, c } = await runRepo(s);
+  assert.equal(state, "done");
+  assert.equal(s.book.repoFacts(c.grants[0].id)?.eligible, true);
+});
+
+// ---- Codex build r1 #1: the stored answer of an ineligible creation says so ----
+test("r1 #1: an ineligible creation (late, or already listed) stores ok null and eligible false, so no sentence says Done", async () => {
+  const { JOBS } = await import("../src/jobs.ts");
+  for (const [label, s] of [["late", await setup(["createLate"])], ["listed", await setup([], { baseline: { ...BASELINE, repo_ids: [...BASELINE.repo_ids, `new-app:${REPO_ID}`] } })]] as const) {
+    const { state, answer } = await runRepo(s);
+    assert.equal(state, "unknown", label);
+    assert.deepEqual({ ok: answer.ok, eligible: answer.eligible, created: answer.created }, { ok: null, eligible: false, created: "confirmed" }, label);
+    const said = JOBS["gh.repo.create"].done(answer);
+    assert.match(said, /^Not done as planned: weird-ways-studio\/new-app exists, but the nightly check will not add it by itself/, label);
+    assert.doesNotMatch(said, /^Done/, label);
+  }
+});
+
+// ---- Codex build r1 #2: Ben accepting the list does not silence an unreceipted eligible creation ----
+test("r1 #2: an eligible repo Ben accepted into the list still alarms repo_result_unrecorded until the receipt; an ineligible one clears once accepted", async () => {
+  const s = await setup();
+  const { c } = await runRepo(s);
+  const live: GhSnapshot = { ...BASELINE, repos: [...BASELINE.repos, "new-app:private"].sort(), repo_ids: [...BASELINE.repo_ids, `new-app:${REPO_ID}`].sort() };
+  s.store.kv.put("gh.app.headcount", { id: 101, slug: "wws-front-desk-headcount", key: "k", installation: 1010 });
+  (s.vault as any).ghRead = async () => live;
+  s.store.kv.put("gh.baseline", live); // Ben accepted the GitHub list with the repo in it, before the receipt arrived
+  assert.deepEqual((await (s.vault as any).ghHeadcount()).changes, ["repo_result_unrecorded: new-app"]);
+  const { body, receipt } = await resultOf(s, c.grants[0].id);
+  assert.deepEqual(await s.book.repoRecorded(c.grants[0].id, body, receipt), { recorded: "now" });
+  assert.deepEqual(await (s.vault as any).ghHeadcount(), { ok: true, changes: [] });
+  // Ineligible: alarms while unlisted, clears when Ben accepts it.
+  const late = await setup(["createLate"]);
+  await runRepo(late);
+  late.store.kv.put("gh.app.headcount", { id: 101, slug: "x", key: "k", installation: 1010 });
+  (late.vault as any).ghRead = async () => live;
+  assert.ok((await (late.vault as any).ghHeadcount()).changes.includes("repo_result_unrecorded: new-app"));
+  late.store.kv.put("gh.baseline", live);
+  assert.deepEqual(await (late.vault as any).ghHeadcount(), { ok: true, changes: [] });
 });

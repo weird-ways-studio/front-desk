@@ -680,7 +680,11 @@ export class VaultLogic {
       if (!base || !hc?.installation) throw new VaultError("github_not_set_up");
       r.changes = diff(base, await this.ghRead(hc, snapshot));
       // A job-made repo the recorder has not yet receipted is not in the list (Y1): say why it shows, until it is.
-      for (const [, c] of this.store.kv.list<GhCreated>({ prefix: "gh.created:" })) if (!(base.repo_ids ?? []).includes(`${c.name}:${c.repo_id}`)) r.changes.push(`repo_result_unrecorded: ${c.name}`);
+      // An eligible one alarms until the recorder's receipt lands (Y1), even if Ben accepted it into the list meanwhile
+      // (Codex build r1 #2). An ineligible one can never be receipted: it alarms until Ben accepts it with gh.app.baseline.
+      for (const [, c] of this.store.kv.list<GhCreated>({ prefix: "gh.created:" })) {
+        if (c.eligible ? !c.recorded : !(base.repo_ids ?? []).includes(`${c.name}:${c.repo_id}`)) r.changes.push(`repo_result_unrecorded: ${c.name}`);
+      }
       r.ok = r.changes.length === 0;
     } catch (e) {
       note(r, (e as Error).message);

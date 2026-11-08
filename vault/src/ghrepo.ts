@@ -86,6 +86,20 @@ async function bypassEmpty(gh: GitHub): Promise<void> {
 }
 
 /**
+ * A create answer that proves nothing was made, or undefined (Codex build r1 #3). Only GitHub's documented refusals
+ * for this endpoint count -- 403 Forbidden and 422 Validation failed -- and only with a readable error body; anything
+ * else (another status, an unreadable body) leaves `unknown`. A 422 whose error names the `name` field as already
+ * existing is the race where another repo took the name after the existence check: `repo_exists` (rule v7 recovery).
+ * The error-body shape is FROM MEMORY of GitHub's validation errors; an unmatched 422 still refuses, as create_refused.
+ */
+export function definiteRefusal(status: number, body: { message?: unknown; errors?: unknown } | undefined): string | undefined {
+  if ((status !== 403 && status !== 422) || typeof body?.message !== "string") return undefined;
+  const errs = Array.isArray(body.errors) ? (body.errors as { field?: unknown; message?: unknown }[]) : [];
+  if (status === 422 && errs.some((e) => e?.field === "name" && typeof e.message === "string" && /already exists/i.test(e.message))) return "repo_exists";
+  return `create_refused: gh_${status}`;
+}
+
+/**
  * The step itself (C6a-2 shape 2.2-2.9). `app` is signed in with the repo-maker App's key, opened by Ben's tap. Every
  * refusal before the create call is `failed` with nothing made; after the call, anything not exactly as asked is
  * `unknown` (the card ends and the Observatory checker alerts).
@@ -116,10 +130,11 @@ export async function createRepo(app: GitHub, installation: number, name: string
         r.notes.push(`create: no answer (${raw(e)})`);
         return;
       }
-      const body = (await res.json().catch(() => undefined)) as { id?: unknown; name?: unknown; private?: unknown; owner?: { login?: unknown }; created_at?: unknown } | undefined;
-      if (res.status >= 400 && res.status < 500) {
+      const body = (await res.json().catch(() => undefined)) as { id?: unknown; name?: unknown; private?: unknown; owner?: { login?: unknown }; created_at?: unknown; message?: unknown; errors?: unknown } | undefined;
+      const refusal = definiteRefusal(res.status, body);
+      if (refusal) {
         r.created = "absent";
-        throw new VaultError(`create_refused: gh_${res.status}`);
+        throw new VaultError(refusal);
       }
       if (res.status !== 201 || !body) {
         r.notes.push(`create: unexpected answer ${res.status}`);
