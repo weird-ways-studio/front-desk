@@ -13,12 +13,14 @@ import {
 import { ascii, name, plainChanges } from "./ghplain.ts";
 import { JOBS, type Job, type JobName } from "./jobs.ts";
 import { currentKey, fingerprint, keyRev, type CboxKey } from "./cboxkey.ts";
-import type { Headcount, VaultApi } from "../vault/src/api.ts";
+import type { Headcount, VaultApi, VaultCardApi, VaultRunApi } from "../vault/src/api.ts";
 import { ALREADY_USED, APPROVAL_API_VERSION, REFUSED_BEFORE_RUN, TOO_OLD } from "../vault/src/approval.ts";
 export type VaultStage = "before" | "used" | "old" | "unknown";
 import { RecorderError, type Receipt, type Recorder, type Stage } from "./recorder.ts";
 
 export const APPROVE_WINDOW_MS = 10 * 60_000; // ask -> approve
+/** How long a c-box key change waits for the vault to take the new generation before answering Ben anyway. */
+export const KEY_REV_WAIT_MS = 5_000;
 export const COLLECT_WINDOW_MS = 5 * 60_000; // approve -> collect
 export const MAX_PENDING = 3; // grants one requester may have waiting for Ben at once
 export const CHALLENGE_TTL_MS = 5 * 60_000;
@@ -67,6 +69,13 @@ export interface Grant {
   // record numbers. A grant with no request receipt is never approved or collected. `verdict` is the
   // number of the "overseer: not checked" record (card 6da30339); a grant without it is never approved.
   recorded?: { request: string; verdict?: number; approval?: number; result?: number };
+  // Card entries only (card 85818ab1; src/carddesk.ts): the card id; each stage's full signed receipt (returned to the
+  // agent, U6); the result record's exact bytes, frozen before the first send so every resend is identical (V1, W1);
+  // and whether a held answer was erased after the collect window (V3).
+  card?: string;
+  receipts?: Partial<Record<Stage, Omit<Receipt, "body">>>;
+  result_body?: string;
+  answer_erased?: true;
   // What a vault job reported when it ran at approval. A minted key's secret (result.key.value)
   // is kept only until the agent collects it, then erased; it is never logged or shown to Ben.
   result?: unknown;
@@ -87,7 +96,7 @@ export interface PasskeyPin {
 }
 
 interface Challenge {
-  purpose: "approve" | "enroll" | "check" | "setup";
+  purpose: "approve" | "enroll" | "check" | "setup" | "card";
   grant_id?: string;
   expires_at: number;
   used: boolean;
@@ -285,8 +294,9 @@ function phoneSenders(ntfyUrl: string | undefined, pushover: PushoverKeys, fetch
 // Test seam: lets a test pause an approval between verification and commit.
 export interface DeskHooks {
   afterVerify?: (grantId: string) => Promise<void>;
-  // The vault Worker (service binding VAULT); absent in tests that do not need it.
-  vault?: VaultApi;
+  // The vault Worker (service binding VAULT); absent in tests that do not need it. Its card calls (VaultCardApi) are
+  // used only by src/carddesk.ts, which checks they are there.
+  vault?: VaultApi & Partial<VaultCardApi> & Partial<Pick<VaultRunApi, "setKeyRev">>;
   // The Observatory's recorder (recorder.ts). Absent = not set up: every request is refused.
   recorder?: Recorder;
   // Ben's phone, for a job that ran but whose result could not be recorded (phoneAlert).
@@ -295,12 +305,12 @@ export interface DeskHooks {
 
 // The public parts of Ben's passkey answer, kept so the Observatory can check the signature itself
 // (phase 3b). Never the PRF output, the user handle or extension results.
-function assertionOf(r: AuthenticationResponseJSON) {
+export function assertionOf(r: AuthenticationResponseJSON) {
   return { passkey_id: r.id, authenticator_data: r.response.authenticatorData, client_data_json: r.response.clientDataJSON, signature: r.response.signature };
 }
 
 // The passkey secret a browser sent with its answer, if it is 32 bytes.
-function prfOf(input: unknown): string | null {
+export function prfOf(input: unknown): string | null {
   const prf = (input as { prf?: unknown } | null)?.prf;
   try {
     return typeof prf === "string" && fromB64url(prf).length === 32 ? prf : null;
@@ -323,27 +333,29 @@ export function vaultStage(message: string): VaultStage {
   return message === ALREADY_USED ? "used" : "unknown";
 }
 
+// Members marked `protected` are shared with CardDesk (src/carddesk.ts), the card routes' rules.
 export class Desk {
-  private store: Store;
-  private site: Site;
-  private hooks: DeskHooks;
+  protected store: Store;
+  protected site: Site;
+  protected hooks: DeskHooks;
   constructor(store: Store, site: Site, hooks: DeskHooks = {}) {
     this.store = store;
     this.site = site;
     this.hooks = hooks;
   }
 
-  private grantFacts(g: Grant) {
+  protected grantFacts(g: Grant) {
     return { grant_id: g.id, job: g.job, params: g.params, reason: g.reason, requester: g.requester, expires_at: g.expires_at };
   }
 
   // One record to the Observatory. Any failure is logged and becomes recorder_unavailable: the caller
   // stops before anything runs (card 97a2e83d).
-  private async record(g: Grant, stage: Stage, fields: Record<string, unknown>, now: number): Promise<Receipt> {
+  // `body`: frozen bytes to resend exactly (a card entry's result, V1).
+  protected async record(g: Grant, stage: Stage, fields: Record<string, unknown>, now: number, body?: string): Promise<Receipt> {
     try {
       if (!this.hooks.recorder) throw new RecorderError("recorder not set");
       const r = { grant: g.id, stage, job: g.job, ...(stage === "request" ? {} : { request: g.recorded?.request }), ...fields };
-      return await this.hooks.recorder(r);
+      return await this.hooks.recorder(r, body);
     } catch (e) {
       const why = e instanceof RecorderError ? e.message : "recorder failed";
       await this.log({ event: "refused", ...this.grantFacts(g), detail: `${stage} not recorded: ${why}` }, now);
@@ -384,7 +396,7 @@ export class Desk {
     await this.log({ event: "stopped", ...this.grantFacts(latest), detail }, now);
   }
 
-  private async log(entry: Omit<LogEntry, "at">, now: number): Promise<void> {
+  protected async log(entry: Omit<LogEntry, "at">, now: number): Promise<void> {
     // Keys sort by a running number; there is no delete or update path for log entries.
     const seq = ((await this.store.get<number>("meta:logseq")) ?? 0) + 1;
     await this.store.put("meta:logseq", seq);
@@ -506,6 +518,7 @@ export class Desk {
   // approval can only ever be for this grant.
   async approvalOptions(id: string, now: number) {
     const g = await this.pending(id, now);
+    if (g.card !== undefined) throw new DeskError("on_card", 409); // a card's entries are approved only on the card page (U6)
     const keys = await this.passkeys();
     if (!keys.length) throw new DeskError("no_passkey_enrolled", 409);
     const challenge = new Uint8Array([...crypto.getRandomValues(new Uint8Array(16)), ...hexToBytes(g.hash)]);
@@ -544,7 +557,7 @@ export class Desk {
     return this.store.list<number>({ prefix: "refusals:" });
   }
 
-  private async takeChallenge(response: { response: { clientDataJSON: string } }, purpose: Challenge["purpose"], now: number) {
+  protected async takeChallenge(response: { response: { clientDataJSON: string } }, purpose: Challenge["purpose"], now: number) {
     // Every refusal here is logged: these fail before the passkey is checked, and used to leave no trace.
     const refuse = async (code: string, status: number) => {
       await this.refuse(`${purpose}: ${code}`, now);
@@ -569,6 +582,7 @@ export class Desk {
     let g: Grant;
     try {
       g = await this.pending(id, now);
+      if (g.card !== undefined) throw new DeskError("on_card", 409);
       // Asked before recording began, or before verdicts were recorded (or never receipted): never approved.
       if (!g.recorded?.request || g.recorded.verdict === undefined) throw new DeskError("not_recorded", 409);
     } catch (e) {
@@ -683,7 +697,7 @@ export class Desk {
   }
 
   // Checks Ben's passkey answer against a challenge already taken. Every failure is logged through `fail`.
-  private async verifyPasskey(response: AuthenticationResponseJSON, challenge: string, fail: (detail: string) => Promise<void>) {
+  protected async verifyPasskey(response: AuthenticationResponseJSON, challenge: string, fail: (detail: string) => Promise<void>) {
     const key = await this.store.get<Passkey>(`passkey:${response.id}`);
     if (!key) {
       await fail("unknown passkey");
@@ -708,7 +722,7 @@ export class Desk {
 
   // Storage calls only, after verification. A counter that does not move forward means a replayed
   // or cloned passkey (unless both stay 0, which synced passkeys such as 1Password's report).
-  private async commitCounter(id: string, newCounter: number): Promise<void> {
+  protected async commitCounter(id: string, newCounter: number): Promise<void> {
     const currentKey = await this.store.get<Passkey>(`passkey:${id}`);
     if (!currentKey) throw new DeskError("unknown_passkey", 403);
     const inUse = newCounter > 0 || currentKey.counter > 0;
@@ -757,6 +771,7 @@ export class Desk {
   async collect(id: string, requester: string, now: number, source: Source = {}): Promise<{ grant: Grant; result: unknown }> {
     const first = await this.grant(id);
     if (first.requester !== requester) throw new DeskError("not_your_grant", 403);
+    if (first.card !== undefined) throw new DeskError("on_card", 409); // collected only through GET /card/<id>
     // A key is handed only to a signed collect from the address it is pinned to (Codex architecture r1 #2).
     if ((JOBS[first.job] as Job).signed) await this.requireSigned(source, requester, first.job, now);
     // Re-read after the signature's crypto: everything from here to the write is storage calls only,
@@ -789,7 +804,7 @@ export class Desk {
   }
 
   // Runs the route's signature check; a failure is logged and refused.
-  private async requireSigned(source: Source, requester: string, job: string, now: number): Promise<void> {
+  protected async requireSigned(source: Source, requester: string, job: string, now: number): Promise<void> {
     try {
       if (!source.checkSignature) throw new DeskError("not_signed", 401);
       await source.checkSignature();
@@ -813,6 +828,7 @@ export class Desk {
     await this.store.put<CboxKey>("cbox:key", { spki: g.params.key, fingerprint: g.params.fingerprint, enrolled_at: now, grant_id: g.id });
     await this.store.put("cbox:rev", (await keyRev(this.store)) + 1);
     await this.log({ event: "cbox_key_enrolled", ...this.grantFacts(g), detail: `c-box key ${g.params.fingerprint}, replaces ${current}` }, now);
+    await this.tellVaultKeyRev(now);
   }
 
   /** Ben removes the c-box key (lost or stolen box): every signed request is refused until a new one is enrolled. */
@@ -822,7 +838,25 @@ export class Desk {
     await this.store.put("cbox:key", null);
     await this.store.put("cbox:rev", (await keyRev(this.store)) + 1);
     await this.log({ event: "cbox_key_removed", detail: `c-box key ${k.fingerprint} removed by Ben` }, now);
+    await this.tellVaultKeyRev(now);
     return k.fingerprint;
+  }
+
+  /**
+   * Moves the vault's own copy of the key generation (vault setKeyRev), so an open card or run the vault holds is
+   * refused at its next step even if the desk did not check (card 85818ab1 R2). Best effort: the key is already removed
+   * before this runs, and it waits at most KEY_REV_WAIT_MS for the vault -- every cardRun also carries the desk's live generation, which the vault compares to the card's.
+   */
+  protected async tellVaultKeyRev(now: number): Promise<void> {
+    if (!this.hooks.vault?.setKeyRev) return;
+    const rev = await keyRev(this.store);
+    try {
+      // Bounded: a hanging vault never holds Ben's removal answer for long (Codex r2 N3).
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([this.hooks.vault.setKeyRev(rev), new Promise((_, no) => (timer = setTimeout(() => no(new Error("timeout")), KEY_REV_WAIT_MS)))]).finally(() => clearTimeout(timer));
+    } catch {
+      await this.log({ event: "vault_key_rev_unsent", detail: `the vault was not told c-box key generation ${rev}; cards still check it at every step` }, now);
+    }
   }
 
   async cboxKey(): Promise<CboxKey | undefined> {
@@ -832,7 +866,7 @@ export class Desk {
   // A minted key's secret not collected within the collect window is erased (Codex minted r1 #5).
   // Runs at each new /request and at a late collect -- not on page views -- so with no further
   // requests it stays stored (the key itself still expires within 15 minutes).
-  private async eraseStaleSecrets(now: number): Promise<void> {
+  protected async eraseStaleSecrets(now: number): Promise<void> {
     // Remembered signed messages are dropped once their window is over (they can no longer pass anyway).
     for (const [k, until] of await this.store.list<number>({ prefix: "sig:" })) if (until < now) await this.store.delete(k);
     for (const [k, g] of await this.store.list<Grant>({ prefix: "grant:" })) {
@@ -922,15 +956,15 @@ export function logDetail(result: unknown): string {
   return short.length <= LOG_DETAIL_MAX ? short : JSON.stringify({ truncated: true, ok: (result as { ok?: unknown }).ok === true, note: "see grant record" });
 }
 
-async function saltFor(label: string): Promise<string> {
+export async function saltFor(label: string): Promise<string> {
   return b64url(await sha256(enc.encode(label)));
 }
 
-function hexToBytes(h: string): Uint8Array {
+export function hexToBytes(h: string): Uint8Array {
   return Uint8Array.from(h.match(/../g) ?? [], (b) => parseInt(b, 16));
 }
 
-function challengeCarries(challenge: string, hash: string): boolean {
+export function challengeCarries(challenge: string, hash: string): boolean {
   const bytes = fromB64url(challenge);
   return bytes.length === 48 && hex(bytes.slice(16)) === hash;
 }

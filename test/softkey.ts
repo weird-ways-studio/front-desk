@@ -35,6 +35,23 @@ export class SoftKey {
     return new SoftKey(pair as CryptoKeyPair);
   }
 
+  /** A key whose private half can be handed to another runtime (test/workerd/carddesk-harness.ts) with `exported()`. */
+  static async createExportable(): Promise<SoftKey> {
+    const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+    return new SoftKey(pair as CryptoKeyPair);
+  }
+  async exported(): Promise<{ id: string; jwk: JsonWebKey }> {
+    return { id: this.id, jwk: (await crypto.subtle.exportKey("jwk", this.pair.privateKey)) as JsonWebKey };
+  }
+  static async imported(e: { id: string; jwk: JsonWebKey }): Promise<SoftKey> {
+    const { d: _d, key_ops: _o, ...pub } = e.jwk;
+    const privateKey = await crypto.subtle.importKey("jwk", e.jwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+    const publicKey = await crypto.subtle.importKey("jwk", pub, { name: "ECDSA", namedCurve: "P-256" }, true, ["verify"]);
+    const k = new SoftKey({ privateKey, publicKey });
+    k.id = e.id;
+    return k;
+  }
+
   private async authData(rpID: string, flags: number, attested?: Uint8Array): Promise<Uint8Array> {
     const count = new Uint8Array(4);
     new DataView(count.buffer).setUint32(0, this.counter);

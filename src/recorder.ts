@@ -10,13 +10,40 @@ export interface Receipt {
   grant: string;
   stage: Stage;
   sha256: string;
+  // The recorder's signed receipt in full (receipt/v1, observatory src/contract.ts), when it sent one: the vault
+  // checks `sig` itself before a card entry starts (card 85818ab1 U6). Absent from an older recorder's answer.
+  v?: 1;
+  key?: string;
+  recorded_at?: string;
+  sig?: string;
+  // The exact bytes sent, which `sha256` covers.
+  body?: string;
 }
 
 /**
  * Records one stage; resolves to a receipt whose sha256 is that of the exact bytes sent (later
- * stages name the request by it), or throws RecorderError.
+ * stages name the request by it), or throws RecorderError. `body`: send these exact bytes instead of
+ * serializing `record` (a frozen card result, V1); they must name the same grant and stage.
  */
-export type Recorder = (record: { grant: string; stage: Stage; job: string; [k: string]: unknown }) => Promise<Receipt>;
+export type Recorder = (record: { grant: string; stage: Stage; job: string; [k: string]: unknown }, body?: string) => Promise<Receipt>;
+
+/** The bytes a record is sent as, unless frozen bytes are given; refuses frozen bytes for another grant or stage. */
+export function recordBody(record: { grant: string; stage: Stage }, body?: string): string {
+  if (body === undefined) return JSON.stringify({ v: 1, ...record });
+  let b: { grant?: unknown; stage?: unknown } | null = null;
+  try {
+    b = JSON.parse(body);
+  } catch {
+    b = null;
+  }
+  if (b?.grant !== record.grant || b?.stage !== record.stage) throw new RecorderError("frozen body names another record");
+  return body;
+}
+
+/** The receipt's signed fields, only when every one has its exact type. */
+function signedPart(r: Record<string, unknown>): Pick<Receipt, "v" | "key" | "recorded_at" | "sig"> {
+  return r.v === 1 && [r.key, r.recorded_at, r.sig].every((x) => typeof x === "string") ? { v: 1, key: r.key as string, recorded_at: r.recorded_at as string, sig: r.sig as string } : {};
+}
 
 // Fixed words only: nothing the recorder or the network said is repeated, so no answer text can
 // reach Ben's log or the agent.
@@ -46,8 +73,8 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
  */
 export function recorderFrom(url: string | undefined, clientId: string | undefined, clientSecret: string | undefined, fetchFn: typeof fetch = fetch, timeoutMs = RECORD_TIMEOUT_MS): Recorder | undefined {
   if (!url || !/^https:\/\/[a-z0-9.-]+\/v1\/records$/.test(url) || !clientId || !clientSecret) return undefined;
-  return async (record) => {
-    const body = JSON.stringify({ v: 1, ...record });
+  return async (record, frozen) => {
+    const body = recordBody(record, frozen);
     const sha = await sha256Hex(body);
     let why = "recorder unreachable";
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -68,7 +95,7 @@ export function recorderFrom(url: string | undefined, clientId: string | undefin
       if (!r || r.grant !== record.grant || r.stage !== record.stage || r.sha256 !== sha || !Number.isInteger(r.seq)) {
         throw new RecorderError("recorder receipt does not match the record");
       }
-      return { seq: r.seq as number, grant: r.grant, stage: r.stage, sha256: sha };
+      return { seq: r.seq as number, grant: r.grant, stage: r.stage, sha256: sha, ...signedPart(r as Record<string, unknown>), body };
     }
     throw new RecorderError(why);
   };

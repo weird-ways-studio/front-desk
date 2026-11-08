@@ -6,6 +6,7 @@
 //   node scripts/agent.mjs post <url> [json]      POST with the Access login and the c-box signature
 //   node scripts/agent.mjs wait <collect-url> [minutes]  collects as soon as Ben approves (default 15 min)
 //   node scripts/agent.mjs menu <desk-url>         lists the jobs you may ask for (generated from src/jobs.ts)
+//   node scripts/agent.mjs get <card-url>          signed GET: a card's states, answers and receipts (card 85818ab1)
 //
 // The private key file (default ~/.config/front-desk/cbox-key.pem, mode 0600) stays on the c-box and is
 // never put in 1Password or a repo. The Access login comes from CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET
@@ -45,6 +46,12 @@ async function post(url, body) {
   return fetch(u, { method: "POST", headers, body });
 }
 
+/** GET with the Access login and a fresh c-box signature over an empty body (a card's collect, GET /card/<id>). */
+async function get(url) {
+  const u = new URL(url);
+  return fetch(u, { headers: { ...access(), ...signRequest(readFileSync(KEY), "GET", u.pathname, "") } });
+}
+
 async function main([cmd, url, body = ""]) {
   if (cmd === "keygen") {
     if (existsSync(KEY)) throw new Error(`${KEY} exists; remove it first to make a new key`);
@@ -78,12 +85,18 @@ async function main([cmd, url, body = ""]) {
     console.log(`\nModes: ${Object.entries(m.modes).map(([k, v]) => `${k} = ${v}`).join(" ")}\n${m.new_job}\nAsk: ${m.ask}`);
     return;
   }
+  if (cmd === "get" && url) {
+    const res = await get(url);
+    console.log(res.status, await res.text());
+    if (!res.ok) process.exit(1);
+    return;
+  }
   if (cmd === "post" && url) {
     const res = await post(url, body);
     console.log(res.status, await res.text());
     return;
   }
-  throw new Error("usage: agent.mjs keygen | agent.mjs post <url> [json] | agent.mjs wait <collect-url> [minutes] | agent.mjs menu <desk-url>");
+  throw new Error("usage: agent.mjs keygen | agent.mjs post <url> [json] | agent.mjs wait <collect-url> [minutes] | agent.mjs menu <desk-url> | agent.mjs get <card-url>");
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) main(process.argv.slice(2)).catch((e) => { console.error(e.message); process.exit(1); });

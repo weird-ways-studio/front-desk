@@ -1,0 +1,286 @@
+{
+ "source": "observatory @76f2837",
+ "recorder_key": "AeN3/Dl3QicxXBObHVyLdhMmWGoDpjVO44LoB0sRV+s=",
+ "card_eligible": [
+  "test.echo",
+  "cf.zone.read",
+  "cf.dns.list",
+  "cf.audit.read"
+ ],
+ "card_run_ms": 900000,
+ "card_max": 5,
+ "manifests": [
+  {
+   "name": "valid",
+   "manifest": {
+    "kind": "card/v1",
+    "card": "card-0001-abcd",
+    "requester": "c-box agent",
+    "entries": [
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    "deadline": 1800001500000,
+    "jobs_version": 1
+   },
+   "verdict": null,
+   "card_hash": "46a11edc2201065a22eb688b99e243fdb89df27147bb4e2ab6de805bdf303964"
+  },
+  {
+   "name": "one entry",
+   "manifest": {
+    "kind": "card/v1",
+    "card": "card-0001-abcd",
+    "requester": "c-box agent",
+    "entries": [
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    ],
+    "deadline": 1800001500000,
+    "jobs_version": 1
+   },
+   "verdict": null,
+   "card_hash": "f7621279eb2cf99ace294845db4177660b8b460975d26432b7a0358471ce7cfc"
+  },
+  {
+   "name": "extra field",
+   "manifest": {
+    "kind": "card/v1",
+    "card": "card-0001-abcd",
+    "requester": "c-box agent",
+    "entries": [
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    "deadline": 1800001500000,
+    "jobs_version": 1,
+    "extra": 1
+   },
+   "verdict": "the manifest has the wrong fields",
+   "card_hash": null
+  },
+  {
+   "name": "missing field",
+   "manifest": {
+    "kind": "card/v1",
+    "card": "card-0001-abcd",
+    "requester": "c-box agent",
+    "entries": [
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    "deadline": 1800001500000
+   },
+   "verdict": "the manifest has the wrong fields",
+   "card_hash": null
+  },
+  {
+   "name": "wrong kind",
+   "manifest": {
+    "kind": "card/v2",
+    "card": "card-0001-abcd",
+    "requester": "c-box agent",
+    "entries": [
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    "deadline": 1800001500000,
+    "jobs_version": 1
+   },
+   "verdict": "the manifest's kind, card id or requester is not valid",
+   "card_hash": null
+  },
+  {
+   "name": "bad card id",
+   "manifest": {
+    "kind": "card/v1",
+    "card": "x",
+    "requester": "c-box agent",
+    "entries": [
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    "deadline": 1800001500000,
+    "jobs_version": 1
+   },
+   "verdict": "the manifest's kind, card id or requester is not valid",
+   "card_hash": null
+  },
+  {
+   "name": "empty requester",
+   "manifest": {
+    "kind": "card/v1",
+    "card": "card-0001-abcd",
+    "requester": "",
+    "entries": [
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    "deadline": 1800001500000,
+    "jobs_version": 1
+   },
+   "verdict": "the manifest's kind, card id or requester is not valid",
+   "card_hash": null
+  },
+  {
+   "name": "no entries",
+   "manifest": {
+    "kind": "card/v1",
+    "card": "card-0001-abcd",
+    "requester": "c-box agent",
+    "entries": [],
+    "deadline": 1800001500000,
+    "jobs_version": 1
+   },
+   "verdict": "the manifest's entries are not 1 to 5 distinct grant hashes",
+   "card_hash": null
+  },
+  {
+   "name": "six entries",
+   "manifest": {
+    "kind": "card/v1",
+    "card": "card-0001-abcd",
+    "requester": "c-box agent",
+    "entries": [
+     "1111111111111111111111111111111111111111111111111111111111111111",
+     "2222222222222222222222222222222222222222222222222222222222222222",
+     "3333333333333333333333333333333333333333333333333333333333333333",
+     "4444444444444444444444444444444444444444444444444444444444444444",
+     "5555555555555555555555555555555555555555555555555555555555555555",
+     "6666666666666666666666666666666666666666666666666666666666666666"
+    ],
+    "deadline": 1800001500000,
+    "jobs_version": 1
+   },
+   "verdict": "the manifest's entries are not 1 to 5 distinct grant hashes",
+   "card_hash": null
+  },
+  {
+   "name": "duplicate entries",
+   "manifest": {
+    "kind": "card/v1",
+    "card": "card-0001-abcd",
+    "requester": "c-box agent",
+    "entries": [
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "deadline": 1800001500000,
+    "jobs_version": 1
+   },
+   "verdict": "the manifest's entries are not 1 to 5 distinct grant hashes",
+   "card_hash": null
+  },
+  {
+   "name": "uppercase hash",
+   "manifest": {
+    "kind": "card/v1",
+    "card": "card-0001-abcd",
+    "requester": "c-box agent",
+    "entries": [
+     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    ],
+    "deadline": 1800001500000,
+    "jobs_version": 1
+   },
+   "verdict": "the manifest's entries are not 1 to 5 distinct grant hashes",
+   "card_hash": null
+  },
+  {
+   "name": "zero deadline",
+   "manifest": {
+    "kind": "card/v1",
+    "card": "card-0001-abcd",
+    "requester": "c-box agent",
+    "entries": [
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    "deadline": 0,
+    "jobs_version": 1
+   },
+   "verdict": "the manifest's deadline or jobs version is not valid",
+   "card_hash": null
+  },
+  {
+   "name": "fraction version",
+   "manifest": {
+    "kind": "card/v1",
+    "card": "card-0001-abcd",
+    "requester": "c-box agent",
+    "entries": [
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    "deadline": 1800001500000,
+    "jobs_version": 1.5
+   },
+   "verdict": "the manifest's deadline or jobs version is not valid",
+   "card_hash": null
+  },
+  {
+   "name": "negative zero deadline",
+   "manifest": {
+    "kind": "card/v1",
+    "card": "card-0001-abcd",
+    "requester": "c-box agent",
+    "entries": [
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    "deadline": 0,
+    "jobs_version": 1
+   },
+   "verdict": "the manifest's deadline or jobs version is not valid",
+   "card_hash": null
+  },
+  {
+   "name": "array",
+   "manifest": [
+    {
+     "kind": "card/v1",
+     "card": "card-0001-abcd",
+     "requester": "c-box agent",
+     "entries": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     ],
+     "deadline": 1800001500000,
+     "jobs_version": 1
+    }
+   ],
+   "verdict": "no manifest",
+   "card_hash": null
+  }
+ ],
+ "challenges": [
+  {
+   "name": "48 bytes",
+   "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiQVFFQkFRRUJBUUVCQVFFQkFRRUJBYXVycTZ1cnE2dXJxNnVycTZ1cnE2dXJxNnVycTZ1cnE2dXJxNnVycTZ1ciJ9",
+   "hash": "abababababababababababababababababababababababababababababababab"
+  },
+  {
+   "name": "32 bytes",
+   "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoicTZ1cnE2dXJxNnVycTZ1cnE2dXJxNnVycTZ1cnE2dXJxNnVycTZ1cnE2cyJ9",
+   "hash": null
+  },
+  {
+   "name": "not json",
+   "client_data_json": "!!!",
+   "hash": null
+  }
+ ],
+ "receipt": {
+  "receipt": {
+   "v": 1,
+   "seq": 42,
+   "key": "records/v1/000000000042.card-0001-abcd.approval.json",
+   "grant": "card-0001-abcd",
+   "stage": "approval",
+   "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+   "recorded_at": "2027-01-15T08:00:00.000Z",
+   "sig": "HgefAsAOh7bJtdIjootOkzwVOK/29BhtbUVHch2KeHoFmd4qVnicsyQ0FnuSqw6pwYtNMPEm8y/karyEA3rsDg=="
+  },
+  "key": "o5vay4er3MLh0VfoadnCEgfSIZxCfd1dIdl3X4LfvfY=",
+  "sealed": "eyJraW5kIjoicmVjZWlwdC92MSIsInYiOjEsInNlcSI6NDIsImtleSI6InJlY29yZHMvdjEvMDAwMDAwMDAwMDQyLmNhcmQtMDAwMS1hYmNkLmFwcHJvdmFsLmpzb24iLCJncmFudCI6ImNhcmQtMDAwMS1hYmNkIiwic3RhZ2UiOiJhcHByb3ZhbCIsInNoYTI1NiI6ImRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJyZWNvcmRlZF9hdCI6IjIwMjctMDEtMTVUMDg6MDA6MDAuMDAwWiJ9"
+ }
+}

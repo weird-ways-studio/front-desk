@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { build } from "esbuild";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { TEST_PIN, signed } from "./vaultsign.ts";
+import { makeCard } from "./cardsign.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "fd-approval-"));
 after(() => rmSync(dir, { recursive: true, force: true }));
@@ -122,6 +123,43 @@ test("real vault entry point over RPC: version answer, old call refused wrong_sh
     assert.deepEqual(old, { error: "wrong_shape", isError: true });
     assert.deepEqual(extra, { error: "wrong_shape", isError: true });
     assert.deepEqual(unsigned, { error: "bad_assertion", isError: true });
+  } finally {
+    await mf.dispose();
+  }
+});
+
+// Card build 3 (85818ab1): the desk's card calls across the same real binding. The real vault pins Ben's passkey, so a
+// card signed by the test passkey is refused -- which is the point: the desk acts on these exact words (carddesk.ts).
+test("real vault entry point over RPC: card version answer; card refusals arrive as exact codes", { timeout: 60_000 }, async () => {
+  const out = join(dir, "vault-bundle-cards");
+  await build({ entryPoints: [new URL("../vault/src/index.ts", import.meta.url).pathname], bundle: true, format: "esm", platform: "neutral", external: ["cloudflare:workers"], outdir: out, logLevel: "silent" });
+  const caller = `export default { async fetch(request, env) {
+    const cmds = await request.json();
+    return Response.json(await Promise.all(cmds.map((c) => env.VAULT[c.method](...c.args).then((r) => ({ ok: r }), (e) => ({ error: e.message, isError: e instanceof Error })))));
+  } };`;
+  const mf = new Miniflare(convertV4MiniflareOptions({
+    workers: [
+      { name: "caller", modules: true, script: caller, compatibilityDate: "2026-10-01", serviceBindings: { VAULT: "vault" } },
+      { name: "vault", modules: true, script: readFileSync(join(out, "index.js"), "utf8"), compatibilityDate: "2026-10-01", durableObjects: { BOX: { className: "VaultBox", useSQLite: true } } },
+    ],
+  }));
+  try {
+    const send = async (...cmds: { method: string; args: unknown[] }[]) => (await (await mf.dispatchFetch("http://x/", { method: "POST", body: JSON.stringify(cmds) })).json()) as any[];
+    const c = await makeCard(Date.now(), [["test.echo", { word: "hello" }]]);
+    const [api, open, extra, status, stop, run] = await send(
+      { method: "cardApi", args: [] },
+      { method: "cardOpen", args: [{ manifest: c.manifest, grants: c.grants, assertion: c.assertion, key_rev: 0 }] },
+      { method: "cardOpen", args: [{ manifest: c.manifest, grants: c.grants, assertion: c.assertion, key_rev: 0 }, "extra"] },
+      { method: "cardStatus", args: [c.manifest.card] },
+      { method: "cardStop", args: [c.manifest.card] },
+      { method: "cardRun", args: [{ card: c.manifest.card, index: 0, receipt: {}, approval_body: "{}", prf: PRF, key_rev: 0 }] },
+    );
+    assert.deepEqual(api, { ok: { version: 1, jobs_version: 1, cap: 2 } });
+    assert.deepEqual(open, { error: "bad_assertion", isError: true }, "signed by the test passkey, not the pinned one");
+    assert.deepEqual(extra, { error: "wrong_shape", isError: true });
+    assert.deepEqual(status, { error: "unknown_card", isError: true });
+    assert.deepEqual(stop, { error: "unknown_card", isError: true });
+    assert.deepEqual(run, { error: "unknown_card", isError: true });
   } finally {
     await mf.dispose();
   }

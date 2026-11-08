@@ -1,0 +1,338 @@
+[
+ [
+  "desk-oncard-options",
+  "src/desk.ts",
+  "    if (g.card !== undefined) throw new DeskError(\"on_card\", 409); // a card's entries",
+  "    // a card's entries",
+  "the single-grant approve, approval options and collect refuse a card's grants (on_card)",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-oncard-approve",
+  "src/desk.ts",
+  "      if (g.card !== undefined) throw new DeskError(\"on_card\", 409);\n",
+  "",
+  "the single-grant approve, approval options and collect refuse a card's grants (on_card)",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-oncard-collect",
+  "src/desk.ts",
+  "    if (first.card !== undefined) throw new DeskError(\"on_card\", 409);",
+  "",
+  "the single-grant approve, approval options and collect refuse a card's grants (on_card)",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-cap",
+  "src/carddesk.ts",
+  "    if (body.entries.length > api.cap) throw await refuse(\"too_many_entries\");",
+  "",
+  "POST /card refuses a card over the cap, an ineligible job, bad params, an unsigned request -- before recording anything",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-eligible",
+  "src/carddesk.ts",
+  " || !CARD_ELIGIBLE.includes(e.job as JobName))",
+  ")",
+  "POST /card refuses a card over the cap, an ineligible job, bad params, an unsigned request -- before recording anything",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-pending",
+  "src/carddesk.ts",
+  "    if (waiting.length) throw await refuse(\"too_many_pending\", 429);",
+  "",
+  "one pending card per requester (T13); a partial freeze stops every grant and still counts for 10 minutes (V4)",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-frozen-counts",
+  "src/carddesk.ts",
+  "c.approved_at === undefined && c.stopped !== STOPPED_BY_BEN",
+  "c.status === \"pending\"",
+  "one pending card per requester (T13); a partial freeze stops every grant and still counts for 10 minutes (V4)",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-freeze",
+  "src/carddesk.ts",
+  "        for (const x of grants) await this.store.put(`grant:${x.id}`, { ...x, status: \"stopped\" });",
+  "",
+  "one pending card per requester (T13); a partial freeze stops every grant and still counts for 10 minutes (V4)",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-wrong-card",
+  "src/carddesk.ts",
+  "if (record.grant_id !== id || !challengeCarries(challenge, first.hash))",
+  "if (false)",
+  "the tap: a replay, another card's challenge, a missing passkey secret, a changed c-box key are refused",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-cbox-rev",
+  "src/carddesk.ts",
+  "    if (c.cbox_rev !== (await keyRev(this.store))) throw await refuse(\"cbox_key_changed\", 409);",
+  "",
+  "the tap: a replay, another card's challenge, a missing passkey secret, a changed c-box key are refused",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-prf",
+  "src/carddesk.ts",
+  "    if (!prf) {",
+  "    if (false) {",
+  "the tap: a replay, another card's challenge, a missing passkey secret, a changed c-box key are refused",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-not-your-card",
+  "src/carddesk.ts",
+  "    if (c.requester !== requester) throw new DeskError(\"not_your_card\", 403);",
+  "",
+  "one tap runs both entries in order; every stage is recorded; the agent collects answers and signed receipts",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-collect-signed",
+  "src/carddesk.ts",
+  "    await this.requireSigned(source, requester, \"card\", now);\n    const c = await this.card(id);",
+  "    const c = await this.card(id);",
+  "one tap runs both entries in order; every stage is recorded; the agent collects answers and signed receipts",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-v3-window",
+  "src/carddesk.ts",
+  "if (open && held && terminal(e.state)",
+  "if (held && terminal(e.state)",
+  "past the collect window: answers are neither stored nor returned, and the vault is not told to drop its copy (V3)",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-ack-after-store",
+  "src/carddesk.ts",
+  "if (held && g.result !== undefined) await",
+  "if (held) await",
+  "past the collect window: answers are neither stored nor returned, and the vault is not told to drop its copy (V3)",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-frozen-bytes",
+  "src/carddesk.ts",
+  "this.record(g, \"result\", {}, now, g.result_body)",
+  "this.record(g, \"result\", { outcome: \"done\", at: now }, now)",
+  "the recorder commits a result but the reply is lost: the next read resends identical bytes and gets the same receipt (V1)",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-stop-at-first",
+  "src/carddesk.ts",
+  "      if (await this.runEntry(c, g, i, assertion, prf, now)) continue;",
+  "      await this.runEntry(c, g, i, assertion, prf, now); continue;",
+  "entry 1 fails: entry 2 never starts (not_run); entry 1's result is failed, entry 2 has no approval and no result",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-unsigned-receipt",
+  "src/carddesk.ts",
+  "    if (rc.sig === undefined || rc.body === undefined) {",
+  "    if (false) {",
+  "an unsigned receipt (older recorder): the vault would refuse it, so the desk does not start the entry",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-card-version",
+  "src/carddesk.ts",
+  "if (a?.version !== CARD_API_VERSION || ",
+  "if (",
+  "a vault on another card version: POST /card refused, nothing recorded",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-stop-origin",
+  "src/routes.ts",
+  "        if (request.headers.get(\"origin\") !== url.origin) return json({ error: \"wrong_origin\" }, 403);\n        return json({ ok: true, report: await desk.stopCard(id, now) });",
+  "        return json({ ok: true, report: await desk.stopCard(id, now) });",
+  "routes: POST /card answers card_refused with the code; Ben's page lists every job; Stop needs the page's origin",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "recorder-frozen-names",
+  "src/recorder.ts",
+  "  if (b?.grant !== record.grant || b?.stage !== record.stage) throw new RecorderError(\"frozen body names another record\");",
+  "",
+  "U6/V1: the client keeps the full signed receipt and the bytes; frozen bytes go out exactly; mismatched frozen bytes are refused",
+  "test/record.test.ts"
+ ],
+ [
+  "desk-reason",
+  "src/carddesk.ts",
+  "if (typeof e.reason !== \"string\" || !e.reason.trim() || e.reason.length > 200) throw await refuse(\"bad_reason\");",
+  "",
+  "POST /card refuses a card over the cap, an ineligible job, bad params, an unsigned request -- before recording anything",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-params",
+  "src/carddesk.ts",
+  "      if (!params) throw await refuse(\"bad_params\");",
+  "",
+  "POST /card refuses a card over the cap, an ineligible job, bad params, an unsigned request -- before recording anything",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-shape",
+  "src/carddesk.ts",
+  "Object.keys(body).join() !== \"entries\" || ",
+  "",
+  "POST /card refuses a card over the cap, an ineligible job, bad params, an unsigned request -- before recording anything",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-expired",
+  "src/carddesk.ts",
+  "    if (now > first.expires_at) throw await refuse(\"card_expired\", 410);\n    const { challenge",
+  "    const { challenge",
+  "the tap: a replay, another card's challenge, a missing passkey secret, a changed c-box key are refused",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-replay",
+  "src/carddesk.ts",
+  "    if (c.status !== \"pending\") throw await refuse(\"not_pending\", 409);\n    if (c.cbox_rev",
+  "    if (c.cbox_rev",
+  "two taps at once on one card (Release Checklist 6.2): exactly one runs it; the other is refused",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-open-exact",
+  "src/carddesk.ts",
+  "(codeOf(e2) === \"unknown_card\" ? false : null)",
+  "false",
+  "cardOpen fails and the status read fails too, not with unknown_card: said as unclear, never as 'not opened' (6.1)",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-stop-stored",
+  "src/carddesk.ts",
+  "      await this.store.put(`card:${id}`, { ...c, stopped: STOPPED_BY_BEN });\n",
+  "",
+  "R1: Stop that lands after the tap but before the vault opens the card (unknown_card) still stops it; nothing runs",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-halt-stop",
+  "src/carddesk.ts",
+  "    if (c.stopped === STOPPED_BY_BEN) return STOPPED_BY_BEN;\n",
+  "",
+  "R1: Stop that lands after the tap but before the vault opens the card (unknown_card) still stops it; nothing runs",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-halt-key",
+  "src/carddesk.ts",
+  "    if (c.cbox_rev !== (await keyRev(this.store))) return \"c-box key changed\";\n",
+  "",
+  "R2: Ben removes the c-box key while entry 1 runs: entry 2 is never sent, and the vault's own copy moves too",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-tell-vault",
+  "src/desk.ts",
+  "removed by Ben` }, now);\n    await this.tellVaultKeyRev(now);",
+  "removed by Ben` }, now);",
+  "R2: Ben removes the c-box key while entry 1 runs: entry 2 is never sent, and the vault's own copy moves too",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-tell-vault-logged",
+  "src/desk.ts",
+  "      await this.log({ event: \"vault_key_rev_unsent\"",
+  "      void ({ event: \"vault_key_rev_unsent\"",
+  "R2: a vault that cannot be told the new key generation never blocks Ben's removal; it is logged",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-unread-unknown",
+  "src/carddesk.ts",
+  "(c.confirmed?.[i] ?? \"unknown\")",
+  "\"not_run\"",
+  "R3: an unreadable vault never becomes 'not run': last confirmed state, else unknown, and the page says Unclear",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "page-unread",
+  "src/page.ts",
+  "if (r.vault_unread === true &&",
+  "if (false &&",
+  "R3: an unreadable vault never becomes 'not run': last confirmed state, else unknown, and the page says Unclear",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-open-clock",
+  "src/carddesk.ts",
+  "const open = !expired && (c.closed_at !== undefined || v !== undefined);",
+  "const open = !v || c.closed_at === undefined || !expired;",
+  "R4: no known clock (card still running, then the vault cannot be read): a stored answer is not returned",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-slot",
+  "src/carddesk.ts",
+  "    if (held.has(requester)) {",
+  "    if (false) {",
+  "R5: two POST /card at once for one requester: exactly one card is created",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-closed-kept",
+  "src/carddesk.ts",
+  "const closed_at = c.closed_at ?? v.closed_at;",
+  "const closed_at = c.closed_at;",
+  "R4: the vault forgets the card (pruned) or cannot be read: an answer past its window is not returned, and is erased",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "vault-sweep-issued-cap",
+  "vault/src/vault.ts",
+  "      if (sent++ >= SWEEP_DELETES) break;\n",
+  "",
+  "F9: a cleanup backlog adds a fixed number of calls per tap (SWEEP_DELETES per sweep); the rest waits for later taps",
+  "test/vault.test.ts"
+ ],
+ [
+  "vault-sweep-helpers-cap",
+  "vault/src/vault.ts",
+  "      if (sent++ >= SWEEP_DELETES) continue;\n",
+  "",
+  "F9: a cleanup backlog adds a fixed number of calls per tap (SWEEP_DELETES per sweep); the rest waits for later taps",
+  "test/vault.test.ts"
+ ],
+ [
+  "desk-first-stored",
+  "src/carddesk.ts",
+  "const since = c.closed_at ?? (v ? c.manifest.deadline : Math.min(c.first_stored_at ?? Infinity, c.manifest.deadline));",
+  "const since = c.closed_at ?? c.manifest.deadline;",
+  "N1 (Codex r2): answer stored while open, card closes unseen, vault unreadable: erased by the first-stored clock, not the deadline",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-deadline-bound",
+  "src/carddesk.ts",
+  "Math.min(c.first_stored_at ?? Infinity, c.manifest.deadline)",
+  "(c.first_stored_at ?? Infinity)",
+  "deadline bound (commit security review): no close time and no stored-answer clock -- copies still go by deadline + window",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-clock-first",
+  "src/carddesk.ts",
+  "          if (c.first_stored_at === undefined) {\n            c = { ...(await this.card(id)), first_stored_at: now };\n            await this.store.put(`card:${id}`, c);\n          }\n          g = { ...(await this.grant(gid)), result: withoutSecret(v.answers[i]) };\n          await this.store.put(`grant:${gid}`, g);",
+  "          g = { ...(await this.grant(gid)), result: withoutSecret(v.answers[i]) };\n          await this.store.put(`grant:${gid}`, g);\n          if (c.first_stored_at === undefined) {\n            c = { ...(await this.card(id)), first_stored_at: now };\n            await this.store.put(`card:${id}`, c);\n          }",
+  "N4 (Codex r3): the erase clock is stored before the answer, so a crash between them never leaves an answer with no clock",
+  "test/carddesk.test.ts"
+ ]
+]

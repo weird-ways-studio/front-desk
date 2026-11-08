@@ -185,3 +185,78 @@ export function passkeysPage(pins: PasskeyPin[], nonce: string): string {
 ${pins.length ? `<pre>${esc(text)}</pre>` : `<p class="warn">No passkey is enrolled.</p>`}`,
   );
 }
+
+/**
+ * Card page words after the tap (card 85818ab1), from the HTTP status (null: no answer) and the body. Runs in the
+ * browser as written (cardPage embeds its source) and in tests. One plain line per job, in order; "Done" only when
+ * every job is done; anything unclear says so and asks Ben not to tap again.
+ */
+export function cardView(status: number | null, j: unknown): { ok: boolean; head: string; text: string; lines: string[] } {
+  const again = "Do not tap again; reload this page to see what ran, and tell the agent";
+  const b = (j && typeof j === "object" ? j : {}) as { error?: unknown; report?: { entries?: unknown; stopped?: unknown; status?: unknown; vault_unread?: unknown } };
+  if (status === null) return { ok: false, head: "Unclear", text: `The connection failed before the front desk answered, so it is unknown what ran. ${again}.`, lines: [] };
+  if (status >= 400 && status < 500 && typeof b.error === "string") return { ok: false, head: "Not approved", text: `The front desk refused the tap, so this tap started nothing. Tell the agent the words in brackets: [${b.error}]`, lines: [] };
+  const r = b.report;
+  if (status !== 200 || !r || !Array.isArray(r.entries)) return { ok: false, head: "Unclear", text: `No clear answer came back (status ${status}). ${again}.`, lines: [] };
+  const words: Record<string, string> = {
+    done: "Done",
+    failed: "Failed: it reported an error, so nothing after it ran",
+    not_run: "Not run",
+    unknown: "Unknown: it may have run. Do not tap again",
+    dispatching: "Running",
+    waiting: "Waiting for your tap",
+  };
+  const es = r.entries as { does?: unknown; state?: unknown }[];
+  const lines = es.map((e, i) => `${i + 1}. ${String(e.does)} -- ${words[String(e.state)] ?? "Unclear"}`);
+  const states = es.map((e) => String(e.state));
+  if (r.vault_unread === true && !states.every((s) => s === "done")) return { ok: false, head: "Unclear", text: `The front desk could not read the vault just now, so this shows only what it last confirmed. ${again}.`, lines };
+  if (states.every((s) => s === "done")) return { ok: true, head: "Done", text: "Every job ran, in order. The agent collects the answers now; nothing else to do.", lines };
+  if (states.some((s) => s === "unknown" || s === "dispatching")) return { ok: false, head: "Unclear", text: `It is not known whether every job finished. ${again}.`, lines };
+  if (states.every((s) => s === "waiting")) return { ok: false, head: "Waiting", text: "Nothing has run yet.", lines };
+  const why = typeof r.stopped === "string" ? ` (${r.stopped})` : "";
+  return { ok: false, head: "Stopped", text: `The card stopped${why}. Nothing after that ran. Tell the agent.`, lines };
+}
+
+// One page for the whole card: every job as a numbered plain line, one Face ID tap, and Stop (T15: Stop goes
+// through the desk, so it works while this page is open). After the tap the same page shows each job's state.
+export function cardPage(report: { card: string; status: string; expires_at: number; entries: { does: string; job: string; grant: string; state: string }[] }, reasons: string[], options: unknown, nonce: string): string {
+  const n = report.entries.length;
+  const items = report.entries.map((e, i) => `<li>${esc(e.does)}<br><span class="muted">The agent's reason: <q>${esc(reasons[i] ?? "")}</q></span></li>`).join("");
+  // A card nobody approved in time: say so and what to do, rather than "nothing has run yet" (orient-the-person).
+  const expired = !options && report.status === "pending";
+  const after = options ? null : expired ? { ok: false, head: "Expired", text: "This card expired before it was approved, so nothing ran. Nothing to do here; the agent can send it again.", lines: report.entries.map((e, i) => `${i + 1}. ${e.does} -- Not run`) } : cardView(200, { report });
+  const exact = report.entries.map((e, i) => `${i + 1}. Job ${e.job} · request ${e.grant}`).join("\n") + `\nCard ${report.card}`;
+  return page(
+    "Approve a card",
+    nonce,
+    `<p class="muted" id="step">${options ? "Step 1 of 2 · Check every job, then approve once" : "Step 2 of 2 · Result"}</p>
+<div id="status" class="${after ? (after.ok ? "pass" : "fail") : ""}">${after ? esc(after.head) : ""}</div>
+<h1>${options ? `Approve ${n === 1 ? "this job" : `these ${n} jobs`}?` : "Card"}</h1>
+<ol id="lines">${after ? after.lines.map((l) => `<li>${esc(l.replace(/^\d+\. /, ""))}</li>`).join("") : items}</ol>
+${options ? `<p><strong>When you approve:</strong> they run now, in this order, and stop at the first failure. Keep this page open until it says Done.</p>
+<p class="muted" id="overseer">${SECOND_CHECK}</p>
+<p class="muted">Approve before <span id="expires">${new Date(report.expires_at).toISOString().slice(11, 16)} UTC</span>. Login: your <strong>front desk passkey</strong>; Face ID offers only that one.</p>
+<button id="go">Approve all ${n} with Face ID</button>` : ""}
+<p id="after">${after ? esc(after.text) : ""}</p>
+${!expired && (report.status === "pending" || report.entries.some((e) => e.state === "waiting" || e.state === "dispatching")) ? `<button id="stop" style="background:var(--bad)">Stop: run nothing more</button><p class="muted">Stop works while this page is open.</p>` : ""}
+<details><summary class="muted">Exact details (technical)</summary><pre class="muted">${esc(exact)}</pre></details>`,
+    `const opts=${JSON.stringify(options)};
+const render=(st,j)=>{const v=cardView(st,j);show(v.ok,v.head);document.getElementById('step').textContent='Step 2 of 2 · Result';
+ const ol=document.getElementById('lines');if(v.lines.length){ol.textContent='';for(const l of v.lines){const li=document.createElement('li');li.textContent=l.replace(/^\\d+\\. /,'');ol.appendChild(li)}}
+ document.getElementById('after').textContent=v.text};
+const go=document.getElementById('go');
+if(go)go.onclick=async e=>{const t0=Date.now();e.target.disabled=true;
+ let c;try{c=await navigator.credentials.get({publicKey:{challenge:u2b(opts.challenge),rpId:opts.rpId,timeout:opts.timeout,userVerification:'required',
+  allowCredentials:(opts.allowCredentials||[]).map(a=>({type:'public-key',id:u2b(a.id)})),extensions:{prf:{eval:{first:u2b(opts.prfSalt)}}}}})}
+ catch(err){failed(err,t0);e.target.disabled=false;return}
+ const x=(c.getClientExtensionResults&&c.getClientExtensionResults().prf)||{};const first=x.results&&x.results.first;
+ e.target.hidden=true;show(true,'Running...');document.getElementById('after').textContent='Keep this page open until it says Done.';
+ let res=null,j=null;try{res=await fetch(location.pathname,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...cred(c),prf:first?b2u(first):null})});j=await res.json().catch(()=>null)}catch(_){}
+ render(res?res.status:null,j)};
+const stop=document.getElementById('stop');
+if(stop)stop.onclick=async e=>{e.target.disabled=true;let res=null,j=null;
+ try{res=await fetch(location.pathname+'/stop',{method:'POST'});j=await res.json().catch(()=>null)}catch(_){}
+ if(res&&res.ok){e.target.hidden=true;if(go)go.hidden=true}else e.target.disabled=false;render(res?res.status:null,j)};
+${cardView.toString()}`,
+  );
+}

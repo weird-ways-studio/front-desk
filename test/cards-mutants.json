@@ -1,0 +1,212 @@
+[
+ [
+  "open-hash",
+  "vault/src/cards.ts",
+  "if (!hash || hash !== m.entries[i] || ",
+  "if (!hash || ",
+  "open (a)(b): a changed param, swapped order, an extra or missing grant, a duplicate grant id -> bad_card (T1, U1)"
+ ],
+ [
+  "open-requester",
+  "vault/src/cards.ts",
+  " || g.requester !== m.requester || ",
+  " || ",
+  "open (a)(b): a changed param, swapped order, an extra or missing grant, a duplicate grant id -> bad_card (T1, U1)"
+ ],
+ [
+  "open-dup-id",
+  "vault/src/cards.ts",
+  "if (new Set(entries.map((e) => e.grant.id)).size !== entries.length) throw new VaultError(\"bad_card\");",
+  "",
+  "open (a)(b): a changed param, swapped order, an extra or missing grant, a duplicate grant id -> bad_card (T1, U1)"
+ ],
+ [
+  "open-expiry",
+  "vault/src/cards.ts",
+  " || m.deadline > g.expires_at + CARD_RUN_MS) throw",
+  ") throw",
+  "open (e): ineligible job, jobs version, cap, deadline past expiry + 15 min"
+ ],
+ [
+  "open-job",
+  "vault/src/cards.ts",
+  "if (!this.jobs.includes(g.job)) throw new VaultError(\"job_not_on_cards\");",
+  "",
+  "open (e): ineligible job, jobs version, cap, deadline past expiry + 15 min"
+ ],
+ [
+  "open-cap",
+  "vault/src/cards.ts",
+  "if (m.entries.length > CARD_CAP) throw",
+  "if (m.entries.length > 5) throw",
+  "open (e): ineligible job, jobs version, cap, deadline past expiry + 15 min"
+ ],
+ [
+  "open-version",
+  "vault/src/cards.ts",
+  "if (m.jobs_version !== this.jobsVersion) throw new VaultError(\"version_changed\");",
+  "",
+  "open (e): ineligible job, jobs version, cap, deadline past expiry + 15 min"
+ ],
+ [
+  "open-passkey",
+  "vault/src/cards.ts",
+  "assertion: r.assertion }, hash)) !== undefined) throw",
+  "assertion: r.assertion }, hash)) === \"never\") throw",
+  "open (c)(d): a tap over another hash, another passkey, or a grant hash -> bad_assertion"
+ ],
+ [
+  "open-replay",
+  "vault/src/cards.ts",
+  "if (seen.hash === hash && seen.tap === tap) return",
+  "if (seen.hash === hash) return",
+  "open replay (U5): the same tap returns the open book; another tap for that card id is card_seen"
+ ],
+ [
+  "open-deadline",
+  "vault/src/cards.ts",
+  "if (now > m.deadline) throw new VaultError(\"deadline_passed\");",
+  "",
+  "open (f)(g): card seen, grant used standalone, grant on another card, deadline passed, tap after the approve window"
+ ],
+ [
+  "open-window",
+  "vault/src/cards.ts",
+  "if (entries.some((e) => now > e.grant.expires_at)) throw new VaultError(\"too_late\");",
+  "",
+  "open (f)(g): card seen, grant used standalone, grant on another card, deadline passed, tap after the approve window"
+ ],
+ [
+  "open-used",
+  "vault/src/cards.ts",
+  "if (used?.has(e.grant.id)) throw",
+  "if (used === null) throw",
+  "open (f)(g): card seen, grant used standalone, grant on another card, deadline passed, tap after the approve window"
+ ],
+ [
+  "open-oncard",
+  "vault/src/cards.ts",
+  "if (kv.get(`cardgrant:${e.grant.id}`) !== undefined) throw",
+  "if (kv.get(`cardgrant:${e.grant.id}`) === null) throw",
+  "open (f)(g): card seen, grant used standalone, grant on another card, deadline passed, tap after the approve window"
+ ],
+ [
+  "receipt-sig",
+  "vault/src/cards.ts",
+  "if (!ok || rc!.stage",
+  "if (rc!.stage",
+  "run: fabricated, wrong-key, other-grant, other-stage, tampered receipts -> bad_receipt"
+ ],
+ [
+  "receipt-grant",
+  "vault/src/cards.ts",
+  " || rc!.grant !== e.grant.id || ",
+  " || ",
+  "run: fabricated, wrong-key, other-grant, other-stage, tampered receipts -> bad_receipt"
+ ],
+ [
+  "receipt-stage",
+  "vault/src/cards.ts",
+  " || rc!.stage !== \"approval\" || ",
+  " || ",
+  "run: fabricated, wrong-key, other-grant, other-stage, tampered receipts -> bad_receipt"
+ ],
+ [
+  "receipt-sha",
+  "vault/src/cards.ts",
+  " || (await sha256(r.approval_body)) !== rc!.sha256) throw",
+  ") throw",
+  "run: fabricated, wrong-key, other-grant, other-stage, tampered receipts -> bad_receipt"
+ ],
+ [
+  "approval-kind",
+  "vault/src/cards.ts",
+  " || body.approval_kind !== \"card/v1\" || ",
+  " || ",
+  "run: a receipted body that is not this card's card/v1 approval of this entry -> bad_approval (U1)"
+ ],
+ [
+  "approval-hash",
+  "vault/src/cards.ts",
+  " || body.grant_hash !== e.hash || ",
+  " || ",
+  "run: a receipted body that is not this card's card/v1 approval of this entry -> bad_approval (U1)"
+ ],
+ [
+  "approval-card",
+  "vault/src/cards.ts",
+  " || (await cardHashOf(m)) !== b.hash) throw",
+  ") throw",
+  "run: a receipted body that is not this card's card/v1 approval of this entry -> bad_approval (U1)"
+ ],
+ [
+  "claim-deadline",
+  "vault/src/cards.ts",
+  "if (now > b.deadline) throw new VaultError(\"deadline_passed\"); // even",
+  "// even",
+  "T3: a valid signed receipt does not start an entry past the deadline (carried T2 from 586da182)"
+ ],
+ [
+  "claim-order",
+  "vault/src/cards.ts",
+  "if (b.entries.slice(0, r.index).some((x) => x.state !== \"done\")) throw",
+  "if (false) throw",
+  "T4: entry 2 before entry 1 is out_of_order; entry 1 twice runs once; nothing after a failure or Stop"
+ ],
+ [
+  "claim-stopped",
+  "vault/src/cards.ts",
+  "if (b.stopped || b.closed_at !== undefined) throw",
+  "if (b.closed_at !== undefined) throw",
+  "T4: a stopped card whose entry is still waiting refuses card_stopped; settled states never move back"
+ ],
+ [
+  "claim-off",
+  "vault/src/cards.ts",
+  "if (!this.jobs.includes(e.grant.job)) throw new VaultError(\"cards_off\");",
+  "",
+  "U2: emptying the vault's card list stops an already-open card (cards_off); the alarm still closes it"
+ ],
+ [
+  "claim-version",
+  "vault/src/cards.ts",
+  "if (b.jobs_version !== this.jobsVersion) throw",
+  "if (false) throw",
+  "T9/T10: a jobs-version change or a c-box key change between entries refuses the next claim"
+ ],
+ [
+  "claim-keyrev",
+  "vault/src/cards.ts",
+  "if (r.key_rev !== b.key_rev || vaultRev > b.key_rev) throw",
+  "if (r.key_rev !== b.key_rev) throw",
+  "T9/T10: a jobs-version change or a c-box key change between entries refuses the next claim"
+ ],
+ [
+  "alarm-close",
+  "vault/src/cards.ts",
+  "if (b.closed_at === undefined && now > b.deadline) {",
+  "if (false) {",
+  "T6: an entry left dispatching (the desk never settles) is closed unknown by the alarm alone; a late settle is kept as late"
+ ],
+ [
+  "view-hold",
+  "vault/src/cards.ts",
+  "const held = b.closed_at === undefined || now <= b.closed_at + ANSWER_HOLD_MS;",
+  "const held = true;",
+  "V3: past the hold, status returns no answers even if one is still stored (alarm not yet run)"
+ ],
+ [
+  "arm-before",
+  "vault/src/cards.ts",
+  "    await this.armBy(m.deadline + 1);\n",
+  "\n",
+  "U7: a storage fault inside open's transaction leaves no card, only an early alarm that finds nothing due"
+ ],
+ [
+  "vault-cardgrant",
+  "vault/src/approval.ts",
+  "if ((await store.get(`cardgrant:${id}`)) !== undefined) throw new VaultError(CARD_GRANT);",
+  "",
+  "T8: vault.run refuses a grant held by a card (card_grant), even with a valid tap for that grant"
+ ]
+]

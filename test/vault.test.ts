@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { MemoryStore } from "../src/desk.ts";
 import { MASTER_LABEL, RECOVERY_LABEL, open, seal, b64url, fromB64url } from "../vault/src/seal.ts";
-import { PENDING_MS, PROBE_TOKEN_MS, TOKENS_READ, VaultLogic, type CfAcceptResult, type Headcount, type HeadcountSetupResult, type ReadResult, HELPER_PREFIX, RESULT_MAX_BYTES } from "../vault/src/vault.ts";
+import { PENDING_MS, PROBE_TOKEN_MS, TOKENS_READ, VaultLogic, type CfAcceptResult, type Headcount, type HeadcountSetupResult, type ReadResult, HELPER_PREFIX, RESULT_MAX_BYTES, SWEEP_DELETES } from "../vault/src/vault.ts";
 import { handleSetup } from "../vault/src/setup.ts";
 
 const ACCOUNT = "a".repeat(32);
@@ -326,9 +326,11 @@ test("short keys: a failed delete leaves them recorded; the nightly count lists 
   assert.ok(night.cleanup.every((k) => !k.expired && k.expires_on !== "never"), "expiry is Cloudflare's own");
   assert.ok(night.cleanup.every((k) => k.recorded), "the vault's own: it will delete them");
   assert.deepEqual(await vault.cfPreview(), []);
-  // The next approved Cloudflare tap sweeps them first.
+  // The next approved Cloudflare taps sweep them first, SWEEP_DELETES per tap (F9 cap, card 85818ab1).
   const next = await readJob(vault, "cf.zone.read", { zone: ZONE });
   assert.equal(next.ok, true, JSON.stringify(next));
+  assert.equal((await store.get<unknown[]>("helpers"))!.length, 2 - SWEEP_DELETES, "the rest waits for the next tap");
+  assert.equal((await readJob(vault, "cf.zone.read", { zone: ZONE })).ok, true);
   assert.deepEqual(await store.get("helpers"), []);
   const after = await vault.headcount();
   assert.ok(cfClean(after) && after.cleanup.length === 0, JSON.stringify(after));
@@ -804,4 +806,72 @@ test("headcount key identity (Codex Build R r2 #1): setup records its group id; 
   assert.deepEqual((await vault.headcount()).widened, [{ id: kept.token_id, why: "headcount_key_needs_setup" }], "made before Build R");
   assert.equal((await hcSetup(vault)).ok, true);
   assert.deepEqual((await vault.headcount()).widened, [], "the setup tap records the id and the night is clean again");
+});
+
+// Card build 3 (85818ab1) F9 (V5/W2): the heaviest card entry's subrequests in one vault invocation -- cf.dns.list
+// with more than DNS_MAX records, paged 100 at a time -- through runCardEntry, today's tap path. Asserted so a change
+// that adds calls is seen. Each short vault key left over from an earlier tap adds one DELETE (sweepHelpers).
+test("F9: one cf.dns.list card entry at DNS_MAX makes a fixed, counted number of Cloudflare calls", async () => {
+  const { store, cf } = await stored();
+  const rows = Array.from({ length: 1000 }, (_, i) => ({ id: `r${i}`, type: "A", name: `h${i}.${ZONE}`, content: "192.0.2.1" }));
+  let fetches = 0;
+  const v = testVault(store, async (input: string, init?: RequestInit) => {
+    fetches++;
+    const u = new URL(String(input));
+    if (u.pathname.includes("/dns_records")) {
+      const page = Number(u.searchParams.get("page")), per = Number(u.searchParams.get("per_page"));
+      return Response.json({ success: true, result: rows.slice((page - 1) * per, page * per) });
+    }
+    return cf.fetchFn(input as string, init);
+  }, () => NOW);
+  await readJob(v, "cf.zone.read", { zone: ZONE }); // the first tap locks the master key to the passkey
+  fetches = 0;
+  cf.calls.length = 0;
+  const r = (await v.runCardEntry("cf.dns.list", { zone: ZONE }, prf(7))) as ReadResult;
+  assert.equal(r.ok, true);
+  assert.equal(r.truncated, true);
+  const byKind = cf.calls.map((c) => `${c.method} ${c.path.split("?")[0].replace(/[0-9a-f]{32}|minted\d+/g, "<id>")}`);
+  // Measured 2026-11-08: permission groups, mint + delete for the zone lookup key, zone lookup, mint + delete for the DNS
+  // key, the leftover-key list, and 6 DNS pages (1000 rows: pages 1-6 until more than 500 are held).
+  assert.equal(fetches, 13, `measured: ${JSON.stringify(byKind)} + 6 DNS pages`);
+});
+
+// F9 with a planted cleanup backlog (Codex build r1 R7): five expired handed-out keys and five leftover short keys.
+// Each sweep sends at most SWEEP_DELETES deletes per tap; the rest stay recorded and go at later taps.
+test("F9: a cleanup backlog adds a fixed number of calls per tap (SWEEP_DELETES per sweep); the rest waits for later taps", async () => {
+  const { store, cf, clock } = await stored();
+  let fetches = 0;
+  const rows = Array.from({ length: 1000 }, (_, i) => ({ id: `r${i}`, type: "A", name: `h${i}.${ZONE}`, content: "192.0.2.1" }));
+  const v = testVault(store, async (input: string, init?: RequestInit) => {
+    fetches++;
+    const u = new URL(String(input));
+    if (u.pathname.includes("/dns_records")) {
+      const page = Number(u.searchParams.get("page")), per = Number(u.searchParams.get("per_page"));
+      return Response.json({ success: true, result: rows.slice((page - 1) * per, page * per) });
+    }
+    return cf.fetchFn(input as string, init);
+  }, () => clock.now);
+  await readJob(v, "cf.zone.read", { zone: ZONE });
+  const exp = new Date(clock.now + 60_000).toISOString();
+  const issued = Array.from({ length: 5 }, (_, i) => ({ id: `${"a".repeat(31)}${i}`, expires_on: exp }));
+  const helpers = Array.from({ length: 5 }, (_, i) => ({ name: `${HELPER_PREFIX}old${i}`, until: exp, id: `${"b".repeat(31)}${i}` }));
+  for (const k of issued) cf.tokens.push({ id: k.id, expires_on: exp });
+  for (const h of helpers) cf.tokens.push({ id: h.id, name: h.name });
+  await store.put("master", { ...(await store.get<any>("master")), issued });
+  await store.put("helpers", helpers);
+  clock.now += 2 * 60_000;
+  fetches = 0;
+  const r = (await v.runCardEntry("cf.dns.list", { zone: ZONE }, prf(7))) as ReadResult;
+  assert.equal(r.ok, true);
+  // 13 as measured above + SWEEP_DELETES handed-out deletes + 1 token-list page for the short-key sweep + SWEEP_DELETES
+  // short-key deletes = 16 at SWEEP_DELETES 1. Two cf.dns.list entries on one card: 15 desk + 2 x 16 = 47 < 50.
+  assert.equal(SWEEP_DELETES, 1, "F9-MAP-85818ab1.md's 47-call total for two DNS entries assumes 1");
+  assert.equal(fetches, 13 + SWEEP_DELETES + 1 + SWEEP_DELETES);
+  assert.equal((await store.get<any>("master")).issued.length, 5 - SWEEP_DELETES, "the rest stays recorded");
+  assert.equal((await store.get<any[]>("helpers"))!.length, 5 - SWEEP_DELETES);
+  assert.equal(r.leftover?.length, 5 - SWEEP_DELETES, "and is shown on this tap's result");
+  // Safeguard working: later taps keep clearing it.
+  for (let i = 0; i < Math.ceil(5 / SWEEP_DELETES); i++) await v.runCardEntry("cf.dns.list", { zone: ZONE }, prf(7));
+  assert.equal((await store.get<any>("master")).issued.length, 0);
+  assert.deepEqual(await store.get<any[]>("helpers"), []);
 });

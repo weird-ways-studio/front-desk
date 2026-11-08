@@ -14,7 +14,9 @@ export interface SignedRun {
 
 // Raised only BEFORE the admission step writes `used`, so this call started nothing (R6). The desk calls the
 // vault once per grant (it marks the grant approved first), so for the grant on Ben's screen nothing ran.
-export const REFUSED_BEFORE_RUN = ["wrong_shape", "no_pin", "bad_grant", "bad_assertion"] as const;
+export const REFUSED_BEFORE_RUN = ["wrong_shape", "no_pin", "bad_grant", "bad_assertion", "card_grant"] as const;
+// The grant is on a card (vault/src/cards.ts): it runs only through the card book. Refused before admission.
+export const CARD_GRANT = "card_grant";
 // The grant is already in `used`: it may have run once.
 export const ALREADY_USED = "already_used";
 // Too old to admit. Not proof that nothing ran: an id leaves `used` only once its grant is this old, so a late
@@ -65,6 +67,9 @@ export async function checkSigned(req: unknown, extra: number, pin: PasskeyPin |
  * boundary, and records this one before anything is opened.
  */
 export async function admit(store: UsedStore, id: string, expiresAt: number, now: number): Promise<void> {
+  // A grant on a card runs only through the card book (cards.ts), never standalone (card 85818ab1 T8). Checked in
+  // this same storage-only step, so cardOpen (which refuses ids in `used`) cannot slip in between.
+  if ((await store.get(`cardgrant:${id}`)) !== undefined) throw new VaultError(CARD_GRANT);
   const used = (await store.get<Map<string, number>>("used")) ?? new Map<string, number>();
   if (used.has(id)) throw new VaultError(ALREADY_USED);
   if (now > expiresAt + USED_GRACE_MS) throw new VaultError(TOO_OLD);

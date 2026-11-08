@@ -14,7 +14,7 @@ import { DurableObject } from "cloudflare:workers";
 import { agentOf, type AgentConfig } from "./agent.ts";
 import { callerOf, route, type Who } from "./routes.ts";
 import { Desk, approvalPush, headcountAlarm, phoneAlert } from "./desk.ts";
-import type { VaultApi } from "../vault/src/api.ts";
+import type { VaultApi, VaultCardApi } from "../vault/src/api.ts";
 import { recorderFrom } from "./recorder.ts";
 
 interface Env extends AgentConfig {
@@ -36,7 +36,7 @@ interface Env extends AgentConfig {
   RECORDER_CLIENT_ID?: string;
   RECORDER_CLIENT_SECRET?: string;
   // The vault Worker (vault/), reached only through this service binding (wrangler.jsonc "services").
-  VAULT: Service & VaultApi;
+  VAULT: Service & VaultApi & VaultCardApi;
 }
 
 export class FrontDesk extends DurableObject<Env> {
