@@ -362,12 +362,14 @@ export class CardDesk extends Desk {
         const held = Object.hasOwn(v.answers, i);
         let g = await this.grant(gid);
         if (open && held && terminal(e.state) && g.result === undefined && !g.answer_erased) {
-          g = { ...(await this.grant(gid)), result: withoutSecret(v.answers[i]) };
-          await this.store.put(`grant:${gid}`, g);
+          // The erase clock is written BEFORE the answer: a crash between the two leaves a clock with no answer
+          // (an earlier erase, the safe side), never an answer with no clock (Codex r3 N4).
           if (c.first_stored_at === undefined) {
             c = { ...(await this.card(id)), first_stored_at: now };
             await this.store.put(`card:${id}`, c);
           }
+          g = { ...(await this.grant(gid)), result: withoutSecret(v.answers[i]) };
+          await this.store.put(`grant:${gid}`, g);
         }
         // Only after the desk's own write has completed may the vault drop its copy (V2).
         if (held && g.result !== undefined) await Promise.resolve().then(() => this.cards().cardAck(id, i)).catch(() => false);

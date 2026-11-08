@@ -596,6 +596,21 @@ test("deadline bound (commit security review): no close time and no stored-answe
   assert.equal((await desk.grant(grants[0].id)).result, undefined, "erased by the deadline bound");
 });
 
+test("N4 (Codex r3): the erase clock is stored before the answer, so a crash between them never leaves an answer with no clock", async () => {
+  const { desk, store, fail } = await rig();
+  const { card, grants } = await desk.requestCard({ entries: [two[0]] }, "agent", T0, signedSrc);
+  fail.cardStatus = 1; // the tap's own read is lost: the answer is stored by the next read
+  await tap(desk, card.id);
+  const realPut = store.put.bind(store);
+  store.put = async (k: string, v: unknown) => {
+    if (k === `grant:${grants[0].id}` && (v as { result?: unknown }).result !== undefined) throw new Error("crash before the answer is written");
+    return realPut(k, v);
+  };
+  await assert.rejects(desk.collectCard(card.id, "agent", T0 + 1, signedSrc), /crash/);
+  assert.equal((await desk.grant(grants[0].id)).result, undefined, "checkpoint: the answer was not written");
+  assert.equal((await desk.card(card.id)).first_stored_at, T0 + 1, "the clock was written first");
+});
+
 test("R5: two POST /card at once for one requester: exactly one card is created", async () => {
   const { desk, store } = await rig();
   const both = await Promise.allSettled([desk.requestCard({ entries: two }, "agent", T0, signedSrc), desk.requestCard({ entries: two }, "agent", T0, signedSrc)]);

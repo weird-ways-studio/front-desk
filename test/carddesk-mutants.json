@@ -326,5 +326,13 @@
   "(c.first_stored_at ?? Infinity)",
   "deadline bound (commit security review): no close time and no stored-answer clock -- copies still go by deadline + window",
   "test/carddesk.test.ts"
+ ],
+ [
+  "desk-clock-first",
+  "src/carddesk.ts",
+  "          if (c.first_stored_at === undefined) {\n            c = { ...(await this.card(id)), first_stored_at: now };\n            await this.store.put(`card:${id}`, c);\n          }\n          g = { ...(await this.grant(gid)), result: withoutSecret(v.answers[i]) };\n          await this.store.put(`grant:${gid}`, g);",
+  "          g = { ...(await this.grant(gid)), result: withoutSecret(v.answers[i]) };\n          await this.store.put(`grant:${gid}`, g);\n          if (c.first_stored_at === undefined) {\n            c = { ...(await this.card(id)), first_stored_at: now };\n            await this.store.put(`card:${id}`, c);\n          }",
+  "N4 (Codex r3): the erase clock is stored before the answer, so a crash between them never leaves an answer with no clock",
+  "test/carddesk.test.ts"
  ]
 ]
