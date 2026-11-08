@@ -384,3 +384,28 @@ test("T13: a repo deleted and re-made under the same name between nights shows a
 });
 
 // ---- X2 / T12: the two writers of gh.baseline -- the race with gh.app.baseline is in test/github.test.ts ----
+
+// ---- Release Checklist 6.2: two calls at once ----
+test("6.2: two repoRecorded calls at once for the same receipt -> one 'now', one 'already', exactly two lines", async () => {
+  const s = await setup();
+  const { c } = await runRepo(s);
+  const { body, receipt } = await resultOf(s, c.grants[0].id);
+  const both = await Promise.all([s.book.repoRecorded(c.grants[0].id, body, receipt), s.book.repoRecorded(c.grants[0].id, body, receipt)]);
+  assert.deepEqual(both.map((r) => r.recorded).sort(), ["already", "now"]);
+  assert.deepEqual(diff(BASELINE, s.store.kv.get<GhSnapshot>("gh.baseline")!), ["repos +new-app:private", `repo_ids +new-app:${REPO_ID}`]);
+});
+
+test("6.2: two repo cards racing -> both repos added, no line lost", async () => {
+  const s = await setup();
+  const a = await runRepo(s, "new-app");
+  (s.gh as any).calls.length = 0;
+  const b = await runRepo(s, "new-app");
+  const ra = await resultOf(s, a.c.grants[0].id);
+  // The second card's repo, as GitHub would answer it: another id. Its record is rewritten to that id.
+  const rec = s.book.repoFacts(b.c.grants[0].id)!;
+  s.store.kv.put(`gh.created:${b.c.grants[0].id}`, { ...rec, name: "other-app", repo_id: "777002" });
+  const rb = await resultOf(s, b.c.grants[0].id, { repo_id: "777002" });
+  await Promise.all([s.book.repoRecorded(a.c.grants[0].id, ra.body, ra.receipt), s.book.repoRecorded(b.c.grants[0].id, rb.body, rb.receipt)]);
+  const ids = s.store.kv.get<GhSnapshot>("gh.baseline")!.repo_ids;
+  assert.ok(ids.includes(`new-app:${REPO_ID}`) && ids.includes("other-app:777002"), JSON.stringify(ids));
+});
