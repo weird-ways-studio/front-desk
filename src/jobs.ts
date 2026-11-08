@@ -246,11 +246,18 @@ export const JOBS = {
 export type JobName = keyof typeof JOBS;
 
 /** The agents' menu, generated from JOBS (served at GET /menu). Adding a job is a pull request Ben merges. */
+/**
+ * Jobs the desk lets onto a card (card 85818ab1): read-only or touch-nothing jobs, the same four as the vault's
+ * CARD_JOBS (vault/src/cards.ts) and the Observatory's CARD_ELIGIBLE. Each side checks its own list.
+ */
+export const CARD_ELIGIBLE: readonly JobName[] = Object.freeze(["test.echo", "cf.zone.read", "cf.dns.list", "cf.audit.read"] as JobName[]);
+
 export function menu() {
   return {
     jobs: Object.entries(JOBS as Record<string, Job>).map(([job, j]) => ({ job, mode: j.mode, ...j.menu, signed: !!j.signed })),
     modes: { tap: "Ben approves this one job with Face ID; you never hold a key.", run: "Inside a run Ben opened (not built yet).", key: "A key on the c-box (none offered)." },
     new_job: "Not on the list? Propose it as a pull request to front-desk src/jobs.ts (and vault/src/vault.ts for a vault job); it exists once Ben merges it.",
+    card: `Several of ${CARD_ELIGIBLE.join(", ")} on one Face ID tap, run in order: node scripts/agent.mjs post <desk>/card '{"entries":[{"job":...,"params":{...},"reason":"..."}]}', then node scripts/agent.mjs get <desk>/card/<card> once Ben's page says done. At most 2 entries for now.`,
     ask: "node scripts/agent.mjs post <desk>/request '{\"job\":...,\"params\":{...},\"reason\":\"<card id>: why\"}', then node scripts/agent.mjs wait <collect-url>",
   };
 }
