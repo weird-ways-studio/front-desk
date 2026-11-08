@@ -274,8 +274,8 @@
  [
   "desk-open-clock",
   "src/carddesk.ts",
-  "const open = c.closed_at !== undefined ? now <= c.closed_at + COLLECT_WINDOW_MS : v !== undefined;",
-  "const open = !v || c.closed_at === undefined || now <= c.closed_at + COLLECT_WINDOW_MS;",
+  "const open = !expired && (c.closed_at !== undefined || v !== undefined);",
+  "const open = !v || c.closed_at === undefined || !expired;",
   "R4: no known clock (card still running, then the vault cannot be read): a stored answer is not returned",
   "test/carddesk.test.ts"
  ],
@@ -314,9 +314,17 @@
  [
   "desk-first-stored",
   "src/carddesk.ts",
-  "const since = c.closed_at ?? (v ? undefined : c.first_stored_at);",
-  "const since = c.closed_at ?? (v ? undefined : c.manifest.deadline);",
+  "const since = c.closed_at ?? (v ? c.manifest.deadline : Math.min(c.first_stored_at ?? Infinity, c.manifest.deadline));",
+  "const since = c.closed_at ?? c.manifest.deadline;",
   "N1 (Codex r2): answer stored while open, card closes unseen, vault unreadable: erased by the first-stored clock, not the deadline",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-deadline-bound",
+  "src/carddesk.ts",
+  "Math.min(c.first_stored_at ?? Infinity, c.manifest.deadline)",
+  "(c.first_stored_at ?? Infinity)",
+  "deadline bound (commit security review): no close time and no stored-answer clock -- copies still go by deadline + window",
   "test/carddesk.test.ts"
  ]
 ]

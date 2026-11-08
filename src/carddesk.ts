@@ -352,9 +352,10 @@ export class CardDesk extends Desk {
         await this.store.put(`card:${id}`, c);
       }
     }
-    const open = c.closed_at !== undefined ? now <= c.closed_at + COLLECT_WINDOW_MS : v !== undefined;
-    const since = c.closed_at ?? (v ? undefined : c.first_stored_at);
-    const expired = since !== undefined && now > since + COLLECT_WINDOW_MS;
+    // The deadline is always the latest bound: the vault closes every card by then (commit security review).
+    const since = c.closed_at ?? (v ? c.manifest.deadline : Math.min(c.first_stored_at ?? Infinity, c.manifest.deadline));
+    const expired = now > since + COLLECT_WINDOW_MS;
+    const open = !expired && (c.closed_at !== undefined || v !== undefined);
     for (const [i, gid] of c.grants.entries()) {
       const e = v?.entries[i];
       if (v && e && e.grant === gid) {

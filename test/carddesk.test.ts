@@ -581,6 +581,21 @@ test("N3 (Codex r2): a vault that never answers holds Ben's key removal for at m
   assert.equal(await store.get("cbox:key"), null);
 });
 
+test("deadline bound (commit security review): no close time and no stored-answer clock -- copies still go by deadline + window", async () => {
+  const { desk, vault } = await rig();
+  vault.cardAck = async () => false;
+  const { card, grants } = await desk.requestCard({ entries: [two[0]] }, "agent", T0, signedSrc);
+  await tap(desk, card.id);
+  const c = await desk.card(card.id);
+  await (desk as unknown as { store: MemoryStore }).store.put(`card:${card.id}`, { ...c, closed_at: undefined, first_stored_at: undefined }); // neither clock known
+  vault.cardStatus = async () => {
+    throw new Error("network connection lost");
+  };
+  const r = await desk.collectCard(card.id, "agent", c.manifest.deadline + COLLECT_WINDOW_MS + 1, signedSrc);
+  assert.equal(r.entries[0].answer, undefined);
+  assert.equal((await desk.grant(grants[0].id)).result, undefined, "erased by the deadline bound");
+});
+
 test("R5: two POST /card at once for one requester: exactly one card is created", async () => {
   const { desk, store } = await rig();
   const both = await Promise.allSettled([desk.requestCard({ entries: two }, "agent", T0, signedSrc), desk.requestCard({ entries: two }, "agent", T0, signedSrc)]);
