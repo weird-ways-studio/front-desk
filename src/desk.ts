@@ -14,6 +14,8 @@ import { ascii, name, plainChanges } from "./ghplain.ts";
 import { JOBS, type Job, type JobName } from "./jobs.ts";
 import { currentKey, fingerprint, keyRev, type CboxKey } from "./cboxkey.ts";
 import type { Headcount, VaultApi } from "../vault/src/api.ts";
+import { ALREADY_USED, APPROVAL_API_VERSION, REFUSED_BEFORE_RUN, TOO_OLD } from "../vault/src/approval.ts";
+export type VaultStage = "before" | "used" | "old" | "unknown";
 import { RecorderError, type Receipt, type Recorder, type Stage } from "./recorder.ts";
 
 export const APPROVE_WINDOW_MS = 10 * 60_000; // ask -> approve
@@ -308,6 +310,18 @@ function prfOf(input: unknown): string | null {
 }
 
 const isVault = (job: JobName) => (JOBS[job] as Job).vault === true;
+
+/**
+ * Where a failed vault call stopped, from its exact error message only (card bb86abf0 R6): "before" = a
+ * vault refusal raised before it recorded the grant as used, so nothing ran; "used" = the grant was already
+ * used once, so it may have run; "old" = too old to admit, which does not tell whether it ran before;
+ * anything else, including an unknown message, is "unknown".
+ */
+export function vaultStage(message: string): VaultStage {
+  if ((REFUSED_BEFORE_RUN as readonly string[]).includes(message)) return "before";
+  if (message === TOO_OLD) return "old";
+  return message === ALREADY_USED ? "used" : "unknown";
+}
 
 export class Desk {
   private store: Store;
@@ -618,12 +632,17 @@ export class Desk {
     let result: unknown;
     try {
       if (!this.hooks.vault) throw new Error("vault not connected");
-      result = await this.hooks.vault.run(g.job, g.params, prf);
+      // A vault on another version would misread the call: refused before anything is sent (card bb86abf0 R6).
+      if ((await this.hooks.vault.approvalApi().catch(() => null))?.version !== APPROVAL_API_VERSION) throw new Error("wrong_shape");
+      // The vault checks Ben's passkey answer itself, for exactly these grant fields, and runs each grant once.
+      const grant = { id: g.id, job: g.job, params: g.params, requester: g.requester, expires_at: g.expires_at };
+      result = await this.hooks.vault.run({ grant, assertion: assertionOf(response), prf });
       const ok = (result as { ok?: unknown } | null)?.ok === true;
       await this.log({ event: ok ? "job_done" : "job_failed", ...this.grantFacts(g), detail: logDetail(withoutSecret(result)) }, now);
     } catch (e) {
-      result = { error: (e as Error).message.slice(0, 120) };
-      await this.log({ event: "job_failed", ...this.grantFacts(g), detail: (e as Error).message.slice(0, 120) }, now);
+      const message = e instanceof Error && typeof e.message === "string" ? e.message : "";
+      result = { error: (message || "unknown error").slice(0, 120), vault_stage: vaultStage(message) };
+      await this.log({ event: "job_failed", ...this.grantFacts(g), detail: (message || "unknown error").slice(0, 120) }, now);
     }
     await this.recordResult(id, (result as { ok?: unknown } | null)?.ok === true, now);
     // Re-read: other requests ran while the vault worked; only the result is added. If Ben removed or

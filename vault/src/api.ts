@@ -1,17 +1,19 @@
 // The vault's RPC surface as the front desk sees it (types only; nothing runs from here).
 
+import type { SignedRun } from "./approval.ts";
 import type { OpRequest, OpResult, RunBook, RunState } from "./runs.ts";
 import type { CfAcceptResult, CfPreviewKey, GhBaselineResult, Headcount, HeadcountSetupResult, ReadResult } from "./vault.ts";
 
-export type { OpRequest, OpResult, RunState };
+export type { OpRequest, OpResult, RunState, SignedRun };
 export type { CfAcceptResult, CfPreviewKey, GhBaselineResult, Headcount, HeadcountSetupResult, ReadResult };
 
 export interface VaultApi {
   status(): Promise<{ stored: boolean; pending: boolean; token_id?: string }>;
-  run(job: string, params: Record<string, string>, prf: string): Promise<ReadResult | HeadcountSetupResult | GhBaselineResult | CfAcceptResult>;
+  run(req: SignedRun): Promise<ReadResult | HeadcountSetupResult | GhBaselineResult | CfAcceptResult>;
   headcount(): Promise<Headcount>;
   ghPreview(): Promise<{ changes: string[]; snapshot: string; base: string }>;
   cfPreview(): Promise<CfPreviewKey[]>;
+  approvalApi(): Promise<{ version: number }>;
 }
 
 // Runs (4a-2a; rules in runs.ts). Separate from VaultApi until the desk uses them (4a-2b).

@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { signedRun, testVault } from "./vaultsign.ts";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { MemoryStore } from "../src/desk.ts";
@@ -100,13 +101,13 @@ async function stored(fail?: Fail, baseline = 3) {
   const cf = fakeCloudflare(fail, baseline);
   const store = new MemoryStore();
   const clock = { now: NOW };
-  const vault = new VaultLogic(store, cf.fetchFn, () => clock.now);
+  const vault = testVault(store, cf.fetchFn, () => clock.now);
   const out = await vault.setup(PARENT);
   cf.calls.length = 0;
   return { store, vault, out, cf, clock };
 }
 // The generic vault job for unlock and audit tests: a read (cf.dns.txt.probe was cut, card c653a0fd).
-const probe = (vault: VaultLogic, secret = prf(7)) => vault.run("cf.zone.read", { zone: ZONE }, secret) as Promise<ReadResult>;
+const probe = (vault: VaultLogic, secret = prf(7)) => signedRun(vault, "cf.zone.read", { zone: ZONE }, secret) as Promise<ReadResult>;
 
 test("seal: opens with the same secret and label only; an altered box never opens", async () => {
   const secret = fromB64url(prf(1));
@@ -168,7 +169,7 @@ test("a setup nobody confirms within 30 minutes lapses, is erased from storage, 
 });
 
 test("setup refuses: not a token, no single account, inactive token", async () => {
-  const fresh = (fail?: Fail) => new VaultLogic(new MemoryStore(), fakeCloudflare(fail).fetchFn, () => NOW);
+  const fresh = (fail?: Fail) => testVault(new MemoryStore(), fakeCloudflare(fail).fetchFn, () => NOW);
   await assert.rejects(fresh().setup("short"), /not_a_token/);
   await assert.rejects(fresh("accounts2").setup(PARENT), /account_unclear/);
   await assert.rejects(fresh("accounts0").setup(PARENT), /account_unclear/);
@@ -179,14 +180,15 @@ test("vault refuses before any Cloudflare call: wrong passkey secret, unknown or
   const { vault, cf } = await stored();
   await probe(vault); // locks the key to prf(7)
   cf.calls.length = 0;
-  await assert.rejects(probe(vault, b64url(new Uint8Array(16))), /bad_secret/);
+  // A secret that is not 32 bytes is refused at the shape check, before the grant is used (card bb86abf0).
+  await assert.rejects(probe(vault, b64url(new Uint8Array(16))), /wrong_shape/);
   await assert.rejects(probe(vault, prf(8)), /wrong_secret/);
-  await assert.rejects(vault.run("cf.access.edit", { zone: ZONE }, prf(7)), /job_not_offered/);
+  await assert.rejects(signedRun(vault, "cf.access.edit", { zone: ZONE }, prf(7)), /job_not_offered/);
   // Cut 2026-11-08 (card c653a0fd): the DNS-write test job is no longer offered by the vault.
-  await assert.rejects(vault.run("cf.dns.txt.probe", { zone: ZONE }, prf(7)), /job_not_offered/);
-  await assert.rejects(vault.run("cf.zone.read", { zone: "example.com" }, prf(7)), /zone_not_offered/);
+  await assert.rejects(signedRun(vault, "cf.dns.txt.probe", { zone: ZONE }, prf(7)), /job_not_offered/);
+  await assert.rejects(signedRun(vault, "cf.zone.read", { zone: "example.com" }, prf(7)), /zone_not_offered/);
   assert.equal(cf.calls.length, 0);
-  const empty = new VaultLogic(new MemoryStore(), cf.fetchFn, () => NOW);
+  const empty = testVault(new MemoryStore(), cf.fetchFn, () => NOW);
   await assert.rejects(probe(empty), /no_master_key/);
 });
 
@@ -219,7 +221,7 @@ const VAULT = "https://vault.example";
 const form = (token: string, origin = VAULT) =>
   new Request(`${VAULT}/setup`, { method: "POST", headers: { origin, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token }) });
 
-const readJob = (vault: VaultLogic, job: string, params: Record<string, string>) => vault.run(job, params, prf(7)) as Promise<ReadResult>;
+const readJob = (vault: VaultLogic, job: string, params: Record<string, string>) => signedRun(vault, job, params, prf(7)) as Promise<ReadResult>;
 const WINDOW = { since: "2026-10-24T00:00:00Z", until: "2026-10-26T00:00:00Z" };
 const minted = (cf: ReturnType<typeof fakeCloudflare>) => cf.calls.filter((c) => c.method === "POST" && c.path.endsWith("/tokens"));
 
@@ -274,7 +276,7 @@ test("read jobs: the vault itself refuses another zone, a bad window, extra powe
   ]) {
     await assert.rejects(readJob(vault, "cf.audit.read", w as Record<string, string>), /bad_params/, JSON.stringify(w));
   }
-  await assert.rejects(vault.run("cf.token.zone.read", { zone: ZONE, minutes: "5", ip: "203.0.113.7" }, prf(7)), /job_not_offered/);
+  await assert.rejects(signedRun(vault, "cf.token.zone.read", { zone: ZONE, minutes: "5", ip: "203.0.113.7" }, prf(7)), /job_not_offered/);
   assert.equal(cf.calls.length, 0);
 });
 
@@ -282,7 +284,7 @@ test("read jobs: a long DNS list is cut at 500 and says so", async () => {
   const { vault, cf } = await stored();
   const many = Array.from({ length: 600 }, (_, i) => ({ id: `r${i}`, type: "A", name: `h${i}.${ZONE}`, content: "192.0.2.1" }));
   const fetchFn = cf.fetchFn;
-  const v = new VaultLogic((vault as any).store, async (input: string, init?: RequestInit) =>
+  const v = testVault((vault as any).store, async (input: string, init?: RequestInit) =>
     String(input).includes("/dns_records?") ? Response.json({ success: true, result: many }) : fetchFn(input, init), () => NOW);
   const r = await readJob(v, "cf.dns.list", { zone: ZONE });
   assert.equal(r.ok, true);
@@ -294,7 +296,7 @@ test("read jobs: a long DNS list is cut at 500 and says so", async () => {
 test("short keys: the intent is stored before the mint (name, asked expiry), the id right after", async () => {
   const { store, vault, cf } = await stored();
   const seen: unknown[] = [];
-  const v = new VaultLogic(store, async (input: string, init?: RequestInit) => {
+  const v = testVault(store, async (input: string, init?: RequestInit) => {
     if (init?.method === "POST" && String(input).endsWith("/tokens")) seen.push({ name: JSON.parse(String(init.body)).name, stored: await store.get("helpers") });
     return cf.fetchFn(input, init);
   }, () => NOW);
@@ -310,7 +312,7 @@ test("short keys: the intent is stored before the mint (name, asked expiry), the
 test("short keys: a failed delete leaves them recorded; the nightly count lists them as cleanup (not acceptable), the next tap deletes them", async () => {
   const { store, vault, cf } = await stored();
   await hcSetup(vault);
-  const broken = new VaultLogic(store, async (input: string, init?: RequestInit) =>
+  const broken = testVault(store, async (input: string, init?: RequestInit) =>
     init?.method === "DELETE" && String(input).includes("/tokens/minted") ? Response.json({ success: false, errors: [{ message: "delete broke" }] }, { status: 500 }) : cf.fetchFn(input, init), () => NOW);
   const r = await readJob(broken, "cf.dns.list", { zone: ZONE });
   assert.equal(r.ok, false);
@@ -369,9 +371,9 @@ test("short keys: cf.token.accept refuses a recorded short key by its id, even u
   const id = "e".repeat(32);
   cf.tokens.push({ id, name: "renamed" });
   await store.put("helpers", [{ name: `${HELPER_PREFIX}x`, until: new Date(NOW + 60_000).toISOString(), id }]);
-  const stuck = new VaultLogic(store, async (input: string, init?: RequestInit) =>
+  const stuck = testVault(store, async (input: string, init?: RequestInit) =>
     init?.method === "DELETE" ? Response.json({ success: false, errors: [{ message: "delete broke" }] }, { status: 500 }) : cf.fetchFn(input, init), () => NOW);
-  const r = (await stuck.run("cf.token.accept", { ids: id, scopes: "x" }, prf(7))) as CfAcceptResult;
+  const r = (await signedRun(stuck, "cf.token.accept", { ids: id, scopes: "x" }, prf(7))) as CfAcceptResult;
   assert.equal(r.ok, false);
   assert.match(r.error ?? "", /helper_key_not_acceptable/);
   assert.ok(!(await store.get<any>("master")).baseline.includes(id));
@@ -390,7 +392,7 @@ test("short keys: an earlier key the sweep cannot delete is reported on this tap
   const id = "d".repeat(32);
   cf.tokens.push({ id, name: `${HELPER_PREFIX}old` });
   await store.put("helpers", [{ name: `${HELPER_PREFIX}old`, purpose: "cf.zone.read: read zone", until: new Date(NOW + 60_000).toISOString(), id }]);
-  const v = new VaultLogic(store, async (input: string, init?: RequestInit) =>
+  const v = testVault(store, async (input: string, init?: RequestInit) =>
     init?.method === "DELETE" && String(input).endsWith(`/tokens/${id}`) ? Response.json({ success: false, errors: [{ message: "delete broke" }] }, { status: 500 }) : cf.fetchFn(input, init), () => NOW);
   const r = await readJob(v, "cf.zone.read", { zone: ZONE });
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -404,7 +406,7 @@ test("read jobs: an answer is cut to the storage bound in bytes, whole rows, and
   const { store, cf } = await stored();
   const big = Array.from({ length: 500 }, (_, i) => ({ id: `r${i}`, type: "TXT", name: `h${i}.${ZONE}`, content: "x".repeat(2000) }));
   const fetchFn = cf.fetchFn;
-  const v = new VaultLogic(store, async (input: string, init?: RequestInit) =>
+  const v = testVault(store, async (input: string, init?: RequestInit) =>
     String(input).includes("/dns_records?") ? Response.json({ success: true, result: big }) : fetchFn(input, init), () => NOW);
   const r = await readJob(v, "cf.dns.list", { zone: ZONE });
   assert.equal(r.ok, true);
@@ -428,7 +430,7 @@ test("handed-out keys from before 4a-1: once expired, the next job deletes them"
 });
 
 test("setup page: Ben gets the form, saves the token, sees the paper key once; then every address is 404", async () => {
-  const vault = new VaultLogic(new MemoryStore(), fakeCloudflare().fetchFn, () => NOW);
+  const vault = testVault(new MemoryStore(), fakeCloudflare().fetchFn, () => NOW);
   const get = await handleSetup(new Request(`${VAULT}/setup`), vault, "ben@example.com");
   assert.equal(get.status, 200);
   assert.match(get.headers.get("content-security-policy")!, /form-action 'self'/);
@@ -447,7 +449,7 @@ test("setup page: Ben gets the form, saves the token, sees the paper key once; t
 });
 
 test("setup page refuses: no email (the agent or no login), another site's form, other paths, a bad token", async () => {
-  const vault = new VaultLogic(new MemoryStore(), fakeCloudflare().fetchFn, () => NOW);
+  const vault = testVault(new MemoryStore(), fakeCloudflare().fetchFn, () => NOW);
   assert.equal((await handleSetup(new Request(`${VAULT}/setup`), vault, "")).status, 403);
   assert.equal((await handleSetup(form(PARENT), vault, "")).status, 403);
   assert.equal((await handleSetup(form(PARENT, "https://evil.example"), vault, "ben@example.com")).status, 403);
@@ -496,7 +498,7 @@ test("deploy-vault.sh deploys the vault only in Workers Builds, on a real deploy
 // Nightly headcount (C5c-2 3baea7cc): its own list-only key, then a count with no tap.
 // The Cloudflare half of a night is clean (the GitHub half has its own tests: github.test.ts).
 const cfClean = (r: Headcount) => !r.error && r.unexpected.length === 0 && r.stretched.length === 0 && r.missing.length === 0;
-const hcSetup = (vault: VaultLogic) => vault.run("cf.token.headcount.setup", {}, prf(7)) as Promise<HeadcountSetupResult>;
+const hcSetup = (vault: VaultLogic) => signedRun(vault, "cf.token.headcount.setup", {}, prf(7)) as Promise<HeadcountSetupResult>;
 
 test("headcount setup: keeps a key that lists and is refused a mint; account-wide read only, no expiry", async () => {
   const { store, vault, cf } = await stored();
@@ -622,7 +624,7 @@ const policy = (group = "Zone Read", resources: Record<string, unknown> = { [`co
 ];
 // Ben's tap carries the scopes his screen showed (the desk copies them from cfPreview at /request).
 const accept = async (vault: VaultLogic, ids: string, fill = 7, scopes?: string) =>
-  vault.run("cf.token.accept", { ids, scopes: scopes ?? (await vault.cfPreview().catch(() => [])).map((k) => k.scope).join("\n") }, prf(fill)) as Promise<CfAcceptResult>;
+  signedRun(vault, "cf.token.accept", { ids, scopes: scopes ?? (await vault.cfPreview().catch(() => [])).map((k) => k.scope).join("\n") }, prf(fill)) as Promise<CfAcceptResult>;
 const SCOPE = `allow Zone Read [g] on {"com.cloudflare.api.account.${ACCOUNT}":{"com.cloudflare.api.account.zone.*":"*"}}; no address limit; expires never`;
 
 test("cf.token.accept: the preview names the flagged key and its real scope; after Ben's tap it is a standing exception the count and audit expect", async () => {
@@ -653,7 +655,7 @@ test("cf.token.accept: nothing is accepted for a key that is gone, already expec
   cf.tokens.push({ id: OURS, name: "x", policies: policy() });
   await assert.rejects(accept(vault, `${OURS},not-an-id`), /bad_params/);
   await assert.rejects(accept(vault, ""), /bad_params/);
-  await assert.rejects(vault.run("cf.token.accept", { ids: OURS }, prf(7)), /bad_params/, "no scope from Ben's screen, no accept");
+  await assert.rejects(signedRun(vault, "cf.token.accept", { ids: OURS }, prf(7)), /bad_params/, "no scope from Ben's screen, no accept");
   assert.equal((await store.get<any>("master")).exceptions, undefined, "nothing added by a refused tap");
   assert.equal((await accept(vault, OURS)).ok, true);
   const again = await accept(vault, OURS, 7, SCOPE);

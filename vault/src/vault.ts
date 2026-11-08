@@ -6,6 +6,8 @@
 import { Cloudflare, type Fetch } from "./cloudflare.ts";
 import { STUDIO_ZONES } from "./zones.ts";
 import { GitHub, appJwt, canonical, checkApp, checkInstallation, convert, diff, installationKey, pkcs8FromPem, sha256Hex, snapshot, type AppKind, type GhSnapshot } from "./github.ts";
+import { admit, checkSigned } from "./approval.ts";
+import { PASSKEY_PIN, type PasskeyPin } from "./passkey.ts";
 import { MASTER_LABEL, RECOVERY_LABEL, VaultError, b64url, fromB64url, open, seal, secretBytes, type Sealed } from "./seal.ts";
 
 export const PROBE_TOKEN_MS = 5 * 60_000;
@@ -180,10 +182,13 @@ export class VaultLogic {
   private store: VaultStore;
   private fetch: Fetch;
   private now: () => number;
-  constructor(store: VaultStore, fetchFn: Fetch, now: () => number = Date.now) {
+  private pin: PasskeyPin | undefined;
+  // `pin`: Ben's passkey as pinned in passkey.ts; tests pass their own.
+  constructor(store: VaultStore, fetchFn: Fetch, now: () => number = Date.now, pin: PasskeyPin | undefined = PASSKEY_PIN) {
     this.store = store;
     this.fetch = fetchFn;
     this.now = now;
+    this.pin = pin;
   }
 
   private async master(): Promise<Master | undefined> {
@@ -251,8 +256,19 @@ export class VaultLogic {
     return { token, lockedNow: true };
   }
 
-  /** Runs one job from the fixed list with the master key opened by Ben's passkey secret. */
-  async run(job: string, params: Record<string, string>, prf: string): Promise<ReadResult | HeadcountSetupResult | GhBaselineResult | CfAcceptResult> {
+  /**
+   * Runs one job from the fixed list with the master key opened by Ben's passkey secret -- only when the
+   * caller hands over Ben's passkey answer for this exact grant, and only once per grant (card bb86abf0;
+   * rules in approval.ts). `rest` catches an old-shape call (job, params, prf): refused as wrong_shape.
+   */
+  async run(req: unknown, ...rest: unknown[]): Promise<ReadResult | HeadcountSetupResult | GhBaselineResult | CfAcceptResult> {
+    const signed = await checkSigned(req, rest.length, this.pin);
+    // After the crypto: one storage-only step, with the clock read again (approval.ts admit).
+    await admit(this.store, signed.grant.id, signed.grant.expires_at, this.now());
+    return this.runJob(signed.grant.job, signed.grant.params, signed.prf);
+  }
+
+  private async runJob(job: string, params: Record<string, string>, prf: string): Promise<ReadResult | HeadcountSetupResult | GhBaselineResult | CfAcceptResult> {
     const read = (READ_JOBS as readonly string[]).includes(job);
     if (!read && job !== "cf.token.headcount.setup" && job !== "gh.app.baseline" && job !== "cf.token.accept") throw new VaultError("job_not_offered");
     if (job === "cf.token.headcount.setup") return this.runHeadcountSetup(prf);

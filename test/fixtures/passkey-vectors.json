@@ -1,0 +1,173 @@
+{
+ "made_by": "test/fixtures/make-passkey-vectors.ts",
+ "verdicts_from": "weird-ways-observatory/observatory src/recorder/passkey.ts approvalCheck() @7ddcffe",
+ "origin": "https://desk.example",
+ "rp": "desk.example",
+ "pin": {
+  "id": "vectors-passkey-1",
+  "key": "pQECAyYgASFYICZTGWg8IVFPJWZ2kwftwF3XFf5QVFOgmsgMhZcRahq4IlggiLszsd0N-3CjrrLQegyWTK6zC3S8DbWfk675u895x84",
+  "rp_hash": "5e4530b8666c514f9890065d044bee0d3b8855c6477b3c94129e61ef1aec5f9c",
+  "origin_hash": "3afbddd1da7fcd6419652c4937502247bf61ce023eb1d70e951c1263f94b19e7"
+ },
+ "grant": {
+  "id": "g-vectors-0001",
+  "job": "cf.zone.read",
+  "params": {
+   "zone": "benculbert.com"
+  },
+  "requester": "c-box agent",
+  "expires_at": 1793000000000
+ },
+ "grant_hash": "3347977ea5bcc299999b1bf454a29a3f96ee66d77e4d19487744bb636bcffee2",
+ "cases": [
+  {
+   "name": "valid",
+   "assertion": {
+    "passkey_id": "vectors-passkey-1",
+    "authenticator_data": "XkUwuGZsUU-YkAZdBEvuDTuIVcZHezyUEp5h7xrsX5wFAAAAAA",
+    "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiOXV1ZU9mb2xWOTdRbTdZVXFUVXA2ak5IbDM2bHZNS1ptWnNiOUZTaW1qLVc3bWJYZmswWlNIZEV1Mk5yel83aSIsIm9yaWdpbiI6Imh0dHBzOi8vZGVzay5leGFtcGxlIiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+    "signature": "MEQCIGkD5qzrqIJPh9jtb2HSzoBAOBmmfJD8c8CETucmygXzAiA-lMG6n5bnkyobE3Q7D3aEn-dkeR7xD8uw9QkBb2B5bQ"
+   },
+   "verdict": null
+  },
+  {
+   "name": "wrong passkey id",
+   "assertion": {
+    "passkey_id": "someone-else",
+    "authenticator_data": "XkUwuGZsUU-YkAZdBEvuDTuIVcZHezyUEp5h7xrsX5wFAAAAAA",
+    "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiOXV1ZU9mb2xWOTdRbTdZVXFUVXA2ak5IbDM2bHZNS1ptWnNiOUZTaW1qLVc3bWJYZmswWlNIZEV1Mk5yel83aSIsIm9yaWdpbiI6Imh0dHBzOi8vZGVzay5leGFtcGxlIiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+    "signature": "MEQCIGkD5qzrqIJPh9jtb2HSzoBAOBmmfJD8c8CETucmygXzAiA-lMG6n5bnkyobE3Q7D3aEn-dkeR7xD8uw9QkBb2B5bQ"
+   },
+   "verdict": "not the pinned passkey"
+  },
+  {
+   "name": "wrong origin",
+   "assertion": {
+    "passkey_id": "vectors-passkey-1",
+    "authenticator_data": "XkUwuGZsUU-YkAZdBEvuDTuIVcZHezyUEp5h7xrsX5wFAAAAAA",
+    "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoia2RRa1N0cEJHS2pPSWdrdUdIYXZ1RE5IbDM2bHZNS1ptWnNiOUZTaW1qLVc3bWJYZmswWlNIZEV1Mk5yel83aSIsIm9yaWdpbiI6Imh0dHBzOi8vZXZpbC5leGFtcGxlIiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+    "signature": "MEUCIQCRWfMURGzvnntgZpYsxPCF2wCTEkwVxm6VZmKZpdXjeQIgNx5neI1p2qRnwLLGTujXGqi-iLL8wWaf-qmVwU8Rg2s"
+   },
+   "verdict": "not the front desk's site"
+  },
+  {
+   "name": "cross-origin frame",
+   "assertion": {
+    "passkey_id": "vectors-passkey-1",
+    "authenticator_data": "XkUwuGZsUU-YkAZdBEvuDTuIVcZHezyUEp5h7xrsX5wFAAAAAA",
+    "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiZ1RkSWV1TzdSYzEtUVpSaXp4ZGlHVE5IbDM2bHZNS1ptWnNiOUZTaW1qLVc3bWJYZmswWlNIZEV1Mk5yel83aSIsIm9yaWdpbiI6Imh0dHBzOi8vZGVzay5leGFtcGxlIiwiY3Jvc3NPcmlnaW4iOnRydWV9",
+    "signature": "MEQCIFhLEiU9Tv3vXZeiJdjXkmsQHKTfCVWAfbIjFJ1CalHaAiB1fBaQaPAe3xEuCAHMZbWK_raaZaMorzLDPrDg1x3NkA"
+   },
+   "verdict": "not the front desk's site"
+  },
+  {
+   "name": "top origin set",
+   "assertion": {
+    "passkey_id": "vectors-passkey-1",
+    "authenticator_data": "XkUwuGZsUU-YkAZdBEvuDTuIVcZHezyUEp5h7xrsX5wFAAAAAA",
+    "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiOHlaZF9lMDN4MlRNUEJFMHQ0cF85RE5IbDM2bHZNS1ptWnNiOUZTaW1qLVc3bWJYZmswWlNIZEV1Mk5yel83aSIsIm9yaWdpbiI6Imh0dHBzOi8vZGVzay5leGFtcGxlIiwiY3Jvc3NPcmlnaW4iOmZhbHNlLCJ0b3BPcmlnaW4iOiJodHRwczovL2V2aWwuZXhhbXBsZSJ9",
+    "signature": "MEUCIFOQQ6b28wp_ZcfrXx0TNqlTxXwSu1t9aCIT4koYP6hBAiEA4Fy4K0PjZoDjZQIjrEuzvbOAvWN1Alg8wYS3jesVVSA"
+   },
+   "verdict": "not the front desk's site"
+  },
+  {
+   "name": "wrong rp",
+   "assertion": {
+    "passkey_id": "vectors-passkey-1",
+    "authenticator_data": "nBgN4M1pnueIl8R8_bPn7h11kG4xt3RqR0fepTaQmDcFAAAAAA",
+    "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidXpvUDRoVkxMdjBWd0hxSkJWR3VYRE5IbDM2bHZNS1ptWnNiOUZTaW1qLVc3bWJYZmswWlNIZEV1Mk5yel83aSIsIm9yaWdpbiI6Imh0dHBzOi8vZGVzay5leGFtcGxlIiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+    "signature": "MEUCIQCOsMCeuKlnOqkppABFcisexE2n6dcUMtcbKLGZvpu6nAIgQJ78d0_pW4nI3TdAErjSWF63oa3XQFUa2UB8zFL6V_c"
+   },
+   "verdict": "not the front desk's site"
+  },
+  {
+   "name": "no user verification (no Face ID)",
+   "assertion": {
+    "passkey_id": "vectors-passkey-1",
+    "authenticator_data": "XkUwuGZsUU-YkAZdBEvuDTuIVcZHezyUEp5h7xrsX5wBAAAAAA",
+    "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiV2Zrb2pHY3FNbks1aTBfRG9hN3lwek5IbDM2bHZNS1ptWnNiOUZTaW1qLVc3bWJYZmswWlNIZEV1Mk5yel83aSIsIm9yaWdpbiI6Imh0dHBzOi8vZGVzay5leGFtcGxlIiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+    "signature": "MEQCIELeodSzJ_CK3-kT7LQcqmr75ptroYLD2gke2U9s7XqFAiAGsokGWXn2xZ09CYj8KFx6maKh4SHh4jt3Hm8-FjSU5g"
+   },
+   "verdict": "Face ID was not used"
+  },
+  {
+   "name": "backed up without backup-eligible",
+   "assertion": {
+    "passkey_id": "vectors-passkey-1",
+    "authenticator_data": "XkUwuGZsUU-YkAZdBEvuDTuIVcZHezyUEp5h7xrsX5wVAAAAAA",
+    "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiTi1jeF9rd0tkeU1RM1B0dmZ2Smluek5IbDM2bHZNS1ptWnNiOUZTaW1qLVc3bWJYZmswWlNIZEV1Mk5yel83aSIsIm9yaWdpbiI6Imh0dHBzOi8vZGVzay5leGFtcGxlIiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+    "signature": "MEYCIQCto1Exn4K-c9lPyik6QxbxINCuTxcFwWEjjh_Q3hgpdQIhAKEaxvgHuwNqVVGUA6PalD0ZsjtlNG4qez49-f0EAb8u"
+   },
+   "verdict": "the passkey answer could not be read"
+  },
+  {
+   "name": "attested data flag on a sign-in",
+   "assertion": {
+    "passkey_id": "vectors-passkey-1",
+    "authenticator_data": "XkUwuGZsUU-YkAZdBEvuDTuIVcZHezyUEp5h7xrsX5xFAAAAAA",
+    "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiWDQ0OXYySm1reG85XzdKYVhRVGduRE5IbDM2bHZNS1ptWnNiOUZTaW1qLVc3bWJYZmswWlNIZEV1Mk5yel83aSIsIm9yaWdpbiI6Imh0dHBzOi8vZGVzay5leGFtcGxlIiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+    "signature": "MEUCIC99pLh5io7DbgSYPQjjH4kyeb-L0wS49uAZ09Jr4LkNAiEAtvIoKDs__3nb4vtV6X6EJ2_Ka8kF7jiEbnNf5QGk3MM"
+   },
+   "verdict": "the passkey answer could not be read"
+  },
+  {
+   "name": "registration, not sign-in",
+   "assertion": {
+    "passkey_id": "vectors-passkey-1",
+    "authenticator_data": "XkUwuGZsUU-YkAZdBEvuDTuIVcZHezyUEp5h7xrsX5wFAAAAAA",
+    "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiYW9LMkc4Y1NqX25vTlhWbkI5azAxek5IbDM2bHZNS1ptWnNiOUZTaW1qLVc3bWJYZmswWlNIZEV1Mk5yel83aSIsIm9yaWdpbiI6Imh0dHBzOi8vZGVzay5leGFtcGxlIiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+    "signature": "MEUCIQCjt5ymVFWcdhas-LM4pPG6rtdZfaSlFU-kvyZTgL1bhwIgFhEShsoCb4FdbJC1EGkXLIQgo274km8TcYylz5OKZp8"
+   },
+   "verdict": "not a passkey sign-in"
+  },
+  {
+   "name": "signature over other bytes",
+   "assertion": {
+    "passkey_id": "vectors-passkey-1",
+    "authenticator_data": "XkUwuGZsUU-YkAZdBEvuDTuIVcZHezyUEp5h7xrsX5wFAAAAAA",
+    "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiOXV1ZU9mb2xWOTdRbTdZVXFUVXA2ak5IbDM2bHZNS1ptWnNiOUZTaW1qLVc3bWJYZmswWlNIZEV1Mk5yel83aSIsIm9yaWdpbiI6Imh0dHBzOi8vZGVzay5leGFtcGxlIiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+    "signature": "MEUCIQDEm06Y0iH5nizFiP1T6hKlgw1JDADEHltMANQjnfresAIga-NKqpIQ3MzDcqLsEwy5thRYVA6jSbAMP2WiGaLBFmQ"
+   },
+   "verdict": "the passkey signature does not verify"
+  },
+  {
+   "name": "another grant's hash",
+   "assertion": {
+    "passkey_id": "vectors-passkey-1",
+    "authenticator_data": "XkUwuGZsUU-YkAZdBEvuDTuIVcZHezyUEp5h7xrsX5wFAAAAAA",
+    "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoibWVjTk1PY2F4X012R0ZBdVlKRVRNMXFsWGZuM1RRQ25oREJkVWtyWnNHc2VRNVMyTkozM1ZGS1VINUMtZkRWcCIsIm9yaWdpbiI6Imh0dHBzOi8vZGVzay5leGFtcGxlIiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+    "signature": "MEUCIQCnpPoY-bcfaKn5oAOKstNLMH7HSzulPssYUh9mYd5cAgIgWkFOf24SXBGG7NNCWWkOuFf0fmKiozZGHpLDdhcaTgE"
+   },
+   "verdict": "the answer is for another grant"
+  },
+  {
+   "name": "challenge of the wrong length",
+   "assertion": {
+    "passkey_id": "vectors-passkey-1",
+    "authenticator_data": "XkUwuGZsUU-YkAZdBEvuDTuIVcZHezyUEp5h7xrsX5wFAAAAAA",
+    "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiby1LTmVkdFdocG00QUlta1dQTXBNMGVYZnFXOHdwbVpteHYwVktLYVA1YnVadGQtVFJsSWQwUzdZMnZQX3VJIiwib3JpZ2luIjoiaHR0cHM6Ly9kZXNrLmV4YW1wbGUiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+    "signature": "MEQCIGUrC22FLm4VuNvdVwfWuT17rl_KWrLRsK-ri9_3V2e2AiAq6vZt9bny9HYHja7-lnPubouHf2_aAoIwdrLrvM_Rbw"
+   },
+   "verdict": "the answer is for another grant"
+  },
+  {
+   "name": "malformed DER signature",
+   "assertion": {
+    "passkey_id": "vectors-passkey-1",
+    "authenticator_data": "XkUwuGZsUU-YkAZdBEvuDTuIVcZHezyUEp5h7xrsX5wFAAAAAA",
+    "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoicGR3SU9POU1ZSWZCUUp2Nzk3YUlIVE5IbDM2bHZNS1ptWnNiOUZTaW1qLVc3bWJYZmswWlNIZEV1Mk5yel83aSIsIm9yaWdpbiI6Imh0dHBzOi8vZGVzay5leGFtcGxlIiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+    "signature": "MEUCIQDAp5_s-gE9GBUNc1a6sn2OaNU_ZbfKFW-P6UTHn921ogIgS6PDNd6xmkpLDbdtzFUAvBUdHa-VvNjuCYVzBMvZPogA"
+   },
+   "verdict": "the passkey answer could not be read"
+  },
+  {
+   "name": "missing signature",
+   "assertion": {
+    "passkey_id": "vectors-passkey-1",
+    "authenticator_data": "XkUwuGZsUU-YkAZdBEvuDTuIVcZHezyUEp5h7xrsX5wFAAAAAA",
+    "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiOXV1ZU9mb2xWOTdRbTdZVXFUVXA2ak5IbDM2bHZNS1ptWnNiOUZTaW1qLVc3bWJYZmswWlNIZEV1Mk5yel83aSIsIm9yaWdpbiI6Imh0dHBzOi8vZGVzay5leGFtcGxlIiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ"
+   },
+   "verdict": "no passkey answer"
+  }
+ ]
+}
