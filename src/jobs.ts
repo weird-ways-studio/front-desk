@@ -8,7 +8,7 @@ import { STUDIO_ZONES } from "../vault/src/zones.ts";
 import { AUDIT_MAX_DAYS, auditWindow } from "../vault/src/vault.ts";
 import { isP256Spki } from "./cboxkey.ts";
 import { baselineDone, name, plainChanges } from "./ghplain.ts";
-import type { CfAcceptResult, GhBaselineResult, HeadcountSetupResult, ProbeResult, ReadResult } from "../vault/src/api.ts";
+import type { CfAcceptResult, GhBaselineResult, HeadcountSetupResult, ReadResult } from "../vault/src/api.ts";
 
 // What Ben reads on the approval screen, built from the stored grant (instruction.orient-the-person):
 // what approving does, anything to check, what happens when he taps, and the exact text folded below.
@@ -97,26 +97,6 @@ export const JOBS = {
       return typeof word === "string" && /^[a-z]{1,20}$/.test(word) ? { word } : null;
     },
     run: async (p) => ({ echoed: p.word }),
-  },
-  "cf.dns.txt.probe": {
-    mode: "tap",
-    menu: { does: "Test: adds one harmless TXT record, checks it, removes it.", on: "one studio zone", params: "zone: a studio zone" },
-    explain: (p) => ({
-      does: `Cloudflare test on ${p.zone}: add one harmless TXT record, check it is there, then remove it.`,
-      expect: "Face ID unlocks the vault for a moment. It makes two keys good for 5 minutes (one to find the zone, one to edit its DNS), runs the test, and deletes both keys.",
-      exact: `Record: _front-desk-probe.${p.zone} (TXT)`,
-    }),
-    done: (r) => withLeftover(r, (r) =>
-      notDone(r, (x) => {
-        const p = x as unknown as Partial<ProbeResult>;
-        const stuck = [p.added && !p.removed ? "the test record may still be in DNS" : "", (p.minted ?? []).some((t) => !t.deleted) ? "a 5-minute key was not deleted (it expires on its own)" : ""].filter(Boolean);
-        return stuck.length ? `Left behind: ${stuck.join("; ")}.` : "Nothing was left behind.";
-      }) ?? "Done. The test record was added, seen and removed, and both short keys were deleted. Nothing else to do."),
-    validate: (params) => {
-      const zone = (params as { zone?: unknown } | null)?.zone;
-      return typeof zone === "string" && STUDIO_ZONES.includes(zone) ? { zone } : null;
-    },
-    vault: true,
   },
   // Ben's approval stores the key (Desk.enrollCboxKey); the front desk adds fingerprint and replaces.
   "cbox.key.enroll": {

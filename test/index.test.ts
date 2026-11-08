@@ -266,8 +266,9 @@ const callV = (store: MemoryStore, vault: ReturnType<typeof fakeVault>, path: st
 const ZONE = "benculbert.com";
 const optsIn = async (res: Response) => JSON.parse((await res.text()).match(/const opts=(\{.*?\});\n/)![1]);
 
+// A vault job that needs no c-box signature (cf.dns.txt.probe was cut, card c653a0fd): the headcount setup.
 async function askProbe(store: MemoryStore, vault: ReturnType<typeof fakeVault>) {
-  const asked = await callV(store, vault, "/request", { method: "POST", body: JSON.stringify({ job: "cf.dns.txt.probe", params: { zone: ZONE }, reason: "prove the vault" }) });
+  const asked = await callV(store, vault, "/request", { method: "POST", body: JSON.stringify({ job: "cf.token.headcount.setup", params: {}, reason: "prove the vault" }) });
   assert.equal(asked.status, 201);
   return ((await asked.json()) as { id: string }).id;
 }
@@ -283,7 +284,7 @@ test("vault job: approval page asks for the master-key secret; the job runs once
   const ok = await callV(store, vault, `/approve/${id}`, { method: "POST", body: JSON.stringify(answer) });
   assert.equal(ok.status, 200);
   assert.deepEqual(((await ok.json()) as any).result, { ok: true, zone: "example.com", after: 0 });
-  assert.deepEqual(vault.calls, [{ op: "run", args: ["cf.dns.txt.probe", { zone: ZONE }, prfOut(5)] }]);
+  assert.deepEqual(vault.calls, [{ op: "run", args: ["cf.token.headcount.setup", {}, prfOut(5)] }]);
   // Replaying the same answer runs nothing more.
   assert.equal((await callV(store, vault, `/approve/${id}`, { method: "POST", body: JSON.stringify(answer) })).status, 409);
   assert.equal(vault.calls.length, 1);
@@ -304,12 +305,19 @@ test("vault job: no passkey secret means not approved and the vault is never cal
   assert.equal((await new Desk(store, { origin: base, rpID: "desk.example" }).grant(id)).status, "pending");
 });
 
-test("vault job: a zone not on the studio list is refused at the request", async () => {
+test("vault job: a zone not on the studio list is refused by the job's own check (and again by the vault)", () => {
+  for (const zone of ["example.com", "evil.benculbert.com", ""]) assert.equal(JOBS["cf.zone.read"].validate({ zone }), null);
+  assert.deepEqual(JOBS["cf.zone.read"].validate({ zone: ZONE }), { zone: ZONE });
+});
+
+test("cut job cf.dns.txt.probe is refused at the request and leaves nothing for Ben (card c653a0fd)", async () => {
   const { store } = await enrolled();
-  for (const zone of ["example.com", "evil.benculbert.com", ""]) {
-    const res = await callV(store, fakeVault(), "/request", { method: "POST", body: JSON.stringify({ job: "cf.dns.txt.probe", params: { zone }, reason: "r" }) });
-    assert.deepEqual(await res.json(), { error: "bad_params" });
-  }
+  const vault = fakeVault();
+  const res = await callV(store, vault, "/request", { method: "POST", body: JSON.stringify({ job: "cf.dns.txt.probe", params: { zone: ZONE }, reason: "r" }) });
+  assert.deepEqual(await res.json(), { error: "job_not_offered" });
+  assert.equal(vault.calls.length, 0);
+  const menu = await callV(store, vault, "/menu");
+  assert.ok(!(await menu.text()).includes("cf.dns.txt.probe"), "not on the agents' menu");
 });
 
 test("vault job: a result that is not ok is logged as job_failed with the full evidence", async () => {
@@ -511,12 +519,14 @@ test("read job: takes exactly one studio zone -- another zone, an extra field or
   assert.match(page, /no key goes to the agent/);
 });
 
-test("retired job: a stored cf.token.zone.read grant is never approved or collected", async () => {
+// cf.token.zone.read retired 2026-11-03; cf.dns.txt.probe cut 2026-11-08 (card c653a0fd).
+for (const [job, params] of [["cf.token.zone.read", { zone: ZONE, minutes: "5", ip: CBOX }], ["cf.dns.txt.probe", { zone: ZONE }]] as const)
+test(`retired job: a stored ${job} grant is never approved or collected`, async () => {
   const { store, key, cbox } = await withCboxKey();
   const vault = fakeVault(true);
   const { id } = (await (await askKey(store, vault, { zone: ZONE }, { pem: cbox.pem })).json()) as { id: string };
   const g = await desk(store).grant(id);
-  await store.put(`grant:${id}`, { ...g, job: "cf.token.zone.read", params: { zone: ZONE, minutes: "5", ip: CBOX } });
+  await store.put(`grant:${id}`, { ...g, job, params });
   assert.equal((await callV(store, vault, `/approve/${id}`)).status, 410);
   assert.deepEqual(await (await approveAs(store, vault, key, id, prfOut(5)).catch(() => Response.json({ error: "job_retired" }))).json(), { error: "job_retired" });
   assert.deepEqual(await (await agentPost(store, vault, `/collect/${id}`, {}, { pem: cbox.pem })).json(), { error: "job_retired" });

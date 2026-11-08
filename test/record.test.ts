@@ -120,7 +120,7 @@ test("R3: a receipt for other bytes, another grant or another stage does not cou
 
 test("R4: approval not recorded: vault job never runs, grant is stopped, collect refused", async () => {
   const { rec, desk, key, runs } = await setup();
-  const g = await desk.request({ job: "cf.dns.txt.probe", params: { zone: "benculbert.com" }, reason: "probe" }, "agent", T0);
+  const g = await desk.request({ job: "cf.token.headcount.setup", params: {}, reason: "vault job" }, "agent", T0);
   rec.failStage = "approval";
   await refuses(desk.approve(g.id, await answer(desk, key, g.id, PRF), T0), "approval_not_recorded");
   assert.deepEqual(runs, []);
@@ -128,9 +128,9 @@ test("R4: approval not recorded: vault job never runs, grant is stopped, collect
   await refuses(desk.collect(g.id, "agent", T0 + 1000), "stopped");
   // Safeguard working: with the approval recorded, the vault runs once and the result is recorded.
   rec.failStage = undefined;
-  const g2 = await desk.request({ job: "cf.dns.txt.probe", params: { zone: "benculbert.com" }, reason: "probe" }, "agent", T0);
+  const g2 = await desk.request({ job: "cf.token.headcount.setup", params: {}, reason: "vault job" }, "agent", T0);
   await desk.approve(g2.id, await answer(desk, key, g2.id, PRF), T0);
-  assert.deepEqual(runs, ["cf.dns.txt.probe"]);
+  assert.deepEqual(runs, ["cf.token.headcount.setup"]);
   assert.deepEqual(rec.stages(g2.id), ["request", "verdict", "approval", "result"]);
 });
 
@@ -278,10 +278,10 @@ test("R11: a lost answer is retried once with the same bytes; a refusal is not r
 test("R12: result not recorded after the job ran: the job's answer still stands, the miss is logged and pushed to Ben", async () => {
   const told: string[] = [];
   const { rec, desk, key, runs } = await setup({ alert: async (title) => void told.push(title) });
-  const g = await desk.request({ job: "cf.dns.txt.probe", params: { zone: "benculbert.com" }, reason: "probe" }, "agent", T0);
+  const g = await desk.request({ job: "cf.token.headcount.setup", params: {}, reason: "vault job" }, "agent", T0);
   rec.failStage = "result";
   const done = await desk.approve(g.id, await answer(desk, key, g.id, PRF), T0);
-  assert.deepEqual(runs, ["cf.dns.txt.probe"]);
+  assert.deepEqual(runs, ["cf.token.headcount.setup"]);
   assert.equal((done.result as { ok: boolean }).ok, true);
   assert.ok((await desk.readLog()).some((e) => e.event === "result_unrecorded" && e.grant_id === g.id));
   assert.equal((await desk.grant(g.id)).recorded!.result, undefined);
@@ -292,7 +292,7 @@ test("R12: the alert itself fails or is not set up: logged, and the job's answer
   // Rejected, never settling (bounded by ALERT_TIMEOUT_MS), and not set up.
   for (const alert of [async () => { throw new Error("pushover answered 500"); }, () => new Promise<void>(() => {}), undefined]) {
     const { rec, desk, key } = await setup({ alert });
-    const g = await desk.request({ job: "cf.dns.txt.probe", params: { zone: "benculbert.com" }, reason: "probe" }, "agent", T0);
+    const g = await desk.request({ job: "cf.token.headcount.setup", params: {}, reason: "vault job" }, "agent", T0);
     rec.failStage = "result";
     const done = await desk.approve(g.id, await answer(desk, key, g.id, PRF), T0);
     assert.equal((done.result as { ok: boolean }).ok, true);
