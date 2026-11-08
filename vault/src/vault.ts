@@ -7,6 +7,8 @@ import { Cloudflare, type Fetch } from "./cloudflare.ts";
 import { STUDIO_ZONES } from "./zones.ts";
 import { GitHub, appJwt, canonical, checkApp, checkInstallation, convert, diff, installationKey, pkcs8FromPem, sha256Hex, snapshot, type AppKind, type GhSnapshot } from "./github.ts";
 import { admit, checkSigned } from "./approval.ts";
+import { createRepo, validRepoName, type RepoCreateResult } from "./ghrepo.ts";
+import type { GhCreated } from "./cards.ts";
 import { PASSKEY_PIN, type PasskeyPin } from "./passkey.ts";
 import { MASTER_LABEL, RECOVERY_LABEL, VaultError, b64url, fromB64url, open, seal, secretBytes, type Sealed } from "./seal.ts";
 
@@ -47,6 +49,11 @@ export const GH_ESCALATION_REFUSAL = /^gh_422: The level of access for permissio
 export interface VaultStore {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;
+  // The same storage, synchronous (SQLite-backed Durable Object; the two views share keys and values, proven in real
+  // workerd by test/cardfacts.workerd.test.ts fact 3). `gh.baseline` has two writers -- ghBaseline here and
+  // CardBook.repoRecorded (cards.ts) -- and each writes it only inside one transactionSync (card 77ec1e64 X2).
+  transactionSync<T>(closure: () => T): T;
+  kv: { get<T = unknown>(key: string): T | undefined; put<T>(key: string, value: T): void; list<T = unknown>(options?: { prefix?: string }): Iterable<[string, T]> };
 }
 
 interface Master {
@@ -273,10 +280,28 @@ export class VaultLogic {
     return this.runJob(signed.grant.job, signed.grant.params, signed.prf);
   }
 
-  /** One card entry's read (cards.ts CardBook.call): today's tap path, for the card-eligible reads only. */
+  /**
+   * One card entry (cards.ts CardBook.call): the card-eligible reads take today's tap path; gh.repo.create runs only
+   * here, never through run()/runJob (card-only, T4).
+   */
   runCardEntry(job: string, params: Record<string, string>, prf: string) {
+    if (job === "gh.repo.create") return this.repoCreate(params, prf);
     if (!(READ_JOBS as readonly string[]).includes(job)) throw new VaultError("job_not_on_cards");
     return this.runJob(job, params, prf);
+  }
+
+  /**
+   * Job gh.repo.create, inside a card entry (ghrepo.ts has the steps). Refuses before any network call on a bad
+   * name (X3), an App not set up and locked to Ben's passkey, or no accepted GitHub list (C6a-2 2.1).
+   */
+  private async repoCreate(params: Record<string, string>, prf: string): Promise<RepoCreateResult> {
+    if (!params || Object.keys(params).join() !== "name" || !validRepoName(params.name)) throw new VaultError("bad_params");
+    const secret = secretBytes(prf);
+    const main = await this.ghMain();
+    if (!main?.by_passkey || !main.installation) throw new VaultError("github_not_set_up");
+    if (!this.store.kv.get<GhSnapshot | null>("gh.baseline")) throw new VaultError("no_baseline");
+    const key = await open(secret, GH_LABEL, main.by_passkey);
+    return createRepo(new GitHub(await appJwt(main.id, key, this.now()), this.fetch), main.installation, params.name, this.fetch);
   }
 
   private async runJob(job: string, params: Record<string, string>, prf: string): Promise<ReadResult | HeadcountSetupResult | GhBaselineResult | CfAcceptResult> {
@@ -626,12 +651,18 @@ export class VaultLogic {
       if (!r.headcount.write_refused) throw new VaultError("headcount App not refused write: list not recorded");
       const snap = await this.ghRead(hc, snapshot);
       const old = await this.store.get<GhSnapshot | null>("gh.baseline");
+      const oldText = canonical(old ?? null);
       r.changes = diff(old ?? ({} as GhSnapshot), snap);
       // Only the state Ben saw on his screen is accepted; anything added since stays an alarm.
-      if ((await sha256Hex(canonical(old ?? null))) !== approvedBase) throw new VaultError("baseline_changed_since_request: nothing recorded, ask again");
+      if ((await sha256Hex(oldText)) !== approvedBase) throw new VaultError("baseline_changed_since_request: nothing recorded, ask again");
       if ((await sha256Hex(canonical(snap))) !== approved) throw new VaultError("github_changed_since_request: nothing recorded, ask again");
       r.counts = Object.fromEntries(Object.entries(snap).map(([k, v]) => [k, v.length]));
-      await this.store.put("gh.baseline", snap);
+      // One sync compare-and-write (X2): a repo line added by CardBook.repoRecorded during the awaits above makes the
+      // stored list differ from the exact text hashed, so this approval refuses and the repo line survives.
+      this.store.transactionSync(() => {
+        if (canonical(this.store.kv.get<GhSnapshot | null>("gh.baseline") ?? null) !== oldText) throw new VaultError("baseline_changed_since_request: nothing recorded, ask again");
+        this.store.kv.put("gh.baseline", snap);
+      });
       r.ok = true;
     } catch (e) {
       note(r, (e as Error).message);
@@ -647,6 +678,8 @@ export class VaultLogic {
       const hc = await this.store.get<GhHeadcountApp | null>("gh.app.headcount");
       if (!base || !hc?.installation) throw new VaultError("github_not_set_up");
       r.changes = diff(base, await this.ghRead(hc, snapshot));
+      // A job-made repo the recorder has not yet receipted is not in the list (Y1): say why it shows, until it is.
+      for (const [, c] of this.store.kv.list<GhCreated>({ prefix: "gh.created:" })) if (!(base.repo_ids ?? []).includes(`${c.name}:${c.repo_id}`)) r.changes.push(`repo_result_unrecorded: ${c.name}`);
       r.ok = r.changes.length === 0;
     } catch (e) {
       note(r, (e as Error).message);

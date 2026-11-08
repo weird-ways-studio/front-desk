@@ -93,8 +93,8 @@
  [
   "receipt-sig",
   "vault/src/cards.ts",
-  "if (!ok || rc!.stage",
-  "if (rc!.stage",
+  "if (!(await this.receiptOk(rc)) || rc!.stage !== \"approval\"",
+  "if (rc!.stage !== \"approval\"",
   "run: fabricated, wrong-key, other-grant, other-stage, tampered receipts -> bad_receipt"
  ],
  [

@@ -18,7 +18,7 @@ import { keyRev } from "./cboxkey.ts";
 import type { Receipt } from "./recorder.ts";
 import type { CardView, EntryState, VaultCardApi } from "../vault/src/api.ts";
 import { CARD_API_VERSION } from "../vault/src/cards.ts";
-import { CARD_RUN_MS, cardHashOf, type Manifest } from "../vault/src/cardcopy.ts";
+import { CARD_RUN_MS, REPO_JOB, cardHashOf, type Manifest } from "../vault/src/cardcopy.ts";
 
 /** The desk's record of a card (storage key `card:<id>`). Its grants are ordinary `grant:<id>` records carrying `card`. */
 export interface DeskCard {
@@ -50,6 +50,7 @@ export interface CardEntryReport {
   late?: string;
   answer?: unknown;
   answer_erased?: true; // "no longer held": answers are kept only until the card closed COLLECT_WINDOW_MS ago (V3)
+  summary?: string; // a card-only job's own after-tap sentence (its done()), while its answer is held (card 77ec1e64)
   receipts: Partial<Record<string, Omit<Receipt, "body">>>;
 }
 export interface CardReport {
@@ -379,6 +380,7 @@ export class CardDesk extends Desk {
           const at = (e.state === "done" || e.state === "failed") && e.at !== undefined ? e.at : e.state === "dispatching" ? v.deadline : (v.closed_at ?? v.deadline);
           await this.sendResult(gid, outcome, at, now);
         }
+        if (g.job === REPO_JOB) await this.repoAck(gid, now);
       }
       if (expired) {
         const g = await this.grant(gid);
@@ -393,7 +395,18 @@ export class CardDesk extends Desk {
   private async sendResult(gid: string, outcome: string, at: number, now: number): Promise<void> {
     let g = await this.grant(gid);
     if (g.result_body === undefined) {
-      const body = JSON.stringify({ v: 1, grant: g.id, stage: "result", job: g.job, request: g.recorded!.request, outcome, at });
+      // A done repo entry's body names the repo by GitHub's id, read from the vault's durable record -- never from the
+      // answer, which may already be erased (Y1). No record readable yet: nothing is frozen; the next read tries again.
+      let repo: { repo_id: string } | undefined;
+      if (g.job === REPO_JOB && outcome === "done") {
+        const facts = await Promise.resolve().then(() => this.cards().repoFacts?.(gid)).catch(() => undefined);
+        if (!facts || typeof facts.repo_id !== "string") {
+          await this.log({ event: "result_unrecorded", ...this.grantFacts(g), detail: "repo result waits: the vault's repo record could not be read" }, now);
+          return;
+        }
+        repo = { repo_id: facts.repo_id };
+      }
+      const body = JSON.stringify({ v: 1, grant: g.id, stage: "result", job: g.job, request: g.recorded!.request, outcome, at, ...repo });
       g = await this.grant(gid);
       if (g.result_body === undefined) {
         g = { ...g, result_body: body };
@@ -407,6 +420,25 @@ export class CardDesk extends Desk {
     } catch {
       // record() already logged why. The next read resends the same bytes; the checker's card-incomplete is the backstop.
       await this.log({ event: "result_unrecorded", ...this.grantFacts(g) }, now);
+    }
+  }
+
+  /**
+   * A done repo entry the recorder has receipted: hand the vault the receipt and the exact body, so it adds the repo
+   * to the nightly list (Z1). Retried at every card read until the vault confirms ("now" or "already"); independent of
+   * the recorder send, which may have succeeded in an earlier read whose callback was lost.
+   */
+  private async repoAck(gid: string, now: number): Promise<void> {
+    const g = await this.grant(gid);
+    const rc = g.receipts?.result;
+    if (g.vault_ack || g.result_body === undefined || rc?.sig === undefined || g.recorded?.result === undefined) return;
+    const receipt = { v: rc.v, seq: rc.seq, key: rc.key, grant: rc.grant, stage: rc.stage, sha256: rc.sha256, recorded_at: rc.recorded_at, sig: rc.sig };
+    try {
+      const r = await this.cards().repoRecorded!(gid, g.result_body, receipt);
+      if (r?.recorded !== "now" && r?.recorded !== "already") throw new Error("no confirmation");
+      await this.store.put(`grant:${gid}`, { ...(await this.grant(gid)), vault_ack: true });
+    } catch (e) {
+      await this.log({ event: "result_unrecorded", ...this.grantFacts(g), detail: `repo not yet in the nightly list; tried again at the next read [${codeOf(e)}]` }, now);
     }
   }
 
@@ -428,6 +460,7 @@ export class CardDesk extends Desk {
         ...(e?.at !== undefined ? { at: e.at } : {}),
         ...(e?.late !== undefined ? { late: e.late } : {}),
         ...(open && g.result !== undefined ? { answer: withoutSecret(g.result) } : {}),
+        ...(open && g.result !== undefined && (JOBS[g.job] as Job).cardOnly ? { summary: (JOBS[g.job] as Job).done(g.result) } : {}),
         ...(g.answer_erased || expired ? { answer_erased: true as const } : {}),
         receipts: g.receipts ?? {},
       });

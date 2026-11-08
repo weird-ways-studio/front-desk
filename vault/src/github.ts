@@ -12,10 +12,11 @@ const API = "https://api.github.com";
 const enc = new TextEncoder();
 
 // What each App may do. The headcount App only reads; its key is kept unsealed for the nightly run.
-// The main App's key is sealed to Ben's passkey; its jobs come in C6a-2.
+// The main App (the repo-maker) has its key sealed to Ben's passkey. repository_creation joins for job gh.repo.create
+// (card 77ec1e64): Ben adds it on GitHub only AFTER this vault is deployed, or checkApp would refuse the App meanwhile.
 export const PERMISSIONS = {
   headcount: { organization_administration: "read", members: "read", organization_personal_access_tokens: "read", administration: "read", metadata: "read" },
-  main: { administration: "write", contents: "write", metadata: "read" },
+  main: { administration: "write", contents: "write", metadata: "read", repository_creation: "write" },
 } as const;
 export type AppKind = keyof typeof PERMISSIONS;
 
@@ -81,7 +82,15 @@ export class GitHub {
 
   /** Calls one endpoint and returns its JSON, or throws gh_<status>: <message>. */
   async call<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const res = await this.fetch(API + path, {
+    const res = await this.send(method, path, body);
+    const json = (await res.json().catch(() => ({}))) as { message?: string };
+    if (!res.ok) throw new VaultError(`gh_${res.status}: ${String(json.message ?? "no message").slice(0, 100)}`);
+    return json as T;
+  }
+
+  /** The raw answer, for callers that must tell statuses apart (ghrepo.ts: a create reply, a revoke probe). */
+  send(method: string, path: string, body?: unknown): Promise<Response> {
+    return this.fetch(API + path, {
       method,
       headers: {
         accept: "application/vnd.github+json",
@@ -93,9 +102,6 @@ export class GitHub {
       },
       body: body ? JSON.stringify(body) : undefined,
     });
-    const json = (await res.json().catch(() => ({}))) as { message?: string };
-    if (!res.ok) throw new VaultError(`gh_${res.status}: ${String(json.message ?? "no message").slice(0, 100)}`);
-    return json as T;
   }
 }
 
