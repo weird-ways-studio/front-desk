@@ -1,7 +1,7 @@
 // The front desk's HTTP routes, kept apart from the Durable Object (index.ts)
 // so tests can drive them with an in-memory store.
 
-import { DeskError, withoutSecret, type Alert, type Push, type Source, type Store } from "./desk.ts";
+import { DeskError, withoutSecret, type Alert, type DeskHooks, type Push, type Source, type Store } from "./desk.ts";
 import { CardDesk } from "./carddesk.ts";
 import { JOBS, menu } from "./jobs.ts";
 import { checkSignature } from "./cboxkey.ts";
@@ -76,7 +76,7 @@ function pushError(e: unknown): string {
 }
 
 // The routes, kept apart from the Durable Object so tests can drive them.
-export async function route(request: Request, store: Store, who: Who, now = Date.now(), vault?: VaultApi & Partial<VaultCardApi>, push?: Push, recorder?: Recorder, alert?: Alert): Promise<Response> {
+export async function route(request: Request, store: Store, who: Who, now = Date.now(), vault?: DeskHooks["vault"], push?: Push, recorder?: Recorder, alert?: Alert): Promise<Response> {
   const { caller, requester = "" } = who;
   const url = new URL(request.url);
   const desk = new CardDesk(store, { origin: url.origin, rpID: url.hostname }, { vault, recorder, alert });

@@ -13,7 +13,7 @@ import {
 import { ascii, name, plainChanges } from "./ghplain.ts";
 import { JOBS, type Job, type JobName } from "./jobs.ts";
 import { currentKey, fingerprint, keyRev, type CboxKey } from "./cboxkey.ts";
-import type { Headcount, VaultApi, VaultCardApi } from "../vault/src/api.ts";
+import type { Headcount, VaultApi, VaultCardApi, VaultRunApi } from "../vault/src/api.ts";
 import { ALREADY_USED, APPROVAL_API_VERSION, REFUSED_BEFORE_RUN, TOO_OLD } from "../vault/src/approval.ts";
 export type VaultStage = "before" | "used" | "old" | "unknown";
 import { RecorderError, type Receipt, type Recorder, type Stage } from "./recorder.ts";
@@ -294,7 +294,7 @@ export interface DeskHooks {
   afterVerify?: (grantId: string) => Promise<void>;
   // The vault Worker (service binding VAULT); absent in tests that do not need it. Its card calls (VaultCardApi) are
   // used only by src/carddesk.ts, which checks they are there.
-  vault?: VaultApi & Partial<VaultCardApi>;
+  vault?: VaultApi & Partial<VaultCardApi> & Partial<Pick<VaultRunApi, "setKeyRev">>;
   // The Observatory's recorder (recorder.ts). Absent = not set up: every request is refused.
   recorder?: Recorder;
   // Ben's phone, for a job that ran but whose result could not be recorded (phoneAlert).
@@ -826,6 +826,7 @@ export class Desk {
     await this.store.put<CboxKey>("cbox:key", { spki: g.params.key, fingerprint: g.params.fingerprint, enrolled_at: now, grant_id: g.id });
     await this.store.put("cbox:rev", (await keyRev(this.store)) + 1);
     await this.log({ event: "cbox_key_enrolled", ...this.grantFacts(g), detail: `c-box key ${g.params.fingerprint}, replaces ${current}` }, now);
+    await this.tellVaultKeyRev(now);
   }
 
   /** Ben removes the c-box key (lost or stolen box): every signed request is refused until a new one is enrolled. */
@@ -835,7 +836,23 @@ export class Desk {
     await this.store.put("cbox:key", null);
     await this.store.put("cbox:rev", (await keyRev(this.store)) + 1);
     await this.log({ event: "cbox_key_removed", detail: `c-box key ${k.fingerprint} removed by Ben` }, now);
+    await this.tellVaultKeyRev(now);
     return k.fingerprint;
+  }
+
+  /**
+   * Moves the vault's own copy of the key generation (vault setKeyRev), so an open card or run the vault holds is
+   * refused at its next step even if the desk did not check (card 85818ab1 R2). Best effort: a removal never waits
+   * on the vault -- every cardRun also carries the desk's live generation, which the vault compares to the card's.
+   */
+  protected async tellVaultKeyRev(now: number): Promise<void> {
+    if (!this.hooks.vault?.setKeyRev) return;
+    const rev = await keyRev(this.store);
+    try {
+      await this.hooks.vault.setKeyRev(rev);
+    } catch {
+      await this.log({ event: "vault_key_rev_unsent", detail: `the vault was not told c-box key generation ${rev}; cards still check it at every step` }, now);
+    }
   }
 
   async cboxKey(): Promise<CboxKey | undefined> {

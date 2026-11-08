@@ -50,6 +50,12 @@ async function rig(o: { runEntry?: RunEntry; jobs?: readonly string[]; signedRec
     cardStop: (id: string) => lose("cardStop", () => vb.book.stop(id)),
     cardStatus: (id: string) => lose("cardStatus", () => vb.book.status(id)),
     cardAck: (id: string, i: number) => lose("cardAck", () => vb.book.ack(id, i)),
+    // As vault/src/runs.ts setKeyRev: the vault's own copy of the c-box key generation, never lowered.
+    setKeyRev: (rev: number) => lose("setKeyRev", () => {
+      const cur = vb.store.kv.get<number>("cbox_rev") ?? 0;
+      if (rev > cur) vb.store.kv.put("cbox_rev", rev);
+      return Math.max(rev, cur);
+    }),
   };
   const store = new MemoryStore();
   const desk = new CardDesk(store, site, { recorder: fr.send, vault: vault as never });
@@ -425,4 +431,131 @@ test("F9 count: Ben's tap at 2 entries makes at most 15 subrequests from the des
   // Recorded on the card as the measured figure; asserted so a change that adds calls is seen.
   assert.deepEqual({ recorderSends, vaultCalls }, { recorderSends: 4, vaultCalls: 7 });
   assert.equal(worst, 15, "cardApi, cardOpen, 2 cardRun, cardStatus, 2 cardAck; 2 approvals + 2 results, each retried once at worst");
+});
+
+// ---- Codex build r1 fixes (studio-os REVIEW-codex-85818ab1-build-r1.md), each shown refusing the exact case ----
+test("R1: Stop that lands after the tap but before the vault opens the card (unknown_card) still stops it; nothing runs", async () => {
+  const { desk, vb, vault, calls } = await rig();
+  const { card } = await desk.requestCard({ entries: two }, "agent", T0, signedSrc);
+  let release!: () => void;
+  const hang = new Promise<void>((r) => (release = r));
+  const realApi = vault.cardApi;
+  let inside = false;
+  vault.cardApi = async () => ((inside = true), await hang, realApi()); // the tap is committed, the open not yet sent
+  calls.length = 0;
+  const running = tap(desk, card.id);
+  await until(async () => inside);
+  const s = await desk.stopCard(card.id, T0); // the vault has no book yet: its cardStop answers unknown_card
+  assert.equal(s.stopped, "stopped by Ben");
+  assert.ok(calls.includes("cardStop") && !calls.includes("cardOpen"), "checkpoint: Stop reached the vault before any book existed");
+  release();
+  const out = await running;
+  assert.ok(!calls.includes("cardRun"), "no entry was ever sent to the vault");
+  assert.deepEqual(vb.calls, [], "no provider call");
+  assert.deepEqual(out.entries.map((e) => e.state), ["not_run", "not_run"]);
+  assert.equal(out.stopped, "stopped by Ben");
+});
+
+test("R2: Ben removes the c-box key while entry 1 runs: entry 2 is never sent, and the vault's own copy moves too", async () => {
+  let release!: () => void;
+  const hang = new Promise<void>((r) => (release = r));
+  const { desk, store, vb, calls } = await rig({ runEntry: async () => (await hang, { ok: true, data: {} }) });
+  await store.put("cbox:key", { spki: "x", fingerprint: "aaaa-bbbb-cccc-dddd", enrolled_at: T0, grant_id: "g0" });
+  await store.put("cbox:rev", 1);
+  const { card } = await desk.requestCard({ entries: [{ job: "cf.zone.read", params: ZONE, reason: "a" }, { job: "cf.dns.list", params: ZONE, reason: "b" }] }, "agent", T0, signedSrc);
+  assert.equal(card.cbox_rev, 1);
+  const running = tap(desk, card.id);
+  await until(async () => (await stateOf(vb, card.id)) === "dispatching");
+  await desk.removeCboxKey(T0);
+  assert.equal(vb.store.kv.get<number>("cbox_rev"), 2, "the vault was told the new generation");
+  release();
+  const out = await running;
+  assert.equal(calls.filter((c) => c === "cardRun").length, 1, "entry 2 never reached the vault");
+  assert.deepEqual(out.entries.map((e) => e.state), ["done", "not_run"]);
+});
+
+test("R2: a vault that cannot be told the new key generation never blocks Ben's removal; it is logged", async () => {
+  const { desk, store, vault } = await rig();
+  vault.setKeyRev = async () => {
+    throw new Error("vault down");
+  };
+  await store.put("cbox:key", { spki: "x", fingerprint: "aaaa-bbbb-cccc-dddd", enrolled_at: T0, grant_id: "g0" });
+  assert.equal(await desk.removeCboxKey(T0), "aaaa-bbbb-cccc-dddd");
+  assert.equal(await store.get("cbox:key"), null);
+  const log = [...(await store.list<{ event: string }>({ prefix: "log:" })).values()].map((l) => l.event);
+  assert.ok(log.includes("vault_key_rev_unsent"));
+});
+
+test("R3: an unreadable vault never becomes 'not run': last confirmed state, else unknown, and the page says Unclear", async () => {
+  const { desk, fail } = await rig();
+  const a = await desk.requestCard({ entries: [two[0]] }, "agent", T0, signedSrc);
+  await tap(desk, a.card.id); // read fine: entry 1 confirmed done
+  fail.cardStatus = 1;
+  const r = await desk.collectCard(a.card.id, "agent", T0 + 1, signedSrc);
+  assert.deepEqual(r.entries.map((e) => e.state), ["done"], "the last state the vault confirmed");
+  assert.equal(r.vault_unread, true);
+  await desk.stopCard(a.card.id, T0 + 2); // frees the slot for the next card
+
+  const b = await desk.requestCard({ entries: [two[0]] }, "agent", T0 + 3, signedSrc);
+  fail.cardStatus = 2; // the read after the tap AND the next read are lost: nothing was ever confirmed
+  const out = await tap(desk, b.card.id, T0 + 3);
+  assert.deepEqual(out.entries.map((e) => e.state), ["unknown"]);
+  const again = await desk.collectCard(b.card.id, "agent", T0 + 4, signedSrc);
+  assert.deepEqual(again.entries.map((e) => e.state), ["unknown"], "never not_run while the job may have run");
+  const v = cardView(200, { report: again });
+  assert.equal(v.head, "Unclear");
+  assert.match(v.text, /could not read the vault/);
+  assert.doesNotMatch(v.text, /Nothing after that ran/);
+});
+
+test("R4: the vault forgets the card (pruned) or cannot be read: an answer past its window is not returned, and is erased", async () => {
+  const { desk, vault } = await rig();
+  vault.cardAck = async () => false; // keep things simple: the vault would still hold it, but the read fails
+  const { card, grants } = await desk.requestCard({ entries: [two[0]] }, "agent", T0, signedSrc);
+  const out = await tap(desk, card.id);
+  assert.equal(typeof out.closed_at, "number", "checkpoint: the desk saw the close time");
+  assert.ok((await desk.grant(grants[0].id)).result !== undefined);
+  vault.cardStatus = async () => {
+    throw new Error("unknown_card"); // pruned after 7 days, or simply unreachable
+  };
+  const early = await desk.collectCard(card.id, "agent", T0 + 1000, signedSrc);
+  assert.deepEqual(early.entries[0].answer, { ok: true, data: { echoed: "hello" } }, "inside the window, by the desk's own clock");
+  const late = await desk.collectCard(card.id, "agent", out.closed_at! + COLLECT_WINDOW_MS + 1, signedSrc);
+  assert.equal(late.entries[0].answer, undefined);
+  assert.equal(late.entries[0].answer_erased, true);
+  assert.equal((await desk.grant(grants[0].id)).result, undefined);
+});
+
+test("R4: no known clock (card still running, then the vault cannot be read): a stored answer is not returned", async () => {
+  let release!: () => void;
+  const hang = new Promise<void>((r) => (release = r));
+  let n = 0;
+  const { desk, vb, vault } = await rig({ runEntry: async () => (++n === 2 ? await hang : undefined, { ok: true, data: { n } }) });
+  const { card, grants } = await desk.requestCard({ entries: [{ job: "cf.zone.read", params: ZONE, reason: "a" }, { job: "cf.dns.list", params: ZONE, reason: "b" }] }, "agent", T0, signedSrc);
+  const running = tap(desk, card.id);
+  await until(async () => (await stateOf(vb, card.id, 1)) === "dispatching");
+  const mid = await desk.collectCard(card.id, "agent", T0 + 1, signedSrc);
+  assert.ok(mid.entries[0].answer !== undefined && mid.closed_at === undefined, "checkpoint: entry 1's answer stored while the card is open");
+  assert.ok((await desk.grant(grants[0].id)).result !== undefined);
+  const real = vault.cardStatus;
+  vault.cardStatus = async () => {
+    throw new Error("network connection lost");
+  };
+  const blind = await desk.collectCard(card.id, "agent", T0 + 2, signedSrc);
+  assert.equal(blind.entries[0].answer, undefined, "no vault answer and no desk clock: not returned");
+  assert.equal(blind.entries[0].answer_erased, undefined, "and not claimed erased either");
+  vault.cardStatus = real;
+  release();
+  await running;
+});
+
+test("R5: two POST /card at once for one requester: exactly one card is created", async () => {
+  const { desk, store } = await rig();
+  const both = await Promise.allSettled([desk.requestCard({ entries: two }, "agent", T0, signedSrc), desk.requestCard({ entries: two }, "agent", T0, signedSrc)]);
+  assert.deepEqual(both.map((b) => b.status).sort(), ["fulfilled", "rejected"]);
+  const lost = both.find((b) => b.status === "rejected") as PromiseRejectedResult;
+  assert.ok(lost.reason instanceof DeskError && lost.reason.code === "too_many_pending");
+  assert.equal((await store.list({ prefix: "card:" })).size, 1);
+  // Safeguard working, not just refusing: another requester is not blocked.
+  await desk.requestCard({ entries: two }, "other", T0, signedSrc);
 });

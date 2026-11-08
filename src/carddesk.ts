@@ -12,7 +12,7 @@
 
 import type { AuthenticationResponseJSON } from "@simplewebauthn/server";
 import { generateAuthenticationOptions } from "@simplewebauthn/server";
-import { APPROVE_WINDOW_MS, CHALLENGE_TTL_MS, COLLECT_WINDOW_MS, Desk, DeskError, PRF_MASTER_LABEL, assertionOf, challengeCarries, grantHash, hexToBytes, prfOf, saltFor, withoutSecret, type Grant, type Source } from "./desk.ts";
+import { APPROVE_WINDOW_MS, CHALLENGE_TTL_MS, COLLECT_WINDOW_MS, Desk, DeskError, PRF_MASTER_LABEL, assertionOf, challengeCarries, grantHash, hexToBytes, prfOf, saltFor, withoutSecret, type Grant, type Source, type Store } from "./desk.ts";
 import { CARD_ELIGIBLE, JOBS, type Job, type JobName } from "./jobs.ts";
 import { keyRev } from "./cboxkey.ts";
 import type { Receipt } from "./recorder.ts";
@@ -33,7 +33,10 @@ export interface DeskCard {
   expires_at: number; // every entry's expiry: Ben's tap must land before it
   cbox_rev: number; // the c-box key generation the card was asked under; the vault refuses any change (T10)
   approved_at?: number;
-  stopped?: string;
+  stopped?: string; // on an approved card, "stopped by Ben" is the stored Stop the run loop re-reads (R1)
+  not_opened?: true; // the desk knows the vault holds no book for it: nothing could run
+  closed_at?: number; // the vault's close time, kept by the desk the first time it sees it (R4)
+  confirmed?: EntryState[]; // each entry's last settled state read from the vault (R3)
 }
 
 export interface CardEntryReport {
@@ -56,8 +59,15 @@ export interface CardReport {
   deadline: number;
   stopped?: string;
   closed_at?: number;
+  vault_unread?: true; // the vault could not be read just now: states are the last confirmed ones, else unknown (R3)
   entries: CardEntryReport[];
 }
+
+export const STOPPED_BY_BEN = "stopped by Ben";
+// One POST /card per requester at a time (R5). The desk object is rebuilt per request, but the Durable Object's
+// storage is one object for its life, and a Set check-and-add cannot be interleaved, unlike a storage read
+// followed by crypto awaits. Lost with the object, which also ends the request holding it.
+const slots = new WeakMap<Store, Set<string>>();
 
 const terminal = (s: EntryState) => s !== "waiting" && s !== "dispatching";
 const strip = ({ body: _b, ...r }: Receipt): Omit<Receipt, "body"> => r;
@@ -100,6 +110,21 @@ export class CardDesk extends Desk {
   async requestCard(input: unknown, requester: string, now: number, source: Source = {}): Promise<{ card: DeskCard; grants: Grant[] }> {
     await this.eraseStaleSecrets(now);
     await this.requireSigned(source, requester, "card", now);
+    let held = slots.get(this.store);
+    if (!held) slots.set(this.store, (held = new Set()));
+    if (held.has(requester)) {
+      await this.log({ event: "refused", requester, detail: "card: too_many_pending (another card request is in progress)" }, now);
+      throw new DeskError("too_many_pending", 429);
+    }
+    held.add(requester);
+    try {
+      return await this.newCard(input, requester, now);
+    } finally {
+      held.delete(requester);
+    }
+  }
+
+  private async newCard(input: unknown, requester: string, now: number): Promise<{ card: DeskCard; grants: Grant[] }> {
     const refuse = async (code: string, status = 400) => {
       await this.log({ event: "refused", requester, detail: `card: ${code}` }, now);
       return new DeskError(code, status);
@@ -120,7 +145,7 @@ export class CardDesk extends Desk {
       asked.push({ job: e.job as JobName, params, reason: e.reason.trim() });
     }
     // One card waiting for Ben per requester. A card frozen as "not sent" counts until its grants expire (V4).
-    const waiting = [...(await this.store.list<DeskCard>({ prefix: "card:" })).values()].filter((c) => c.requester === requester && c.expires_at > now && c.approved_at === undefined && c.stopped !== "stopped by Ben");
+    const waiting = [...(await this.store.list<DeskCard>({ prefix: "card:" })).values()].filter((c) => c.requester === requester && c.expires_at > now && c.approved_at === undefined && c.stopped !== STOPPED_BY_BEN);
     if (waiting.length) throw await refuse("too_many_pending", 429);
     const id = crypto.randomUUID();
     const expires_at = now + APPROVE_WINDOW_MS;
@@ -199,6 +224,14 @@ export class CardDesk extends Desk {
     for (const g of grants) await this.store.put(`grant:${g.id}`, { ...g, status: "approved", approved_at: now });
     await this.log({ event: "card_approved", requester: c.requester, detail: `card ${id}: ${grants.length} entries` }, now);
     const assertion = assertionOf(response);
+    const early = await this.halt(id);
+    if (early) {
+      // Stopped while the tap was being checked: nothing is sent to the vault (R1).
+      await this.store.put(`card:${id}`, { ...(await this.card(id)), status: "stopped", stopped: early, not_opened: true });
+      for (const g of grants) await this.store.put(`grant:${g.id}`, { ...(await this.grant(g.id)), status: "stopped" });
+      await this.log({ event: "stopped", detail: `card ${id}: ${early} before it was opened; this tap started nothing` }, now);
+      return this.finish(id, now);
+    }
     try {
       await this.cardApi();
       const fields = grants.map((g) => ({ id: g.id, job: g.job, params: g.params, requester: g.requester, expires_at: g.expires_at }));
@@ -210,7 +243,7 @@ export class CardDesk extends Desk {
       const opened = await Promise.resolve().then(() => this.cards().cardStatus(id)).then(() => true, (e2: unknown) => (codeOf(e2) === "unknown_card" ? false : null));
       if (opened !== true) {
         const latest = await this.card(id);
-        await this.store.put(`card:${id}`, { ...latest, status: "stopped", stopped: `${opened === false ? "not opened" : "unclear whether opened; nothing started"}: ${codeOf(e)}` });
+        await this.store.put(`card:${id}`, { ...latest, status: "stopped", stopped: `${opened === false ? "not opened" : "unclear whether opened; nothing started"}: ${codeOf(e)}`, ...(opened === false ? { not_opened: true as const } : {}) });
         for (const g of grants) await this.store.put(`grant:${g.id}`, { ...(await this.grant(g.id)), status: "stopped" });
         await this.log({ event: "stopped", detail: `card ${id}: the vault did not open it; this tap started nothing [${codeOf(e)}]` }, now);
         return this.finish(id, now);
@@ -225,8 +258,24 @@ export class CardDesk extends Desk {
     return this.finish(id, now);
   }
 
+  /**
+   * Why no further entry may start, or undefined: Ben's stored Stop (R1), or the c-box key generation moved since
+   * the card was asked (R2: removal or a new enrollment). Read from storage right before each step that reaches out.
+   */
+  private async halt(id: string): Promise<string | undefined> {
+    const c = await this.card(id);
+    if (c.stopped === STOPPED_BY_BEN) return STOPPED_BY_BEN;
+    if (c.cbox_rev !== (await keyRev(this.store))) return "c-box key changed";
+    return undefined;
+  }
+
   /** One entry: its approval recorded (signed receipt), then `cardRun`. True only when the vault says `done`. */
   private async runEntry(c: DeskCard, g: Grant, i: number, assertion: ReturnType<typeof assertionOf>, prf: string, now: number): Promise<boolean> {
+    const before = await this.halt(c.id);
+    if (before) {
+      await this.log({ event: "stopped", ...this.grantFacts(g), detail: `card entry ${i + 1}: ${before}; it and every later entry did not start` }, now);
+      return false;
+    }
     let rc: Receipt;
     try {
       rc = await this.record(g, "approval", { grant_hash: g.hash, approved_at: now, assertion, approval_kind: "card/v1", manifest: c.manifest }, now);
@@ -240,9 +289,15 @@ export class CardDesk extends Desk {
       await this.log({ event: "stopped", ...this.grantFacts(g), detail: `card entry ${i + 1}: the recorder's receipt is not signed; not started` }, now);
       return false;
     }
+    // Recording took a network wait: Stop or a key change may have landed meanwhile.
+    const why = await this.halt(c.id);
+    if (why) {
+      await this.log({ event: "stopped", ...this.grantFacts(g), detail: `card entry ${i + 1}: ${why}; it and every later entry did not start` }, now);
+      return false;
+    }
     try {
       const receipt = { v: rc.v!, seq: rc.seq, key: rc.key!, grant: rc.grant, stage: rc.stage, sha256: rc.sha256, recorded_at: rc.recorded_at!, sig: rc.sig };
-      const r = await this.cards().cardRun({ card: c.id, index: i, receipt, approval_body: rc.body, prf, key_rev: c.cbox_rev });
+      const r = await this.cards().cardRun({ card: c.id, index: i, receipt, approval_body: rc.body, prf, key_rev: await keyRev(this.store) });
       await this.log({ event: r.state === "done" ? "job_done" : "job_failed", ...this.grantFacts(g), detail: `card entry ${i + 1}: ${r.state}` }, now);
       return r.state === "done";
     } catch (e) {
@@ -255,12 +310,15 @@ export class CardDesk extends Desk {
   async stopCard(id: string, now: number): Promise<CardReport> {
     const c = await this.card(id);
     if (c.status === "pending") {
-      await this.store.put(`card:${id}`, { ...c, status: "stopped", stopped: "stopped by Ben" });
+      await this.store.put(`card:${id}`, { ...c, status: "stopped", stopped: STOPPED_BY_BEN });
       for (const g of c.grants) await this.store.put(`grant:${g}`, { ...(await this.grant(g)), status: "stopped" });
     } else if (c.status === "approved") {
+      // Stored first: the run loop re-reads it before opening and before each entry, so a Stop that reaches the
+      // vault before its book exists (unknown_card) still stops the card (R1).
+      await this.store.put(`card:${id}`, { ...c, stopped: STOPPED_BY_BEN });
       await Promise.resolve().then(() => this.cards().cardStop(id)).catch(() => undefined);
     }
-    await this.log({ event: "card_stopped", requester: c.requester, detail: `card ${id}: stopped by Ben` }, now);
+    await this.log({ event: "card_stopped", requester: c.requester, detail: `card ${id}: ${STOPPED_BY_BEN}` }, now);
     return this.finish(id, now);
   }
 
@@ -274,13 +332,25 @@ export class CardDesk extends Desk {
 
   /**
    * Idempotent recovery (U4, V1-V3, W1): from the vault's book, store answers still held (before acking them), and
-   * record each missing result with bytes frozen in the grant before the first send. Past the collect window it
-   * neither stores nor returns answers, and erases the desk's copies.
+   * record each missing result with bytes frozen in the grant before the first send. Answers are stored and returned
+   * only while the clock is known (R4): the vault says the card is still open, or the close time -- the desk's own
+   * copy, kept the first time it is seen -- is under COLLECT_WINDOW_MS ago. Copies are erased once that window is
+   * surely over (close time unseen: counted from the card's deadline, by which the vault closes it).
    */
   async finish(id: string, now: number): Promise<CardReport> {
-    const c = await this.card(id);
-    const v: CardView | undefined = c.status === "approved" || c.approved_at !== undefined ? await Promise.resolve().then(() => this.cards().cardStatus(id)).catch(() => undefined) : undefined;
-    const open = !v || v.closed_at === undefined || now <= v.closed_at + COLLECT_WINDOW_MS;
+    let c = await this.card(id);
+    const v: CardView | undefined = c.approved_at !== undefined && !c.not_opened ? await Promise.resolve().then(() => this.cards().cardStatus(id)).catch(() => undefined) : undefined;
+    const unread = c.approved_at !== undefined && !c.not_opened && !v;
+    if (v) {
+      const confirmed = c.grants.map((gid, i) => (v.entries[i]?.grant === gid && terminal(v.entries[i].state) ? v.entries[i].state : c.confirmed?.[i]));
+      const closed_at = c.closed_at ?? v.closed_at;
+      if (closed_at !== c.closed_at || JSON.stringify(confirmed) !== JSON.stringify(c.confirmed ?? [])) {
+        c = { ...(await this.card(id)), closed_at, confirmed: confirmed as EntryState[] };
+        await this.store.put(`card:${id}`, c);
+      }
+    }
+    const open = c.closed_at !== undefined ? now <= c.closed_at + COLLECT_WINDOW_MS : v !== undefined;
+    const expired = now > (c.closed_at ?? c.manifest.deadline) + COLLECT_WINDOW_MS;
     for (const [i, gid] of c.grants.entries()) {
       const e = v?.entries[i];
       if (v && e && e.grant === gid) {
@@ -299,12 +369,12 @@ export class CardDesk extends Desk {
           await this.sendResult(gid, outcome, at, now);
         }
       }
-      if (!open) {
+      if (expired) {
         const g = await this.grant(gid);
         if (g.result !== undefined) await this.store.put(`grant:${gid}`, { ...g, result: undefined, answer_erased: true });
       }
     }
-    return this.report(await this.card(id), v, open);
+    return this.report(await this.card(id), v, open, expired, unread);
   }
 
   // The result record, frozen: built once, stored in the grant (re-read, written only if absent), and every send
@@ -330,7 +400,10 @@ export class CardDesk extends Desk {
   }
 
   /** What Ben's page and the agent see: per entry the plain line, the vault's state, the answer while held, and every receipt. */
-  private async report(c: DeskCard, v: CardView | undefined, open: boolean): Promise<CardReport> {
+  private async report(c: DeskCard, v: CardView | undefined, open: boolean, expired: boolean, unread: boolean): Promise<CardReport> {
+    // Not run only when that is known: never tapped, or the desk knows the vault holds no book. A failed read keeps
+    // the last state the vault confirmed, else unknown -- never a made-up not_run (R3, Release Checklist 6.1).
+    const never = c.approved_at === undefined || c.not_opened === true;
     const entries: CardEntryReport[] = [];
     for (const [i, gid] of c.grants.entries()) {
       const g = await this.grant(gid);
@@ -340,14 +413,14 @@ export class CardDesk extends Desk {
         grant: gid,
         job: g.job,
         does: (JOBS[g.job] as Job).explain(g.params).does,
-        state: e?.state ?? (c.status === "pending" ? "waiting" : "not_run"),
+        state: e?.state ?? (c.status === "pending" ? "waiting" : never ? "not_run" : (c.confirmed?.[i] ?? "unknown")),
         ...(e?.at !== undefined ? { at: e.at } : {}),
         ...(e?.late !== undefined ? { late: e.late } : {}),
         ...(open && g.result !== undefined ? { answer: withoutSecret(g.result) } : {}),
-        ...(g.answer_erased || !open ? { answer_erased: true as const } : {}),
+        ...(g.answer_erased || expired ? { answer_erased: true as const } : {}),
         receipts: g.receipts ?? {},
       });
     }
-    return { card: c.id, status: c.status, requester: c.requester, expires_at: c.expires_at, deadline: c.manifest.deadline, ...((v?.stopped ?? c.stopped) ? { stopped: v?.stopped ?? c.stopped } : {}), ...(v?.closed_at !== undefined ? { closed_at: v.closed_at } : {}), entries };
+    return { card: c.id, status: c.status, requester: c.requester, expires_at: c.expires_at, deadline: c.manifest.deadline, ...((v?.stopped ?? c.stopped) ? { stopped: v?.stopped ?? c.stopped } : {}), ...((c.closed_at ?? v?.closed_at) !== undefined ? { closed_at: c.closed_at ?? v?.closed_at } : {}), ...(unread ? { vault_unread: true as const } : {}), entries };
   }
 }

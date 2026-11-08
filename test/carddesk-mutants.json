@@ -50,7 +50,7 @@
  [
   "desk-frozen-counts",
   "src/carddesk.ts",
-  "c.approved_at === undefined && c.stopped !== \"stopped by Ben\"",
+  "c.approved_at === undefined && c.stopped !== STOPPED_BY_BEN",
   "c.status === \"pending\"",
   "one pending card per requester (T13); a partial freeze stops every grant and still counts for 10 minutes (V4)",
   "test/carddesk.test.ts"
@@ -213,6 +213,86 @@
   "(codeOf(e2) === \"unknown_card\" ? false : null)",
   "false",
   "cardOpen fails and the status read fails too, not with unknown_card: said as unclear, never as 'not opened' (6.1)",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-stop-stored",
+  "src/carddesk.ts",
+  "      await this.store.put(`card:${id}`, { ...c, stopped: STOPPED_BY_BEN });\n",
+  "",
+  "R1: Stop that lands after the tap but before the vault opens the card (unknown_card) still stops it; nothing runs",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-halt-stop",
+  "src/carddesk.ts",
+  "    if (c.stopped === STOPPED_BY_BEN) return STOPPED_BY_BEN;\n",
+  "",
+  "R1: Stop that lands after the tap but before the vault opens the card (unknown_card) still stops it; nothing runs",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-halt-key",
+  "src/carddesk.ts",
+  "    if (c.cbox_rev !== (await keyRev(this.store))) return \"c-box key changed\";\n",
+  "",
+  "R2: Ben removes the c-box key while entry 1 runs: entry 2 is never sent, and the vault's own copy moves too",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-tell-vault",
+  "src/desk.ts",
+  "removed by Ben` }, now);\n    await this.tellVaultKeyRev(now);",
+  "removed by Ben` }, now);",
+  "R2: Ben removes the c-box key while entry 1 runs: entry 2 is never sent, and the vault's own copy moves too",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-tell-vault-logged",
+  "src/desk.ts",
+  "      await this.log({ event: \"vault_key_rev_unsent\"",
+  "      void ({ event: \"vault_key_rev_unsent\"",
+  "R2: a vault that cannot be told the new key generation never blocks Ben's removal; it is logged",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-unread-unknown",
+  "src/carddesk.ts",
+  "(c.confirmed?.[i] ?? \"unknown\")",
+  "\"not_run\"",
+  "R3: an unreadable vault never becomes 'not run': last confirmed state, else unknown, and the page says Unclear",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "page-unread",
+  "src/page.ts",
+  "if (r.vault_unread === true &&",
+  "if (false &&",
+  "R3: an unreadable vault never becomes 'not run': last confirmed state, else unknown, and the page says Unclear",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-open-clock",
+  "src/carddesk.ts",
+  "const open = c.closed_at !== undefined ? now <= c.closed_at + COLLECT_WINDOW_MS : v !== undefined;",
+  "const open = !v || c.closed_at === undefined || now <= c.closed_at + COLLECT_WINDOW_MS;",
+  "R4: no known clock (card still running, then the vault cannot be read): a stored answer is not returned",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-slot",
+  "src/carddesk.ts",
+  "    if (held.has(requester)) {",
+  "    if (false) {",
+  "R5: two POST /card at once for one requester: exactly one card is created",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-closed-kept",
+  "src/carddesk.ts",
+  "const closed_at = c.closed_at ?? v.closed_at;",
+  "const closed_at = c.closed_at;",
+  "R4: the vault forgets the card (pruned) or cannot be read: an answer past its window is not returned, and is erased",
   "test/carddesk.test.ts"
  ]
 ]

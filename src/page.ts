@@ -193,7 +193,7 @@ ${pins.length ? `<pre>${esc(text)}</pre>` : `<p class="warn">No passkey is enrol
  */
 export function cardView(status: number | null, j: unknown): { ok: boolean; head: string; text: string; lines: string[] } {
   const again = "Do not tap again; reload this page to see what ran, and tell the agent";
-  const b = (j && typeof j === "object" ? j : {}) as { error?: unknown; report?: { entries?: unknown; stopped?: unknown; status?: unknown } };
+  const b = (j && typeof j === "object" ? j : {}) as { error?: unknown; report?: { entries?: unknown; stopped?: unknown; status?: unknown; vault_unread?: unknown } };
   if (status === null) return { ok: false, head: "Unclear", text: `The connection failed before the front desk answered, so it is unknown what ran. ${again}.`, lines: [] };
   if (status >= 400 && status < 500 && typeof b.error === "string") return { ok: false, head: "Not approved", text: `The front desk refused the tap, so this tap started nothing. Tell the agent the words in brackets: [${b.error}]`, lines: [] };
   const r = b.report;
@@ -209,6 +209,7 @@ export function cardView(status: number | null, j: unknown): { ok: boolean; head
   const es = r.entries as { does?: unknown; state?: unknown }[];
   const lines = es.map((e, i) => `${i + 1}. ${String(e.does)} -- ${words[String(e.state)] ?? "Unclear"}`);
   const states = es.map((e) => String(e.state));
+  if (r.vault_unread === true && !states.every((s) => s === "done")) return { ok: false, head: "Unclear", text: `The front desk could not read the vault just now, so this shows only what it last confirmed. ${again}.`, lines };
   if (states.every((s) => s === "done")) return { ok: true, head: "Done", text: "Every job ran, in order. The agent collects the answers now; nothing else to do.", lines };
   if (states.some((s) => s === "unknown" || s === "dispatching")) return { ok: false, head: "Unclear", text: `It is not known whether every job finished. ${again}.`, lines };
   if (states.every((s) => s === "waiting")) return { ok: false, head: "Waiting", text: "Nothing has run yet.", lines };
