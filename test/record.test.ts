@@ -326,3 +326,35 @@ test("the agent's wait keeps polling on not_ready and stops on not_recorded", as
   const src = String(readFileSync(new URL("../scripts/agent.mjs", import.meta.url).pathname));
   assert.match(src, /res\.status === 409 && text\.includes\("not_ready"\)/);
 });
+
+// Card build 3 (85818ab1 U6, V1): the vault checks the recorder's signature itself, so the client keeps the whole
+// receipt and the exact bytes; a frozen result is resent byte for byte, and frozen bytes for another record are refused.
+test("U6/V1: the client keeps the full signed receipt and the bytes; frozen bytes go out exactly; mismatched frozen bytes are refused", async () => {
+  const url = "https://rec.example/v1/records";
+  const sent: string[] = [];
+  const fetchFn = (async (_u: string, init: RequestInit) => {
+    const body = String(init.body);
+    sent.push(body);
+    const sha = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body))).toString("hex");
+    const j = JSON.parse(body);
+    return new Response(JSON.stringify({ receipt: { v: 1, seq: 9, key: "records/v1/9.json", grant: j.grant, stage: j.stage, sha256: sha, recorded_at: "2026-11-08T00:00:00.000Z", sig: "c2ln" } }), { status: 201 });
+  }) as unknown as typeof fetch;
+  const send = recorderFrom(url, "id.access", "s", fetchFn)!;
+  const r = await send({ grant: "grant0001", stage: "approval", job: "test.echo", request: "a".repeat(64) });
+  assert.deepEqual([r.v, r.key, r.recorded_at, r.sig, r.body], [1, "records/v1/9.json", "2026-11-08T00:00:00.000Z", "c2ln", sent[0]]);
+  const frozen = JSON.stringify({ v: 1, grant: "grant0001", stage: "result", job: "test.echo", request: "a".repeat(64), outcome: "done", at: 5 });
+  await send({ grant: "grant0001", stage: "result", job: "test.echo", outcome: "failed", at: 999 }, frozen);
+  assert.equal(sent[1], frozen, "the frozen bytes, not a fresh serialization of the record");
+  await assert.rejects(send({ grant: "grant0002", stage: "result", job: "test.echo" }, frozen), RecorderError);
+  await assert.rejects(send({ grant: "grant0001", stage: "approval", job: "test.echo" }, frozen), RecorderError);
+  await assert.rejects(send({ grant: "grant0001", stage: "result", job: "test.echo" }, "not json"), RecorderError);
+  assert.equal(sent.length, 2, "refused frozen bytes are never sent");
+  // A receipt missing any signed field keeps none of them (the vault would refuse it; the desk does not start the entry).
+  const half = (async (_u: string, init: RequestInit) => {
+    const body = String(init.body);
+    const sha = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body))).toString("hex");
+    return new Response(JSON.stringify({ receipt: { v: 1, seq: 3, key: "k", grant: "grant0001", stage: "request", sha256: sha, recorded_at: "t" } }), { status: 201 });
+  }) as unknown as typeof fetch;
+  const h = await recorderFrom(url, "id.access", "s", half)!({ grant: "grant0001", stage: "request", job: "test.echo" });
+  assert.deepEqual([h.sig, h.key, h.v], [undefined, undefined, undefined]);
+});

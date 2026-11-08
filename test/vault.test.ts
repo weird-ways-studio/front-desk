@@ -805,3 +805,31 @@ test("headcount key identity (Codex Build R r2 #1): setup records its group id; 
   assert.equal((await hcSetup(vault)).ok, true);
   assert.deepEqual((await vault.headcount()).widened, [], "the setup tap records the id and the night is clean again");
 });
+
+// Card build 3 (85818ab1) F9 (V5/W2): the heaviest card entry's subrequests in one vault invocation -- cf.dns.list
+// with more than DNS_MAX records, paged 100 at a time -- through runCardEntry, today's tap path. Asserted so a change
+// that adds calls is seen. Each short vault key left over from an earlier tap adds one DELETE (sweepHelpers).
+test("F9: one cf.dns.list card entry at DNS_MAX makes a fixed, counted number of Cloudflare calls", async () => {
+  const { store, cf } = await stored();
+  const rows = Array.from({ length: 1000 }, (_, i) => ({ id: `r${i}`, type: "A", name: `h${i}.${ZONE}`, content: "192.0.2.1" }));
+  let fetches = 0;
+  const v = testVault(store, async (input: string, init?: RequestInit) => {
+    fetches++;
+    const u = new URL(String(input));
+    if (u.pathname.includes("/dns_records")) {
+      const page = Number(u.searchParams.get("page")), per = Number(u.searchParams.get("per_page"));
+      return Response.json({ success: true, result: rows.slice((page - 1) * per, page * per) });
+    }
+    return cf.fetchFn(input as string, init);
+  }, () => NOW);
+  await readJob(v, "cf.zone.read", { zone: ZONE }); // the first tap locks the master key to the passkey
+  fetches = 0;
+  cf.calls.length = 0;
+  const r = (await v.runCardEntry("cf.dns.list", { zone: ZONE }, prf(7))) as ReadResult;
+  assert.equal(r.ok, true);
+  assert.equal(r.truncated, true);
+  const byKind = cf.calls.map((c) => `${c.method} ${c.path.split("?")[0].replace(/[0-9a-f]{32}|minted\d+/g, "<id>")}`);
+  // Measured 2026-11-08: permission groups, mint + delete for the zone lookup key, zone lookup, mint + delete for the DNS
+  // key, the leftover-key list, and 6 DNS pages (1000 rows: pages 1-6 until more than 500 are held).
+  assert.equal(fetches, 13, `measured: ${JSON.stringify(byKind)} + 6 DNS pages`);
+});

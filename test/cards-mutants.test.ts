@@ -10,10 +10,11 @@ import { cpSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const mutants = JSON.parse(readFileSync("test/cards-mutants.json", "utf8")) as [string, string, string, string, string][];
+// Vault mutants run test/cards.test.ts; desk mutants (test/carddesk-mutants.json) name their own test file.
+const mutants = [...JSON.parse(readFileSync("test/cards-mutants.json", "utf8")), ...JSON.parse(readFileSync("test/carddesk-mutants.json", "utf8"))] as [string, string, string, string, string, string?][];
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-for (const [id, file, find, replace, name] of mutants) {
+for (const [id, file, find, replace, name, testFile = "test/cards.test.ts"] of mutants) {
   test(`mutant ${id} is caught by "${name}"`, { timeout: 60_000 }, () => {
     const dir = mkdtempSync(join(tmpdir(), "fd-mut-"));
     try {
@@ -22,7 +23,7 @@ for (const [id, file, find, replace, name] of mutants) {
       const src = readFileSync(file, "utf8");
       assert.equal(src.split(find).length - 1, 1, `${id}: the text to mutate occurs exactly once`);
       writeFileSync(join(dir, file), src.replace(find, replace));
-      const r = spawnSync(process.execPath, ["--test", "--test-reporter=tap", `--test-name-pattern=^${esc(name)}$`, "test/cards.test.ts"], { cwd: dir, encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined } });
+      const r = spawnSync(process.execPath, ["--test", "--test-reporter=tap", `--test-name-pattern=^${esc(name)}$`, testFile], { cwd: dir, encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined } });
       const out = r.stdout + r.stderr;
       assert.match(out, /^# tests 1$/m, `${id}: exactly the one named test ran\n${out.slice(-1500)}`);
       assert.match(out, /^# fail 1$/m, `${id}: SURVIVED -- the test still passes with the check removed`);

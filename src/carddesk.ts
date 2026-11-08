@@ -45,7 +45,7 @@ export interface CardEntryReport {
   at?: number;
   late?: string;
   answer?: unknown;
-  answer_erased?: true; // held only until the card closed COLLECT_WINDOW_MS ago (V3)
+  answer_erased?: true; // "no longer held": answers are kept only until the card closed COLLECT_WINDOW_MS ago (V3)
   receipts: Partial<Record<string, Omit<Receipt, "body">>>;
 }
 export interface CardReport {
@@ -339,7 +339,7 @@ export class CardDesk extends Desk {
         ...(e?.at !== undefined ? { at: e.at } : {}),
         ...(e?.late !== undefined ? { late: e.late } : {}),
         ...(open && g.result !== undefined ? { answer: withoutSecret(g.result) } : {}),
-        ...(g.answer_erased || (!open && g.result !== undefined) ? { answer_erased: true as const } : {}),
+        ...(g.answer_erased || !open ? { answer_erased: true as const } : {}),
         receipts: g.receipts ?? {},
       });
     }

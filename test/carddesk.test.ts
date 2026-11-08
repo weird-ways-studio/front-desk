@@ -282,18 +282,33 @@ test("overdue dispatching entry, lost recorder reply, two concurrent reads: ever
 });
 
 // ---- V3: the collect window ----
-test("past the collect window: answers are neither returned nor stored, the desk's copy is erased and never restored (V3)", async () => {
-  const { desk, vb, fail } = await rig();
+test("past the collect window: answers are neither stored nor returned, and the vault is not told to drop its copy (V3)", async () => {
+  const { desk, vb, fail, calls } = await rig();
   const { card, grants } = await desk.requestCard({ entries: [two[0]] }, "agent", T0, signedSrc);
-  fail.cardAck = 1; // the vault keeps its copy (lost ack reply... and the ack itself did run: so make the vault hold one)
+  fail.cardStatus = 1; // the read right after the tap is lost: the desk stores nothing, the vault keeps the answer
+  await tap(desk, card.id);
+  assert.equal((await desk.grant(grants[0].id)).result, undefined);
+  const late = T0 + COLLECT_WINDOW_MS + 1; // the vault's own clock stays at T0, so it still shows the answer
+  assert.notEqual(vb.book.status(card.id).answers[0], undefined);
+  calls.length = 0;
+  const got = await desk.collectCard(card.id, "agent", late, signedSrc);
+  assert.equal(got.entries[0].answer, undefined);
+  assert.equal(got.entries[0].answer_erased, true, "said plainly: no longer held");
+  assert.equal((await desk.grant(grants[0].id)).result, undefined);
+  assert.ok(!calls.includes("cardAck"), "the desk never stored it, so it never acks");
+  assert.equal((await desk.grant(grants[0].id)).answer_erased, undefined, "nothing was restored and erased");
+});
+
+test("past the collect window: the desk's stored answer is erased and never restored (V3)", async () => {
+  const { desk, vault } = await rig();
+  vault.cardAck = async () => false; // the vault keeps its copy
+  const { card, grants } = await desk.requestCard({ entries: [two[0]] }, "agent", T0, signedSrc);
   await tap(desk, card.id);
   assert.ok((await desk.grant(grants[0].id)).result !== undefined);
   const late = T0 + COLLECT_WINDOW_MS + 1;
-  const got = await desk.collectCard(card.id, "agent", late, signedSrc);
-  assert.equal(got.entries[0].answer, undefined);
-  assert.equal(got.entries[0].answer_erased, true);
+  await desk.collectCard(card.id, "agent", late, signedSrc);
   assert.equal((await desk.grant(grants[0].id)).result, undefined);
-  vb.clock.now = T0 + 1; // even if the vault still showed it, the desk does not take it back
+  assert.equal((await desk.grant(grants[0].id)).answer_erased, true);
   const again = await desk.collectCard(card.id, "agent", late + 1, signedSrc);
   assert.equal(again.entries[0].answer, undefined);
   assert.equal((await desk.grant(grants[0].id)).result, undefined);
