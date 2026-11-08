@@ -32,7 +32,7 @@ function fakeGitHub(fail?: Fail) {
   const tokens = new Map<string, { app: keyof typeof APP_ID; perms: Record<string, string> }>();
   const revoked = new Set<string>();
   const org = {
-    repos: [{ name: "front-desk", private: false }, { name: "studio-os", private: true }],
+    repos: [{ name: "front-desk", private: false, id: 9001 }, { name: "studio-os", private: true, id: 9002 }] as { name: string; private: boolean; id: unknown }[],
     members: ["benculbert", "helper", "weird-ways"],
     owners: ["benculbert", "weird-ways"],
     keys: { "front-desk": [] as number[], "studio-os": [7] } as Record<string, number[]>,
@@ -189,6 +189,7 @@ test("setup, then Ben's tap: main key locked to his passkey, headcount App refus
 test("nightly GitHub count: clean, then a planted deploy key and a removed branch rule are named", async () => {
   const { vault, gh } = await connected();
   assert.equal((await baseline(vault)).ok, true);
+  assert.deepEqual((await (vault as any).store.get("gh.baseline")).repo_ids, ["front-desk:9001", "studio-os:9002"], "card 77ec1e64: the list holds each repo's id");
   gh.calls.length = 0;
   const clean = await (vault as any).ghHeadcount();
   assert.deepEqual(clean, { ok: true, changes: [] });
@@ -211,6 +212,8 @@ for (const [what, change, expect] of [
   ["a branch rule weakened in place (same id, same enforcement)", (o: any) => (o.rule = { ...o.rule, rules: [{ type: "pull_request", parameters: { required_approving_review_count: 0 } }] }), /^rulesets [+-]front-desk:5:active:/],
   ["a branch rule retargeted in place", (o: any) => (o.rule = { ...o.rule, conditions: { ref_name: { include: ["refs/heads/nothing"] } } }), /^rulesets [+-]front-desk:5:active:/],
   ["a repo hidden from the watcher", (o: any) => o.repos.pop(), /^repos -studio-os:private$/],
+  // Card 77ec1e64 T13: deleted and re-made under the same name between two nights -- `repos` is unchanged, the id is not.
+  ["a repo re-made under the same name (new GitHub id)", (o: any) => (o.repos[1] = { ...o.repos[1], id: 9003 }), /^repo_ids \+studio-os:9003$/],
   // Only the role changes; the member list stays the same (Codex C6a-1 r3, later #1).
   ["an existing member promoted to owner", (o: any) => o.owners.push("helper"), /^owners \+helper$/],
 ] as const) {
@@ -280,6 +283,18 @@ test("nightly count fails closed: not set up, and a list too long to read in one
   const full = await connected("fullPage");
   await assert.rejects(full.vault.ghPreview(), /too_many/, "a full page is refused, not counted as the whole list");
 });
+
+// Card 77ec1e64 T13: a repo id GitHub does not give as a positive whole number cannot be matched by id: fail closed.
+for (const bad of [undefined, "9002", 0, -1, 1.5]) {
+  test(`nightly count fails closed on a repo id that is not a positive whole number (${JSON.stringify(bad)})`, async () => {
+    const { vault, gh } = await connected();
+    assert.equal((await baseline(vault)).ok, true);
+    gh.org.repos[1] = { ...gh.org.repos[1]!, id: bad };
+    const night = await (vault as any).ghHeadcount();
+    assert.equal(night.ok, false);
+    assert.match(night.error ?? "", /bad_repo_id/);
+  });
+}
 
 for (const fail of ["hcGetsWrite", "hcMint500"] as const) {
   test(`baseline refused when the headcount App's write test is not GitHub's permission refusal (${fail}): nothing recorded`, async () => {

@@ -6,6 +6,7 @@ import type { GhBaselineResult } from "../vault/src/api.ts";
 
 const KINDS: Record<string, string> = {
   repos: "Repositories",
+  repo_ids: "Repository ids (GitHub's number for each repository; a deleted and re-made one gets a new number)",
   members: "People in the organization",
   owners: "Owners (full control of the organization)",
   outside: "Outside collaborators (people let into single repos)",
@@ -19,6 +20,7 @@ const KINDS: Record<string, string> = {
 // Count words for the done sentence: [one, many].
 const COUNTS: Record<string, [string, string]> = {
   repos: ["repository", "repositories"],
+  repo_ids: ["repository id", "repository ids"],
   members: ["person", "people"],
   owners: ["owner", "owners"],
   outside: ["outside collaborator", "outside collaborators"],
@@ -135,6 +137,10 @@ function item(kind: string, raw: string): string {
   if (kind === "repos") {
     const [repo, vis] = raw.split(":");
     return `${name(repo ?? "")} (${vis})`;
+  }
+  if (kind === "repo_ids") {
+    const m = /^(.+):(\d+)$/.exec(raw);
+    return m ? `${name(m[1]!)} (number ${m[2]})` : name(raw);
   }
   if (kind === "apps") {
     const m = /^(.+?)#\d+:(\w+):(.*)$/.exec(raw);

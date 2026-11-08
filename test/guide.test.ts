@@ -134,6 +134,10 @@ test("a name someone else chose cannot read as the page's own words", () => {
   // A look-alike of our own App (Cyrillic "\u0430") never reads as the real one.
   assert.match(plainChanges(["apps +wws-front-desk#1:all:contents=write", "apps +wws-front-d\u0435sk#2:all:contents=write"])[0]!.items[1]!, /"wws-front-d\?sk" \(has unusual characters\)/);
   assert.equal(plainChanges(["repos +my-repo_2.0:private"])[0]!.items[0]!, 'New: "my-repo_2.0" (private)', "ordinary names unflagged");
+  // Card 77ec1e64: repository ids read as a number beside the name, in their own section.
+  const ids = plainChanges(["repo_ids +card-proof-77ec1e64:123456789"])[0]!;
+  assert.match(ids.heading, /^Repository ids/);
+  assert.equal(ids.items[0], 'New: "card-proof-77ec1e64" (number 123456789)');
 });
 
 test("a standing key's approval says plainly that it never expires", () => {

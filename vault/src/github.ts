@@ -145,6 +145,9 @@ export function installationKey(app: GitHub, installationId: number, narrow?: { 
 // page fails closed rather than counting half (the org has 2 members and 23 repos today).
 export interface GhSnapshot {
   repos: string[]; // "name:private|public" -- a repo leaving the watcher's view shows here
+  // "name:GitHub repository id" (card 77ec1e64 finding 1): a repo deleted and re-made under the same name between
+  // two nights has a new id, so it shows here even though `repos` is unchanged. Job-made repos are matched by id.
+  repo_ids: string[];
   members: string[];
   owners: string[]; // members with the org owner role -- a promotion keeps the member list unchanged
   outside: string[];
@@ -165,12 +168,15 @@ export async function snapshot(gh: GitHub): Promise<GhSnapshot> {
     return items;
   };
   const login = (u: { login: string }) => u.login;
-  const repos = await page<{ name: string; private: boolean }>(`/orgs/${ORG}/repos?type=all`);
+  const repos = await page<{ name: string; private: boolean; id: unknown }>(`/orgs/${ORG}/repos?type=all`);
+  // An id that is not a positive whole number cannot be matched: the list fails closed, never half-counted.
+  if (!repos.every((r) => Number.isSafeInteger(r.id) && (r.id as number) > 0)) throw new VaultError("bad_repo_id");
   const installs = await gh.call<{ installations: { id: number; app_slug: string; repository_selection: string; permissions: Record<string, string> }[] }>("GET", `/orgs/${ORG}/installations?per_page=100`);
   if (installs.installations.length >= 100) throw new VaultError("too_many: installations");
   const perms = (p: Record<string, string>) => Object.keys(p ?? {}).sort().map((k) => `${k}=${p[k]}`).join(",");
   const s: GhSnapshot = {
     repos: repos.map((r) => `${r.name}:${r.private ? "private" : "public"}`),
+    repo_ids: repos.map((r) => `${r.name}:${r.id}`),
     members: (await page<{ login: string }>(`/orgs/${ORG}/members`)).map(login),
     owners: (await page<{ login: string }>(`/orgs/${ORG}/members?role=admin`)).map(login),
     outside: (await page<{ login: string }>(`/orgs/${ORG}/outside_collaborators`)).map(login),
