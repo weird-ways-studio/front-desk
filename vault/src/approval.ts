@@ -67,6 +67,9 @@ export async function checkSigned(req: unknown, extra: number, pin: PasskeyPin |
  * boundary, and records this one before anything is opened.
  */
 export async function admit(store: UsedStore, id: string, expiresAt: number, now: number): Promise<void> {
+  // A grant on a card runs only through the card book (cards.ts), never standalone (card 85818ab1 T8). Checked in
+  // this same storage-only step, so cardOpen (which refuses ids in `used`) cannot slip in between.
+  if ((await store.get(`cardgrant:${id}`)) !== undefined) throw new VaultError(CARD_GRANT);
   const used = (await store.get<Map<string, number>>("used")) ?? new Map<string, number>();
   if (used.has(id)) throw new VaultError(ALREADY_USED);
   if (now > expiresAt + USED_GRACE_MS) throw new VaultError(TOO_OLD);
