@@ -72,6 +72,7 @@ export function outcomeOf(state: EntryState, pastDeadline: boolean): "done" | "f
 }
 
 export class CardDesk extends Desk {
+  /** The vault's card calls, or vault_unavailable when the binding lacks any of them (an older vault). */
   private cards(): VaultCardApi {
     const v = this.hooks.vault;
     if (!v?.cardApi || !v.cardOpen || !v.cardRun || !v.cardStop || !v.cardStatus || !v.cardAck) throw new DeskError("vault_unavailable", 502);
@@ -85,6 +86,7 @@ export class CardDesk extends Desk {
     return a;
   }
 
+  /** The desk's card record, or no_such_card. */
   async card(id: string): Promise<DeskCard> {
     const c = await this.store.get<DeskCard>(`card:${id}`);
     if (!c) throw new DeskError("no_such_card", 404);
@@ -202,11 +204,13 @@ export class CardDesk extends Desk {
       const fields = grants.map((g) => ({ id: g.id, job: g.job, params: g.params, requester: g.requester, expires_at: g.expires_at }));
       await this.cards().cardOpen({ manifest: c.manifest, grants: fields, assertion, key_rev: c.cbox_rev });
     } catch (e) {
-      // A refusal, or no clear answer: the vault's book is the truth (U5 class 3). No book: this tap started nothing.
-      const opened = await Promise.resolve().then(() => this.cards().cardStatus(id)).then(() => true, () => false);
-      if (!opened) {
+      // A refusal, or no clear answer: the vault's book is the truth (U5 class 3). Only the exact `unknown_card`
+      // proves no book exists; any other failure of that read leaves it unclear (Release Checklist 6.1). Either way
+      // no entry is started from here: an open book with no cardRun is closed `not_run` by the vault's alarm.
+      const opened = await Promise.resolve().then(() => this.cards().cardStatus(id)).then(() => true, (e2: unknown) => (codeOf(e2) === "unknown_card" ? false : null));
+      if (opened !== true) {
         const latest = await this.card(id);
-        await this.store.put(`card:${id}`, { ...latest, status: "stopped", stopped: `not opened: ${codeOf(e)}` });
+        await this.store.put(`card:${id}`, { ...latest, status: "stopped", stopped: `${opened === false ? "not opened" : "unclear whether opened; nothing started"}: ${codeOf(e)}` });
         for (const g of grants) await this.store.put(`grant:${g.id}`, { ...(await this.grant(g.id)), status: "stopped" });
         await this.log({ event: "stopped", detail: `card ${id}: the vault did not open it; this tap started nothing [${codeOf(e)}]` }, now);
         return this.finish(id, now);
@@ -325,6 +329,7 @@ export class CardDesk extends Desk {
     }
   }
 
+  /** What Ben's page and the agent see: per entry the plain line, the vault's state, the answer while held, and every receipt. */
   private async report(c: DeskCard, v: CardView | undefined, open: boolean): Promise<CardReport> {
     const entries: CardEntryReport[] = [];
     for (const [i, gid] of c.grants.entries()) {

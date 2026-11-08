@@ -221,7 +221,9 @@ export function cardView(status: number | null, j: unknown): { ok: boolean; head
 export function cardPage(report: { card: string; status: string; expires_at: number; entries: { does: string; job: string; grant: string; state: string }[] }, reasons: string[], options: unknown, nonce: string): string {
   const n = report.entries.length;
   const items = report.entries.map((e, i) => `<li>${esc(e.does)}<br><span class="muted">The agent's reason: <q>${esc(reasons[i] ?? "")}</q></span></li>`).join("");
-  const after = options ? null : cardView(200, { report });
+  // A card nobody approved in time: say so and what to do, rather than "nothing has run yet" (orient-the-person).
+  const expired = !options && report.status === "pending";
+  const after = options ? null : expired ? { ok: false, head: "Expired", text: "This card expired before it was approved, so nothing ran. Nothing to do here; the agent can send it again.", lines: report.entries.map((e, i) => `${i + 1}. ${e.does} -- Not run`) } : cardView(200, { report });
   const exact = report.entries.map((e, i) => `${i + 1}. Job ${e.job} · request ${e.grant}`).join("\n") + `\nCard ${report.card}`;
   return page(
     "Approve a card",
@@ -235,7 +237,7 @@ ${options ? `<p><strong>When you approve:</strong> they run now, in this order, 
 <p class="muted">Approve before <span id="expires">${new Date(report.expires_at).toISOString().slice(11, 16)} UTC</span>. Login: your <strong>front desk passkey</strong>; Face ID offers only that one.</p>
 <button id="go">Approve all ${n} with Face ID</button>` : ""}
 <p id="after">${after ? esc(after.text) : ""}</p>
-${report.status === "pending" || report.entries.some((e) => e.state === "waiting" || e.state === "dispatching") ? `<button id="stop" style="background:var(--bad)">Stop: run nothing more</button><p class="muted">Stop works while this page is open.</p>` : ""}
+${!expired && (report.status === "pending" || report.entries.some((e) => e.state === "waiting" || e.state === "dispatching")) ? `<button id="stop" style="background:var(--bad)">Stop: run nothing more</button><p class="muted">Stop works while this page is open.</p>` : ""}
 <details><summary class="muted">Exact details (technical)</summary><pre class="muted">${esc(exact)}</pre></details>`,
     `const opts=${JSON.stringify(options)};
 const render=(st,j)=>{const v=cardView(st,j);show(v.ok,v.head);document.getElementById('step').textContent='Step 2 of 2 · Result';

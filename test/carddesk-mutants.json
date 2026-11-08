@@ -166,5 +166,53 @@
   "",
   "U6/V1: the client keeps the full signed receipt and the bytes; frozen bytes go out exactly; mismatched frozen bytes are refused",
   "test/record.test.ts"
+ ],
+ [
+  "desk-reason",
+  "src/carddesk.ts",
+  "if (typeof e.reason !== \"string\" || !e.reason.trim() || e.reason.length > 200) throw await refuse(\"bad_reason\");",
+  "",
+  "POST /card refuses a card over the cap, an ineligible job, bad params, an unsigned request -- before recording anything",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-params",
+  "src/carddesk.ts",
+  "      if (!params) throw await refuse(\"bad_params\");",
+  "",
+  "POST /card refuses a card over the cap, an ineligible job, bad params, an unsigned request -- before recording anything",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-shape",
+  "src/carddesk.ts",
+  "Object.keys(body).join() !== \"entries\" || ",
+  "",
+  "POST /card refuses a card over the cap, an ineligible job, bad params, an unsigned request -- before recording anything",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-expired",
+  "src/carddesk.ts",
+  "    if (now > first.expires_at) throw await refuse(\"card_expired\", 410);\n    const { challenge",
+  "    const { challenge",
+  "the tap: a replay, another card's challenge, a missing passkey secret, a changed c-box key are refused",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-replay",
+  "src/carddesk.ts",
+  "    if (c.status !== \"pending\") throw await refuse(\"not_pending\", 409);\n    if (c.cbox_rev",
+  "    if (c.cbox_rev",
+  "two taps at once on one card (Release Checklist 6.2): exactly one runs it; the other is refused",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "desk-open-exact",
+  "src/carddesk.ts",
+  "(codeOf(e2) === \"unknown_card\" ? false : null)",
+  "false",
+  "cardOpen fails and the status read fails too, not with unknown_card: said as unclear, never as 'not opened' (6.1)",
+  "test/carddesk.test.ts"
  ]
 ]

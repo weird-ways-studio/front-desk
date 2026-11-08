@@ -112,6 +112,8 @@ test("POST /card refuses a card over the cap, an ineligible job, bad params, an 
   await refuses(desk.requestCard({ entries: [{ job: "cbox.key.enroll", params: { key: "x" }, reason: "r" }] }, "agent", T0, signedSrc), "job_not_on_cards");
   await refuses(desk.requestCard({ entries: [{ job: "cf.dns.list", params: { zone: "evil.com" }, reason: "r" }] }, "agent", T0, signedSrc), "bad_params");
   await refuses(desk.requestCard({ entries: two, extra: 1 }, "agent", T0, signedSrc), "bad_card");
+  await refuses(desk.requestCard({ entries: [{ ...two[0], reason: " " }] }, "agent", T0, signedSrc), "bad_reason");
+  await refuses(desk.requestCard({ entries: [{ ...two[0], reason: "x".repeat(201) }] }, "agent", T0, signedSrc), "bad_reason");
   await refuses(desk.requestCard({ entries: two }, "agent", T0, {}), "not_signed");
   assert.equal(fr.records.length, 0);
   assert.ok(!calls.includes("cardOpen"));
@@ -161,12 +163,39 @@ test("the tap: a replay, another card's challenge, a missing passkey secret, a c
   const ra = await TEST_KEY.assert(oa.challenge, site.rpID, site.origin);
   await refuses(desk.approveCard(b.card.id, { ...ra, prf: PRF } as never, T0), "wrong_card");
   await refuses(tap(desk, b.card.id, T0, TEST_KEY, null), "prf_missing");
-  await refuses(tap(desk, a.card.id, T0 + 10 * 60_000 + 1), "card_expired");
+  // A challenge fetched just before the card expires, tapped just after: refused at the tap itself.
+  const late = await desk.cardOptions(a.card.id, a.card.expires_at - 60_000);
+  const lr = await TEST_KEY.assert(late.challenge, site.rpID, site.origin);
+  await refuses(desk.approveCard(a.card.id, { ...lr, prf: PRF } as never, a.card.expires_at + 1), "card_expired");
   await store.put("cbox:rev", 5);
   await refuses(tap(desk, a.card.id), "cbox_key_changed");
   await store.put("cbox:rev", 0);
   await tap(desk, a.card.id);
   await refuses(tap(desk, a.card.id), "not_pending");
+});
+
+test("two taps at once on one card (Release Checklist 6.2): exactly one runs it; the other is refused", async () => {
+  const { desk, vb, fr } = await rig();
+  const { card, grants } = await desk.requestCard({ entries: [two[1]] }, "agent", T0, signedSrc);
+  const o1 = await desk.cardOptions(card.id, T0);
+  const o2 = await desk.cardOptions(card.id, T0);
+  const r1 = await TEST_KEY.assert(o1.challenge, site.rpID, site.origin);
+  const r2 = await TEST_KEY.assert(o2.challenge, site.rpID, site.origin);
+  const out = await Promise.allSettled([desk.approveCard(card.id, { ...r1, prf: PRF } as never, T0), desk.approveCard(card.id, { ...r2, prf: PRF } as never, T0)]);
+  assert.equal(out.filter((x) => x.status === "fulfilled").length, 1, JSON.stringify(out.map((x) => x.status === "rejected" ? String(x.reason) : "ok")));
+  const no = out.find((x) => x.status === "rejected") as PromiseRejectedResult;
+  assert.ok(no.reason instanceof DeskError && ["not_pending", "stale_counter"].includes(no.reason.code), String(no.reason));
+  assert.deepEqual(vb.calls, ["cf.zone.read"], "the read ran once");
+  assert.equal(fr.records.filter((x) => x.grant === grants[0].id && x.stage === "approval").length, 1);
+});
+
+test("an expired card's page says it expired, nothing ran, and what happens next -- with no tap or Stop offered", async () => {
+  const { store, vault } = await rig();
+  const desk = new CardDesk(store, site, { recorder: new FakeRecorder().send, vault: vault as never });
+  const { card } = await desk.requestCard({ entries: two }, "agent", T0, signedSrc);
+  const page = await (await route(new Request(`https://desk.example/approve/card/${card.id}`), store, { caller: "owner" }, card.expires_at + 1, vault as never)).text();
+  assert.match(page, /expired before it was approved, so nothing ran/);
+  assert.doesNotMatch(page, /id="go"|id="stop"/);
 });
 
 // ---- Stop at the first non-done ----
@@ -211,6 +240,17 @@ test("the vault refuses to open (off switch): this tap started nothing, the card
   assert.deepEqual(r.entries.map((e) => e.state), ["not_run", "not_run"]);
   for (const g of grants) assert.deepEqual(fr.stages(g.id), ["request", "verdict"]);
   for (const g of grants) assert.equal((await desk.grant(g.id)).status, "stopped");
+});
+
+test("cardOpen fails and the status read fails too, not with unknown_card: said as unclear, never as 'not opened' (6.1)", async () => {
+  const { desk, vault, calls } = await rig({ jobs: [] });
+  vault.cardStatus = async () => {
+    throw new Error("network connection lost");
+  };
+  const { card } = await desk.requestCard({ entries: two }, "agent", T0, signedSrc);
+  const r = await desk.approveCard(card.id, { ...(await TEST_KEY.assert((await desk.cardOptions(card.id, T0)).challenge, site.rpID, site.origin)), prf: PRF } as never, T0);
+  assert.match(r.stopped!, /^unclear whether opened; nothing started: cards_off$/);
+  assert.ok(!calls.includes("cardRun"));
 });
 
 test("the vault opened the card but its reply was lost: the desk reads the book and runs the card (U5 class 3)", async () => {
