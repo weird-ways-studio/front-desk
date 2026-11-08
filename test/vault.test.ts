@@ -326,9 +326,11 @@ test("short keys: a failed delete leaves them recorded; the nightly count lists 
   assert.ok(night.cleanup.every((k) => !k.expired && k.expires_on !== "never"), "expiry is Cloudflare's own");
   assert.ok(night.cleanup.every((k) => k.recorded), "the vault's own: it will delete them");
   assert.deepEqual(await vault.cfPreview(), []);
-  // The next approved Cloudflare tap sweeps them first.
+  // The next approved Cloudflare taps sweep them first, SWEEP_DELETES per tap (F9 cap, card 85818ab1).
   const next = await readJob(vault, "cf.zone.read", { zone: ZONE });
   assert.equal(next.ok, true, JSON.stringify(next));
+  assert.equal((await store.get<unknown[]>("helpers"))!.length, 2 - SWEEP_DELETES, "the rest waits for the next tap");
+  assert.equal((await readJob(vault, "cf.zone.read", { zone: ZONE })).ok, true);
   assert.deepEqual(await store.get("helpers"), []);
   const after = await vault.headcount();
   assert.ok(cfClean(after) && after.cleanup.length === 0, JSON.stringify(after));
@@ -861,13 +863,15 @@ test("F9: a cleanup backlog adds a fixed number of calls per tap (SWEEP_DELETES 
   fetches = 0;
   const r = (await v.runCardEntry("cf.dns.list", { zone: ZONE }, prf(7))) as ReadResult;
   assert.equal(r.ok, true);
-  // 13 as measured above + 2 handed-out deletes + 1 token-list page for the short-key sweep + 2 short-key deletes.
+  // 13 as measured above + SWEEP_DELETES handed-out deletes + 1 token-list page for the short-key sweep + SWEEP_DELETES
+  // short-key deletes = 16 at SWEEP_DELETES 1. Two cf.dns.list entries on one card: 15 desk + 2 x 16 = 47 < 50.
+  assert.equal(SWEEP_DELETES, 1, "F9-MAP-85818ab1.md's 47-call total for two DNS entries assumes 1");
   assert.equal(fetches, 13 + SWEEP_DELETES + 1 + SWEEP_DELETES);
   assert.equal((await store.get<any>("master")).issued.length, 5 - SWEEP_DELETES, "the rest stays recorded");
   assert.equal((await store.get<any[]>("helpers"))!.length, 5 - SWEEP_DELETES);
   assert.equal(r.leftover?.length, 5 - SWEEP_DELETES, "and is shown on this tap's result");
   // Safeguard working: later taps keep clearing it.
-  for (let i = 0; i < 2; i++) await v.runCardEntry("cf.dns.list", { zone: ZONE }, prf(7));
+  for (let i = 0; i < Math.ceil(5 / SWEEP_DELETES); i++) await v.runCardEntry("cf.dns.list", { zone: ZONE }, prf(7));
   assert.equal((await store.get<any>("master")).issued.length, 0);
   assert.deepEqual(await store.get<any[]>("helpers"), []);
 });

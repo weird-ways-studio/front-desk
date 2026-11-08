@@ -4,7 +4,7 @@
 // unmodified. Each safeguard is shown working, then refusing (instruction.control-must-refuse-unsafe-case).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { COLLECT_WINDOW_MS, DeskError, MemoryStore } from "../src/desk.ts";
+import { COLLECT_WINDOW_MS, DeskError, KEY_REV_WAIT_MS, MemoryStore } from "../src/desk.ts";
 import { CardDesk } from "../src/carddesk.ts";
 import { route } from "../src/routes.ts";
 import { cardView } from "../src/page.ts";
@@ -547,6 +547,38 @@ test("R4: no known clock (card still running, then the vault cannot be read): a 
   vault.cardStatus = real;
   release();
   await running;
+});
+
+test("N1 (Codex r2): answer stored while open, card closes unseen, vault unreadable: erased by the first-stored clock, not the deadline", async () => {
+  let release!: () => void;
+  const hang = new Promise<void>((r) => (release = r));
+  let n = 0;
+  const { desk, vb, vault } = await rig({ runEntry: async () => (++n === 2 ? await hang : undefined, { ok: true, data: { n } }) });
+  const { card, grants } = await desk.requestCard({ entries: [{ job: "cf.zone.read", params: ZONE, reason: "a" }, { job: "cf.dns.list", params: ZONE, reason: "b" }] }, "agent", T0, signedSrc);
+  const running = tap(desk, card.id);
+  await until(async () => (await stateOf(vb, card.id, 1)) === "dispatching");
+  await desk.collectCard(card.id, "agent", T0 + 1, signedSrc); // entry 1's answer stored at T0 + 1
+  assert.ok((await desk.grant(grants[0].id)).result !== undefined);
+  vault.cardStatus = async () => {
+    throw new Error("network connection lost"); // from here the desk never sees the close
+  };
+  release();
+  await running; // the vault closes the card; the desk's read of it fails
+  assert.equal((await desk.card(card.id)).closed_at, undefined, "checkpoint: close never seen");
+  const late = await desk.collectCard(card.id, "agent", T0 + 1 + COLLECT_WINDOW_MS + 1, signedSrc); // well before deadline + window
+  assert.equal(late.entries[0].answer, undefined);
+  assert.equal(late.entries[0].answer_erased, true);
+  assert.equal((await desk.grant(grants[0].id)).result, undefined, "the desk's copy is gone no later than it should be");
+});
+
+test("N3 (Codex r2): a vault that never answers holds Ben's key removal for at most KEY_REV_WAIT_MS", { timeout: 20_000 }, async () => {
+  const { desk, store, vault } = await rig();
+  vault.setKeyRev = () => new Promise(() => {});
+  await store.put("cbox:key", { spki: "x", fingerprint: "aaaa-bbbb-cccc-dddd", enrolled_at: T0, grant_id: "g0" });
+  const t = Date.now();
+  assert.equal(await desk.removeCboxKey(T0), "aaaa-bbbb-cccc-dddd");
+  assert.ok(Date.now() - t < KEY_REV_WAIT_MS + 2_000);
+  assert.equal(await store.get("cbox:key"), null);
 });
 
 test("R5: two POST /card at once for one requester: exactly one card is created", async () => {

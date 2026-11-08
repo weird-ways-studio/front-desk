@@ -18,10 +18,11 @@ export const HELPER_PREFIX = "front-desk probe ";
 // result inside one storage value; a cut list says so (`truncated`).
 export const READ_JOBS = ["cf.zone.read", "cf.dns.list", "cf.audit.read"] as const;
 export const DNS_MAX = 500;
-// Deletes each cleanup sweep (sweepIssued, sweepHelpers) sends per tap: a backlog never makes one tap's
+// Deletes each cleanup sweep (sweepIssued, sweepHelpers) sends per card entry or tap (1 keeps two cf.dns.list
+// entries under Free's 50 subrequests even with a backlog: F9-MAP-85818ab1.md): a backlog never makes one tap's
 // Cloudflare calls unbounded (card 85818ab1 F9, Codex r1 R7). What is left stays recorded, shows in the tap's
 // result and the nightly count, and is tried again at the next tap.
-export const SWEEP_DELETES = 2;
+export const SWEEP_DELETES = 1;
 export const AUDIT_MAX = 300;
 export const AUDIT_MAX_DAYS = 7;
 // A read's answer is stored in the grant until the agent collects it. Durable Object storage holds at most

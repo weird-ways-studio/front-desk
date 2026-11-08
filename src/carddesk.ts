@@ -37,6 +37,7 @@ export interface DeskCard {
   not_opened?: true; // the desk knows the vault holds no book for it: nothing could run
   closed_at?: number; // the vault's close time, kept by the desk the first time it sees it (R4)
   confirmed?: EntryState[]; // each entry's last settled state read from the vault (R3)
+  first_stored_at?: number; // when the desk first stored an answer: the card cannot have closed before it (N1)
 }
 
 export interface CardEntryReport {
@@ -336,7 +337,8 @@ export class CardDesk extends Desk {
    * record each missing result with bytes frozen in the grant before the first send. Answers are stored and returned
    * only while the clock is known (R4): the vault says the card is still open, or the close time -- the desk's own
    * copy, kept the first time it is seen -- is under COLLECT_WINDOW_MS ago. Copies are erased once that window is
-   * surely over (close time unseen: counted from the card's deadline, by which the vault closes it).
+   * over; with the close time never seen and the vault unreadable, it is counted from the first stored answer, which
+   * is never later than the close, so an answer is erased no later than it should be (Codex r2 N1).
    */
   async finish(id: string, now: number): Promise<CardReport> {
     let c = await this.card(id);
@@ -351,7 +353,8 @@ export class CardDesk extends Desk {
       }
     }
     const open = c.closed_at !== undefined ? now <= c.closed_at + COLLECT_WINDOW_MS : v !== undefined;
-    const expired = now > (c.closed_at ?? c.manifest.deadline) + COLLECT_WINDOW_MS;
+    const since = c.closed_at ?? (v ? undefined : c.first_stored_at);
+    const expired = since !== undefined && now > since + COLLECT_WINDOW_MS;
     for (const [i, gid] of c.grants.entries()) {
       const e = v?.entries[i];
       if (v && e && e.grant === gid) {
@@ -360,6 +363,10 @@ export class CardDesk extends Desk {
         if (open && held && terminal(e.state) && g.result === undefined && !g.answer_erased) {
           g = { ...(await this.grant(gid)), result: withoutSecret(v.answers[i]) };
           await this.store.put(`grant:${gid}`, g);
+          if (c.first_stored_at === undefined) {
+            c = { ...(await this.card(id)), first_stored_at: now };
+            await this.store.put(`card:${id}`, c);
+          }
         }
         // Only after the desk's own write has completed may the vault drop its copy (V2).
         if (held && g.result !== undefined) await Promise.resolve().then(() => this.cards().cardAck(id, i)).catch(() => false);

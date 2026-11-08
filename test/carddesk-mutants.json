@@ -310,5 +310,13 @@
   "",
   "F9: a cleanup backlog adds a fixed number of calls per tap (SWEEP_DELETES per sweep); the rest waits for later taps",
   "test/vault.test.ts"
+ ],
+ [
+  "desk-first-stored",
+  "src/carddesk.ts",
+  "const since = c.closed_at ?? (v ? undefined : c.first_stored_at);",
+  "const since = c.closed_at ?? (v ? undefined : c.manifest.deadline);",
+  "N1 (Codex r2): answer stored while open, card closes unseen, vault unreadable: erased by the first-stored clock, not the deadline",
+  "test/carddesk.test.ts"
  ]
 ]

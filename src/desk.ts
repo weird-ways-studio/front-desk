@@ -19,6 +19,8 @@ export type VaultStage = "before" | "used" | "old" | "unknown";
 import { RecorderError, type Receipt, type Recorder, type Stage } from "./recorder.ts";
 
 export const APPROVE_WINDOW_MS = 10 * 60_000; // ask -> approve
+/** How long a c-box key change waits for the vault to take the new generation before answering Ben anyway. */
+export const KEY_REV_WAIT_MS = 5_000;
 export const COLLECT_WINDOW_MS = 5 * 60_000; // approve -> collect
 export const MAX_PENDING = 3; // grants one requester may have waiting for Ben at once
 export const CHALLENGE_TTL_MS = 5 * 60_000;
@@ -842,14 +844,16 @@ export class Desk {
 
   /**
    * Moves the vault's own copy of the key generation (vault setKeyRev), so an open card or run the vault holds is
-   * refused at its next step even if the desk did not check (card 85818ab1 R2). Best effort: a removal never waits
-   * on the vault -- every cardRun also carries the desk's live generation, which the vault compares to the card's.
+   * refused at its next step even if the desk did not check (card 85818ab1 R2). Best effort: the key is already removed
+   * before this runs, and it waits at most KEY_REV_WAIT_MS for the vault -- every cardRun also carries the desk's live generation, which the vault compares to the card's.
    */
   protected async tellVaultKeyRev(now: number): Promise<void> {
     if (!this.hooks.vault?.setKeyRev) return;
     const rev = await keyRev(this.store);
     try {
-      await this.hooks.vault.setKeyRev(rev);
+      // Bounded: a hanging vault never holds Ben's removal answer for long (Codex r2 N3).
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([this.hooks.vault.setKeyRev(rev), new Promise((_, no) => (timer = setTimeout(() => no(new Error("timeout")), KEY_REV_WAIT_MS)))]).finally(() => clearTimeout(timer));
     } catch {
       await this.log({ event: "vault_key_rev_unsent", detail: `the vault was not told c-box key generation ${rev}; cards still check it at every step` }, now);
     }
