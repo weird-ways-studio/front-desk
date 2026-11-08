@@ -8,6 +8,7 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { emailOf, handleSetup } from "./setup.ts";
 import { VaultLogic } from "./vault.ts";
+import { APPROVAL_API_VERSION } from "./approval.ts";
 import { RUN_API_VERSION, RunBook, type OpRequest } from "./runs.ts";
 
 interface Env {
@@ -26,8 +27,9 @@ export class VaultBox extends DurableObject<Env> {
   page(request: Request, email: string) {
     return handleSetup(request, this.logic(), email);
   }
-  run(job: string, params: Record<string, string>, prf: string) {
-    return this.logic().run(job, params, prf);
+  // Old-shape calls keep their extra arguments, so the vault can refuse them as wrong_shape (approval.ts).
+  run(req: unknown, ...rest: unknown[]) {
+    return this.logic().run(req, ...rest);
   }
   headcount() {
     return this.logic().headcount();
@@ -68,8 +70,12 @@ export default class Vault extends WorkerEntrypoint<Env> {
   status() {
     return this.box().status();
   }
-  run(job: string, params: Record<string, string>, prf: string) {
-    return this.box().run(job, params, prf);
+  run(req: unknown, ...rest: unknown[]) {
+    return this.box().run(req, ...rest);
+  }
+  // The desk asks this before run(); a desk and vault on different versions refuse as wrong_shape (card bb86abf0).
+  approvalApi() {
+    return { version: APPROVAL_API_VERSION };
   }
   // The nightly count, called by the front desk's cron (../../src/index.ts scheduled). No tap; reads only.
   headcount() {

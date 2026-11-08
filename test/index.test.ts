@@ -2,6 +2,7 @@ import { generateKeyPairSync } from "node:crypto";
 // @ts-ignore -- plain JS client, tested here as the c-box runs it
 import { signRequest } from "../scripts/agent.mjs";
 import { test } from "node:test";
+import { APPROVAL_API_VERSION, type SignedRun } from "../vault/src/approval.ts";
 import assert from "node:assert/strict";
 import { callerOf, route, VERSION, type Caller } from "../src/routes.ts";
 import { Desk, MemoryStore, approvalPush, type Push } from "../src/desk.ts";
@@ -246,9 +247,15 @@ function fakeVault(stored = false) {
     async status() {
       return stored ? { stored: true, pending: false, token_id: "t1" } : { stored: false, pending: false };
     },
-    async run(job: string, params: Record<string, string>, prf: string) {
-      calls.push({ op: "run", args: [job, params, prf] });
+    // The desk now sends {grant, assertion, prf} (card bb86abf0); recorded as [job, params, prf], plus the whole call.
+    signed: [] as SignedRun[],
+    async run(req: SignedRun) {
+      this.signed.push(req);
+      calls.push({ op: "run", args: [req.grant.job, req.grant.params, req.prf] });
       return { ok: true, zone: "example.com", after: 0 } as any;
+    },
+    async approvalApi() {
+      return { version: APPROVAL_API_VERSION };
     },
     async headcount() {
       return { ok: true, tokens: 0, unexpected: [], stretched: [], missing: [], cleanup: [], github: { ok: true, changes: [] } };
@@ -338,7 +345,7 @@ test("vault job: a collect while the vault is still working is refused, and the 
   const id = await askProbe(store, vault);
   let during: Response | undefined;
   const run = vault.run.bind(vault);
-  vault.run = async (...args) => {
+  vault.run = async (...args: Parameters<typeof run>) => {
     during = await callV(store, vault, `/collect/${id}`, { method: "POST" });
     return run(...args);
   };

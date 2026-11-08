@@ -41,6 +41,20 @@ export class SoftKey {
     return new Uint8Array([...(await sha256(enc.encode(rpID))), flags, ...count, ...(attested ?? [])]);
   }
 
+  /** The public key as COSE bytes, as a passkey registration carries it (and the vault's pin holds). */
+  async cose(): Promise<Uint8Array> {
+    const jwk = (await crypto.subtle.exportKey("jwk", this.pair.publicKey)) as JsonWebKey;
+    return isoCBOR.encode(
+      new Map<number, number | Uint8Array>([
+        [1, 2],
+        [3, -7],
+        [-1, 1],
+        [-2, fromB64url(jwk.x!)],
+        [-3, fromB64url(jwk.y!)],
+      ]),
+    );
+  }
+
   async register(options: { challenge: string; rp: { id?: string } }, origin: string) {
     const jwk = (await crypto.subtle.exportKey("jwk", this.pair.publicKey)) as JsonWebKey;
     const cose = isoCBOR.encode(

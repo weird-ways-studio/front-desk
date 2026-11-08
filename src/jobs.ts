@@ -55,10 +55,30 @@ function withLeftover(result: unknown, done: (r: unknown) => string): string {
   return done(result) + leftoverNote(result);
 }
 
+// Why the vault refused before recording the grant as used, in plain words (card bb86abf0 R6).
+const REFUSAL_WORDS: Record<string, string> = {
+  wrong_shape: "the front desk and the vault were on different versions, probably for a moment during an update",
+  no_pin: "no passkey is pinned in the vault",
+  bad_grant: "the request's details were not in the form the vault accepts",
+  bad_assertion: "your Face ID answer did not check out for this exact request",
+  expired: "the approval was too old",
+};
+
+// A vault call that threw (vault_stage set by Desk.approve): three messages, by where the vault stopped.
+function stageWords(r: Failed): string | null {
+  const why = typeof r.error === "string" ? r.error : "unknown";
+  if (r.vault_stage === "before" && Object.hasOwn(REFUSAL_WORDS, why)) return `Nothing ran. The vault refused this approval: ${REFUSAL_WORDS[why]}. Ask for it again. [${why}]`;
+  if (r.vault_stage === "used") return `This approval was already used once, so it may have run. Check its result before asking again. [${why}]`;
+  if (r.vault_stage !== undefined) return `It is not known whether this ran. Check its result before asking again. [${why}]`;
+  return null;
+}
+
 function notDone(result: unknown, left: (r: Failed) => string): string | null {
   const r = result as Failed | null | undefined;
   if (r === undefined || r === null) return "Not done: no answer came back from the vault, so it is unknown what ran. Do not tap again; tell the agent: [no result]";
   if (r.ok === true) return null;
+  const staged = stageWords(r);
+  if (staged !== null) return staged;
   const why = typeof r.error === "string" ? r.error : "a check did not pass";
   const deleteFailed = typeof r.error === "string" && /delete failed/.test(r.error) ? " A key the vault made could not be deleted: the nightly check lists it until it is gone." : "";
   return `Not done. ${left(r)}${deleteFailed} Tell the agent the words in brackets: [${why}]`;

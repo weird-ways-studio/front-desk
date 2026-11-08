@@ -2,6 +2,7 @@
 // read-only headcount App, and the nightly GitHub count. A fake GitHub checks every App sign-in's
 // signature with a real RSA key, so the vault's own key handling is what is under test.
 import { test } from "node:test";
+import { signedRun, testVault } from "./vaultsign.ts";
 import assert from "node:assert/strict";
 import { createVerify, generateKeyPairSync, type KeyObject } from "node:crypto";
 import { MemoryStore } from "../src/desk.ts";
@@ -116,7 +117,7 @@ function setupVault(fail?: Fail) {
   const gh = fakeGitHub(fail);
   const store = new MemoryStore();
   const clock = { now: NOW };
-  return { gh, store, clock, vault: new VaultLogic(store, gh.fetchFn, () => clock.now) };
+  return { gh, store, clock, vault: testVault(store, gh.fetchFn, () => clock.now) };
 }
 
 // Ben's taps on the two GitHub pages, for one App.
@@ -136,7 +137,7 @@ const dump = (store: MemoryStore) => JSON.stringify([...(store as unknown as { d
 // Ben's tap on the job, with the state the front desk showed him (ghPreview at /request).
 const baseline = async (vault: VaultLogic, fill = 7, seen?: { snapshot: string; base: string }) => {
   const shown = seen ?? (await vault.ghPreview());
-  return vault.run("gh.app.baseline", { snapshot: shown.snapshot, base: shown.base }, prf(fill)) as Promise<GhBaselineResult>;
+  return signedRun(vault, "gh.app.baseline", { snapshot: shown.snapshot, base: shown.base }, prf(fill)) as Promise<GhBaselineResult>;
 };
 
 test("App key: GitHub's PKCS#1 key is wrapped for WebCrypto and signs App sign-ins GitHub can check", async () => {

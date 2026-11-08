@@ -26,13 +26,14 @@ function fakeVault() {
   const runs: string[] = [];
   const vault = {
     status: async () => ({ stored: true, pending: false }),
-    run: async (job: string) => {
-      runs.push(job);
+    run: async (req: { grant: { job: string } }) => {
+      runs.push(req.grant.job);
       return { ok: true, key: { id: "k1", value: MINTED } } as any;
     },
     headcount: async () => ({}) as any,
     ghPreview: async () => ({ changes: [], snapshot: "", base: "" }),
     cfPreview: async () => [],
+    approvalApi: async () => ({ version: 1 }),
   };
   return { vault, runs };
 }
