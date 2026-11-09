@@ -346,7 +346,8 @@ test("headcount alarm: all-clear pings the check; a fail pings /fail AND pushes 
   const hc = "https://hc-ping.com/0f2e8a4c-1b2d-4e5f-8a9b-0c1d2e3f4a5b";
   const po = { user: "u".repeat(30), token: "t".repeat(30) };
   const sent: { url: string; body: unknown }[] = [];
-  const fetchFn = (async (url: string, init?: RequestInit) => (sent.push({ url, body: init?.body }), new Response("OK"))) as typeof fetch;
+  const fetchFn = (async (url: string, init?: RequestInit) => (sent.push({ url, body: init?.body }),
+    url.includes("pushover") ? Response.json({ status: 1, request: "req-1" }) : new Response("OK"))) as typeof fetch;
   await headcountAlarm(hc, po, fetchFn)!(true, "ok");
   await headcountAlarm(hc, po, fetchFn)!(false, "MISMATCH planted1");
   assert.deepEqual(sent.map((x) => x.url), [hc, `${hc}/fail`, "https://api.pushover.net/1/messages.json"]);
@@ -365,7 +366,8 @@ test("headcount alarm: the detail goes to Pushover, the only phone route; a refu
   const po = { user: "u".repeat(30), token: "t".repeat(30) };
   const sent: { url: string; body: string }[] = [];
   const answer = (pushover: number) => (async (url: string, init?: RequestInit) => (
-    sent.push({ url, body: String(init?.body) }), new Response("", { status: url.includes("pushover") ? pushover : 200 })
+    sent.push({ url, body: String(init?.body) }),
+    url.includes("pushover") ? Response.json({ status: pushover === 200 ? 1 : 0 }, { status: pushover }) : new Response("", { status: 200 })
   )) as unknown as typeof fetch;
   await headcountAlarm(hc, po, answer(200))!(false, "Cloudflare: a key nobody asked you for");
   assert.deepEqual(sent.map((x) => x.url), [`${hc}/fail`, "https://api.pushover.net/1/messages.json"]);
@@ -379,6 +381,11 @@ test("headcount alarm: the detail goes to Pushover, the only phone route; a refu
   sent.length = 0;
   await headcountAlarm(hc, po, answer(200))!(false, "y".repeat(5000));
   assert.equal(new URLSearchParams(sent[1].body).get("message")!.length, 1024, "fits Pushover's limit");
+  // 2xx alone is not acceptance: Pushover's success is status 1 in the JSON body.
+  for (const reply of [() => Response.json({ status: 0 }), () => new Response(""), () => new Response("OK"), () => new Response("not json {")]) {
+    const f = (async (url: string) => (url.includes("pushover") ? reply() : new Response("OK"))) as unknown as typeof fetch;
+    await assert.rejects(headcountAlarm(hc, po, f)!(false, "x"), /^Error: pushover rejected$/);
+  }
 });
 
 test("headcount setup job: takes no parameters and says it is a standing key", () => {

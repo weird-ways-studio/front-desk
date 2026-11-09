@@ -244,8 +244,8 @@ export interface PushoverKeys {
 /**
  * One push per request (card a830d543), through Pushover (card W2 6d0acbc8 retired the old fallback).
  * It carries what is asked and the approve link, never a secret: the link still needs Ben's Access login
- * and his passkey. MAX_PENDING bounds how many can arrive. Throws "pushover answered NNN" or
- * "pushover unreachable" when it did not take it.
+ * and his passkey. MAX_PENDING bounds how many can arrive. Throws "pushover answered NNN",
+ * "pushover rejected" (2xx without status 1) or "pushover unreachable" when it did not take it.
  */
 export function approvalPush(pushover: PushoverKeys = {}, fetchFn: typeof fetch = fetch): Push | undefined {
   const send = phoneSender(pushover, fetchFn);
@@ -272,9 +272,12 @@ function phoneSender(pushover: PushoverKeys, fetchFn: typeof fetch) {
     // Pushover takes at most 1024 characters per message.
     const body = new URLSearchParams({ token: po.token, user: po.user, title, message: text.slice(0, 1024), ...(url ? { url, url_title: "Open to approve" } : {}) });
     // A thrown fetch error is reduced to fixed words: its message could carry a key.
-    const status = await fetchFn("https://api.pushover.net/1/messages.json", { method: "POST", body }).then((r) => r.status, () => 0);
-    if (status >= 200 && status < 300) return;
-    throw new Error(status ? `pushover answered ${status}` : "pushover unreachable");
+    const res = await fetchFn("https://api.pushover.net/1/messages.json", { method: "POST", body }).catch(() => undefined);
+    if (!res) throw new Error("pushover unreachable");
+    if (res.status < 200 || res.status >= 300) throw new Error(`pushover answered ${res.status}`);
+    // Pushover's success is HTTP 200 AND a JSON body with status 1 (https://pushover.net/api#response).
+    const accepted = await res.json().then((j: unknown) => (j as { status?: unknown } | null)?.status === 1, () => false);
+    if (!accepted) throw new Error("pushover rejected");
   };
 }
 

@@ -643,14 +643,16 @@ test("a refused request sends no push", async () => {
 test("approvalPush sends through Pushover only, with the link as the tap target, and names a refusal in fixed words", async () => {
   const U = "u".repeat(30), T = "a".repeat(30);
   const calls: string[] = [];
-  const answer = (status: number | "throw") => (async (url: string, init: RequestInit) => {
+  const answer = (status: number | "throw" | "rejected" | "empty") => (async (url: string, init: RequestInit) => {
     const host = new URL(url).hostname;
     calls.push(host);
     const form = init.body as URLSearchParams;
     assert.deepEqual([form.get("token"), form.get("user"), form.get("url"), form.get("message"), form.get("title")],
       [T, U, `${base}/approve/abc`, "Echo", "Front desk: approve?"]);
     if (status === "throw") throw new Error(`connect failed ${url} ${T}`);
-    return new Response("", { status });
+    if (status === "rejected") return Response.json({ status: 0, errors: ["user key is invalid"] });
+    if (status === "empty") return new Response("");
+    return Response.json({ status: status === 200 ? 1 : 0, request: "req-1" }, { status });
   }) as unknown as typeof fetch;
   await approvalPush({ user: U, token: T }, answer(200))!("Echo", `${base}/approve/abc`);
   assert.deepEqual(calls, ["api.pushover.net"], "one send, to Pushover");
@@ -659,6 +661,9 @@ test("approvalPush sends through Pushover only, with the link as the tap target,
   assert.deepEqual(calls, ["api.pushover.net"], "no fallback route is tried");
   await assert.rejects(approvalPush({ user: U, token: T }, answer("throw"))!("Echo", `${base}/approve/abc`),
     (e: Error) => e.message === "pushover unreachable", "a thrown error never carries the URL or key");
+  for (const reply of ["rejected", "empty"] as const)
+    await assert.rejects(approvalPush({ user: U, token: T }, answer(reply))!("Echo", `${base}/approve/abc`), /^Error: pushover rejected$/,
+      "a 2xx without status 1 is not acceptance, and the error names no detail from the body");
   for (const bad of [{}, { user: U }, { user: "short", token: T }, { user: U, token: "has spaces in it 1234567890abcd" }])
     assert.equal(approvalPush(bad, answer(200)), undefined, "missing or malformed keys mean no phone push");
 });
@@ -672,6 +677,7 @@ test("a request's push_error passes the Pushover refusal through, and nothing th
   };
   assert.equal(await send("pushover answered 429"), "pushover answered 429");
   assert.equal(await send("pushover unreachable"), "pushover unreachable");
+  assert.equal(await send("pushover rejected"), "pushover rejected");
   assert.equal(await send("pushover answered 429; other answered 429"), "push failed");
 });
 

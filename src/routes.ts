@@ -70,7 +70,7 @@ async function body<T>(request: Request, desk: CardDesk, what: string, now: numb
 
 /** A push failure as fixed words only: a thrown fetch error could carry a key, which is a secret. */
 function pushError(e: unknown): string {
-  const m = e instanceof Error ? /^pushover (?:answered \d{3}|unreachable)$/.exec(e.message) : null;
+  const m = e instanceof Error ? /^pushover (?:answered \d{3}|rejected|unreachable)$/.exec(e.message) : null;
   return m ? m[0] : "push failed";
 }
 
