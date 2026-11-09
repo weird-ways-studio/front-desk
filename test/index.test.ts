@@ -614,20 +614,20 @@ test("a request sends one push with its approve link; a failed push never fails 
   assert.equal(res.status, 201);
   assert.equal(out.pushed, true);
   assert.deepEqual(sent, [{ what: 'Test only: the front desk echoes the word "hi". It touches nothing.', url: `${base}/approve/${out.id}` }]);
-  const broken: Push = async () => { throw new Error("ntfy down"); };
+  const broken: Push = async () => { throw new Error("something broke"); };
   const res2 = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, broken, recorder);
   assert.equal(res2.status, 201);
   const out2 = (await res2.json()) as { pushed: boolean; push_error?: string };
   assert.equal(out2.pushed, false, "the agent learns to send the link itself");
   assert.equal(out2.push_error, "push failed", "and why, in fixed words only");
-  const leaky: Push = async () => { throw new Error("connect failed: https://ntfy.sh/secret-topic-name-here"); };
+  const leaky: Push = async () => { throw new Error("connect failed: token=secret-key-material-here"); };
   const res4 = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, leaky, recorder);
-  assert.ok(!(await res4.text()).includes("secret-topic"), "a thrown error never echoes the topic");
-  const refused: Push = async () => { throw new Error("ntfy answered 429"); };
+  assert.ok(!(await res4.text()).includes("secret-key"), "a thrown error never echoes a key");
+  const refused: Push = async () => { throw new Error("pushover answered 429"); };
   const res5 = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, refused, recorder);
-  assert.equal(((await res5.json()) as { push_error?: string }).push_error, "ntfy answered 429");
+  assert.equal(((await res5.json()) as { push_error?: string }).push_error, "pushover answered 429");
   const out3 = (await (await call(new MemoryStore(), "/request", ask)).json()) as { pushed: boolean; push_error?: string };
-  assert.deepEqual([out3.pushed, out3.push_error], [false, "no ntfy topic set"]);
+  assert.deepEqual([out3.pushed, out3.push_error], [false, "no phone push set"]);
   assert.equal(out.push_error, undefined, "no error field when the push went");
 });
 
@@ -641,51 +641,45 @@ test("a refused request sends no push", async () => {
   assert.equal(pushes, 0);
 });
 
-test("approvalPush posts to a real ntfy topic only, with the link as the tap target and no secret", async () => {
-  const sent: { url: string; body: string; headers: Record<string, string> }[] = [];
-  const fetchFn = (async (url: string, init: RequestInit) => {
-    sent.push({ url, body: String(init.body), headers: init.headers as Record<string, string> });
-    return new Response("", { status: 200 });
-  }) as unknown as typeof fetch;
-  const topic = "https://ntfy.sh/topic-name-long-enough";
-  await approvalPush(topic, {}, fetchFn)!("Echo the word \"hi\"", `${base}/approve/abc`);
-  assert.deepEqual(sent, [{ url: topic, body: 'Echo the word "hi"', headers: { Title: "Front desk: approve?", Click: `${base}/approve/abc`, Priority: "high" } }]);
-  for (const bad of [undefined, "", "http://ntfy.sh/topic-name-long-enough", "https://evil.example/topic-name-long-enough", "https://ntfy.sh/short"])
-    assert.equal(approvalPush(bad, {}, fetchFn), undefined);
-  const down = (async () => new Response("", { status: 502 })) as unknown as typeof fetch;
-  await assert.rejects(approvalPush(topic, {}, down)!("x", "y"), /^Error: ntfy answered 502$/);
-});
-
-test("approvalPush tries Pushover first, falls back to ntfy, and names each refusal in fixed words", async () => {
-  const U = "u".repeat(30), T = "a".repeat(30), topic = "https://ntfy.sh/topic-name-long-enough";
+test("approvalPush sends through Pushover only, with the link as the tap target, and names a refusal in fixed words", async () => {
+  const U = "u".repeat(30), T = "a".repeat(30);
   const calls: string[] = [];
-  const answer = (status: Record<string, number | "throw">) => (async (url: string, init: RequestInit) => {
+  const answer = (status: number | "throw" | "rejected" | "empty") => (async (url: string, init: RequestInit) => {
     const host = new URL(url).hostname;
     calls.push(host);
-    if (host === "api.pushover.net") {
-      const form = init.body as URLSearchParams;
-      assert.deepEqual([form.get("token"), form.get("user"), form.get("url"), form.get("message")], [T, U, `${base}/approve/abc`, "Echo"]);
-    }
-    if (status[host] === "throw") throw new Error(`connect failed ${url} ${T}`);
-    return new Response("", { status: (status[host] as number) ?? 200 });
+    const form = init.body as URLSearchParams;
+    assert.deepEqual([form.get("token"), form.get("user"), form.get("url"), form.get("message"), form.get("title")],
+      [T, U, `${base}/approve/abc`, "Echo", "Front desk: approve?"]);
+    if (status === "throw") throw new Error(`connect failed ${url} ${T}`);
+    if (status === "rejected") return Response.json({ status: 0, errors: ["user key is invalid"] });
+    if (status === "empty") return new Response("");
+    return Response.json({ status: status === 200 ? 1 : 0, request: "req-1" }, { status });
   }) as unknown as typeof fetch;
-  await approvalPush(topic, { user: U, token: T }, answer({}))!("Echo", `${base}/approve/abc`);
-  assert.deepEqual(calls, ["api.pushover.net"], "Pushover took it: ntfy is not tried");
+  await approvalPush({ user: U, token: T }, answer(200))!("Echo", `${base}/approve/abc`);
+  assert.deepEqual(calls, ["api.pushover.net"], "one send, to Pushover");
   calls.length = 0;
-  await approvalPush(topic, { user: U, token: T }, answer({ "api.pushover.net": 500 }))!("Echo", `${base}/approve/abc`);
-  assert.deepEqual(calls, ["api.pushover.net", "ntfy.sh"], "Pushover refused: ntfy is tried");
-  await assert.rejects(approvalPush(topic, { user: U, token: T }, answer({ "api.pushover.net": 429, "ntfy.sh": 429 }))!("Echo", `${base}/approve/abc`),
-    /^Error: pushover answered 429; ntfy answered 429$/);
-  await assert.rejects(approvalPush(undefined, { user: U, token: T }, answer({ "api.pushover.net": "throw" }))!("Echo", `${base}/approve/abc`),
+  await assert.rejects(approvalPush({ user: U, token: T }, answer(429))!("Echo", `${base}/approve/abc`), /^Error: pushover answered 429$/);
+  assert.deepEqual(calls, ["api.pushover.net"], "no fallback route is tried");
+  await assert.rejects(approvalPush({ user: U, token: T }, answer("throw"))!("Echo", `${base}/approve/abc`),
     (e: Error) => e.message === "pushover unreachable", "a thrown error never carries the URL or key");
-  for (const bad of [{ user: U }, { user: "short", token: T }, { user: U, token: "has spaces in it 1234567890abcd" }])
-    assert.equal(approvalPush(undefined, bad, answer({})), undefined, "malformed keys are ignored");
+  for (const reply of ["rejected", "empty"] as const)
+    await assert.rejects(approvalPush({ user: U, token: T }, answer(reply))!("Echo", `${base}/approve/abc`), /^Error: pushover rejected$/,
+      "a 2xx without status 1 is not acceptance, and the error names no detail from the body");
+  for (const bad of [{}, { user: U }, { user: "short", token: T }, { user: U, token: "has spaces in it 1234567890abcd" }])
+    assert.equal(approvalPush(bad, answer(200)), undefined, "missing or malformed keys mean no phone push");
 });
 
-test("a request's push_error passes both services' refusals through", async () => {
-  const both: Push = async () => { throw new Error("pushover answered 429; ntfy answered 429"); };
-  const res = await route(new Request(base + "/request", { method: "POST", body: JSON.stringify({ job: "test.echo", params: { word: "hi" }, reason: "x" }) }), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, both, recorder);
-  assert.equal(((await res.json()) as { push_error?: string }).push_error, "pushover answered 429; ntfy answered 429");
+test("a request's push_error passes the Pushover refusal through, and nothing that is not fixed words", async () => {
+  const ask = { method: "POST", body: JSON.stringify({ job: "test.echo", params: { word: "hi" }, reason: "x" }) };
+  const send = async (msg: string) => {
+    const p: Push = async () => { throw new Error(msg); };
+    const res = await route(new Request(base + "/request", ask), new MemoryStore(), { caller: "agent", requester: AGENT }, Date.now(), undefined, p, recorder);
+    return ((await res.json()) as { push_error?: string }).push_error;
+  };
+  assert.equal(await send("pushover answered 429"), "pushover answered 429");
+  assert.equal(await send("pushover unreachable"), "pushover unreachable");
+  assert.equal(await send("pushover rejected"), "pushover rejected");
+  assert.equal(await send("pushover answered 429; other answered 429"), "push failed");
 });
 
 // C6a-1 (Codex r1 #4): the GitHub list job shows Ben exactly what his tap accepts.

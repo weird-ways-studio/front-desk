@@ -24,9 +24,8 @@ interface Env extends AgentConfig {
   // The nightly headcount's healthchecks.io ping URL, set by Ben in the dashboard as a secret. The
   // c-box never holds it, so the c-box cannot send the all-clear. Unset = every night logs a failed alarm.
   HC_HEADCOUNT_URL?: string;
-  // ntfy topic URL (dashboard secret): the mismatch detail push, and one push per request (approvalPush).
-  NTFY_TOPIC_URL?: string;
-  // Pushover user key and app token (dashboard secrets, card a830d543): the request push tries Pushover first.
+  // Pushover user key and app token (dashboard secrets, card a830d543): every push to Ben's phone -- one per
+  // request (approvalPush), the headcount detail, and phone alerts. The only phone route (card W2 6d0acbc8).
   PUSHOVER_USER?: string;
   PUSHOVER_TOKEN?: string;
   // The Observatory's recorder (card 97a2e83d): its address is a dashboard variable (a live hostname,
@@ -43,11 +42,11 @@ export class FrontDesk extends DurableObject<Env> {
   async handle(request: Request, who: Who): Promise<Response> {
     const recorder = recorderFrom(this.env.RECORDER_URL, this.env.RECORDER_CLIENT_ID, this.env.RECORDER_CLIENT_SECRET);
     const phone = { user: this.env.PUSHOVER_USER, token: this.env.PUSHOVER_TOKEN };
-    return route(request, this.ctx.storage, who, Date.now(), this.env.VAULT, approvalPush(this.env.NTFY_TOPIC_URL, phone), recorder, phoneAlert(this.env.NTFY_TOPIC_URL, phone));
+    return route(request, this.ctx.storage, who, Date.now(), this.env.VAULT, approvalPush(phone), recorder, phoneAlert(phone));
   }
   // The nightly count runs in here too, so its log rows join the one log.
   async headcount(): Promise<void> {
-    await new Desk(this.ctx.storage, { origin: "", rpID: "" }, { vault: this.env.VAULT }).headcount(headcountAlarm(this.env.HC_HEADCOUNT_URL, this.env.NTFY_TOPIC_URL, { user: this.env.PUSHOVER_USER, token: this.env.PUSHOVER_TOKEN }), Date.now());
+    await new Desk(this.ctx.storage, { origin: "", rpID: "" }, { vault: this.env.VAULT }).headcount(headcountAlarm(this.env.HC_HEADCOUNT_URL, { user: this.env.PUSHOVER_USER, token: this.env.PUSHOVER_TOKEN }), Date.now());
   }
 }
 

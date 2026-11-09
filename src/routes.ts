@@ -68,10 +68,9 @@ async function body<T>(request: Request, desk: CardDesk, what: string, now: numb
   }
 }
 
-/** A push failure as fixed words only: a thrown fetch error could carry the topic URL, which is a secret. */
+/** A push failure as fixed words only: a thrown fetch error could carry a key, which is a secret. */
 function pushError(e: unknown): string {
-  const part = "(?:pushover|ntfy) (?:answered \\d{3}|unreachable)";
-  const m = e instanceof Error ? new RegExp(`^${part}(?:; ${part})?$`).exec(e.message) : null;
+  const m = e instanceof Error ? /^pushover (?:answered \d{3}|rejected|unreachable)$/.exec(e.message) : null;
   return m ? m[0] : "push failed";
 }
 
@@ -101,7 +100,7 @@ export async function route(request: Request, store: Store, who: Who, now = Date
       const g = await desk.request(input, requester, now, source);
       const approveUrl = `${url.origin}/approve/${g.id}`;
       // A failed push never fails the request: the agent sees pushed=false, and why, and sends Ben the link itself.
-      const why = push ? await push(JOBS[g.job].explain(g.params).does, approveUrl).then(() => "", (e: Error) => pushError(e)) : "no ntfy topic set";
+      const why = push ? await push(JOBS[g.job].explain(g.params).does, approveUrl).then(() => "", (e: Error) => pushError(e)) : "no phone push set";
       return json({ id: g.id, approve_url: approveUrl, expires_at: g.expires_at, pushed: !why, ...(why ? { push_error: why } : {}) }, 201);
     }
     // Cards (card 85818ab1; rules in carddesk.ts). The agent asks and collects (signed); Ben's page is /approve/card/<id>.
@@ -117,7 +116,7 @@ export async function route(request: Request, store: Store, who: Who, now = Date
       }
       const approveUrl = `${url.origin}/approve/card/${made.card.id}`;
       const what = `${made.grants.length} job${made.grants.length === 1 ? "" : "s"} on one tap: ${made.grants.map((g, i) => `${i + 1}) ${JOBS[g.job].explain(g.params).does}`).join(" ")}`;
-      const why = push ? await push(what, approveUrl).then(() => "", (e: Error) => pushError(e)) : "no ntfy topic set";
+      const why = push ? await push(what, approveUrl).then(() => "", (e: Error) => pushError(e)) : "no phone push set";
       return json({ card: made.card.id, approve_url: approveUrl, expires_at: made.card.expires_at, deadline: made.card.manifest.deadline, entries: made.grants.map((g) => ({ grant: g.id, job: g.job })), pushed: !why, ...(why ? { push_error: why } : {}) }, 201);
     }
     if (m === "GET" && parts[0] === "card" && parts.length === 2) return json({ ok: true, report: await desk.collectCard(parts[1], requester, now, source) });
