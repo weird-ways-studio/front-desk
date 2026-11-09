@@ -216,13 +216,13 @@ export type Alarm = (ok: boolean, detail: string) => Promise<void>;
 
 /**
  * Pings healthchecks.io: the check URL for all-clear, its /fail with the detail otherwise. Its phone
- * alert does not carry that detail (VERIFIED: healthchecks ntfy_message.html has no ping body), so a
- * failed count is ALSO pushed straight to Ben's phone with the detail: Pushover first, then ntfy, the
- * same senders as approval pushes (ntfy.sh refuses Workers' shared addresses; see approvalPush).
+ * alert does not carry that detail (VERIFIED for its message templates: they have no ping body), so a
+ * failed count is ALSO pushed straight to Ben's phone with the detail through Pushover, the same sender
+ * as approval pushes.
  */
-export function headcountAlarm(url: string | undefined, ntfyUrl?: string, pushover: PushoverKeys = {}, fetchFn: typeof fetch = fetch): Alarm | undefined {
+export function headcountAlarm(url: string | undefined, pushover: PushoverKeys = {}, fetchFn: typeof fetch = fetch): Alarm | undefined {
   if (!url || !/^https:\/\/hc-ping\.com\/[0-9a-f-]{36}$/.test(url.trim())) return undefined;
-  const send = phoneSenders(ntfyUrl, pushover, fetchFn);
+  const send = phoneSender(pushover, fetchFn);
   return async (ok, detail) => {
     const res = await fetchFn(ok ? url.trim() : `${url.trim()}/fail`, { method: "POST", body: detail });
     if (!res.ok) throw new Error(`healthchecks answered ${res.status}`);
@@ -232,12 +232,7 @@ export function headcountAlarm(url: string | undefined, ntfyUrl?: string, pushov
   };
 }
 
-/** The ntfy topic URL if it is a well-formed ntfy.sh topic, else undefined. */
-function ntfyTopic(ntfyUrl: string | undefined): string | undefined {
-  return ntfyUrl && /^https:\/\/ntfy\.sh\/[A-Za-z0-9_-]{16,64}$/.test(ntfyUrl.trim()) ? ntfyUrl.trim() : undefined;
-}
-
-// Tells Ben's phone a request is waiting; a tap opens its approve page. Throws when ntfy did not take it.
+// Tells Ben's phone a request is waiting; a tap opens its approve page. Throws when Pushover did not take it.
 export type Push = (what: string, approveUrl: string) => Promise<void>;
 
 /** Pushover's user key and app token (dashboard secrets), each 30 letters and digits. */
@@ -247,47 +242,39 @@ export interface PushoverKeys {
 }
 
 /**
- * One push per request (card a830d543): Pushover first, then ntfy. It carries what is asked and the
- * approve link, never a secret: the link still needs Ben's Access login and his passkey. MAX_PENDING
- * bounds how many can arrive. Throws "<service> answered NNN; ..." when none took it.
+ * One push per request (card a830d543), through Pushover (card W2 6d0acbc8 retired the old fallback).
+ * It carries what is asked and the approve link, never a secret: the link still needs Ben's Access login
+ * and his passkey. MAX_PENDING bounds how many can arrive. Throws "pushover answered NNN" or
+ * "pushover unreachable" when it did not take it.
  */
-export function approvalPush(ntfyUrl: string | undefined, pushover: PushoverKeys = {}, fetchFn: typeof fetch = fetch): Push | undefined {
-  const send = phoneSenders(ntfyUrl, pushover, fetchFn);
+export function approvalPush(pushover: PushoverKeys = {}, fetchFn: typeof fetch = fetch): Push | undefined {
+  const send = phoneSender(pushover, fetchFn);
   return send && ((what, approveUrl) => send("Front desk: approve?", what.slice(0, 300), approveUrl));
 }
 
 /** A plain message to Ben's phone (no link), or undefined when no push service is set up. */
-export function phoneAlert(ntfyUrl: string | undefined, pushover: PushoverKeys = {}, fetchFn: typeof fetch = fetch): Alert | undefined {
-  const send = phoneSenders(ntfyUrl, pushover, fetchFn);
+export function phoneAlert(pushover: PushoverKeys = {}, fetchFn: typeof fetch = fetch): Alert | undefined {
+  const send = phoneSender(pushover, fetchFn);
   return send && ((title, text) => send(title, text));
 }
 export type Alert = (title: string, text: string) => Promise<void>;
 
 /**
- * Sends one message to Ben's phone: Pushover first, then ntfy, stopping at the first that takes it.
- * ntfy.sh refuses Cloudflare Workers' shared addresses (429, ntfy issues #1963/#1726), hence
- * Pushover, which counts per account. Undefined when neither is set up.
+ * Sends one message to Ben's phone through Pushover, the only phone route (card W2 6d0acbc8).
+ * Undefined when Pushover is not set up.
  */
-function phoneSenders(ntfyUrl: string | undefined, pushover: PushoverKeys, fetchFn: typeof fetch) {
-  const ntfy = ntfyTopic(ntfyUrl);
+function phoneSender(pushover: PushoverKeys, fetchFn: typeof fetch) {
   const key = /^[A-Za-z0-9]{30}$/;
   const po = pushover.user && pushover.token && key.test(pushover.user.trim()) && key.test(pushover.token.trim())
     ? { user: pushover.user.trim(), token: pushover.token.trim() } : undefined;
-  const senders: [string, (title: string, text: string, url?: string) => Promise<Response>][] = [];
-  // Pushover takes at most 1024 characters per message.
-  if (po) senders.push(["pushover", (title, text, url) => fetchFn("https://api.pushover.net/1/messages.json", { method: "POST",
-    body: new URLSearchParams({ token: po.token, user: po.user, title, message: text.slice(0, 1024), ...(url ? { url, url_title: "Open to approve" } : {}) }) })]);
-  if (ntfy) senders.push(["ntfy", (title, text, url) => fetchFn(ntfy, { method: "POST", body: text.slice(0, 3000), headers: { Title: title, Priority: "high", ...(url ? { Click: url } : {}) } })]);
-  if (!senders.length) return undefined;
+  if (!po) return undefined;
   return async (title: string, text: string, url?: string) => {
-    const failed: string[] = [];
-    for (const [name, send] of senders) {
-      // A thrown fetch error is reduced to fixed words: its message could carry the topic or a key.
-      const status = await send(title, text, url).then((r) => r.status, () => 0);
-      if (status >= 200 && status < 300) return;
-      failed.push(status ? `${name} answered ${status}` : `${name} unreachable`);
-    }
-    throw new Error(failed.join("; "));
+    // Pushover takes at most 1024 characters per message.
+    const body = new URLSearchParams({ token: po.token, user: po.user, title, message: text.slice(0, 1024), ...(url ? { url, url_title: "Open to approve" } : {}) });
+    // A thrown fetch error is reduced to fixed words: its message could carry a key.
+    const status = await fetchFn("https://api.pushover.net/1/messages.json", { method: "POST", body }).then((r) => r.status, () => 0);
+    if (status >= 200 && status < 300) return;
+    throw new Error(status ? `pushover answered ${status}` : "pushover unreachable");
   };
 }
 
