@@ -543,11 +543,12 @@ test(`retired job: a stored ${job} grant is never approved or collected`, async 
 test("menu: generated from JOBS -- every job once with its mode, the retired one gone; the agent may read it, nobody unknown may", async () => {
   const res = await callV(new MemoryStore(), fakeVault(true), "/menu", undefined, "agent");
   assert.equal(res.status, 200);
-  const m = (await res.json()) as { jobs: { job: string; mode: string; does: string; signed: boolean }[]; new_job: string };
+  const m = (await res.json()) as { jobs: { job: string; mode: string; does: string; signed: boolean; card_only?: true }[]; new_job: string };
   assert.deepEqual(m.jobs.map((j) => j.job).sort(), Object.keys(JOBS).sort());
   assert.ok(m.jobs.every((j) => j.mode === "tap" && j.does.length > 0));
   assert.ok(!m.jobs.some((j) => j.job === "cf.token.zone.read"));
-  assert.deepEqual(m.jobs.filter((j) => j.signed).map((j) => j.job).sort(), ["cf.audit.read", "cf.dns.list", "cf.zone.read"]);
+  assert.deepEqual(m.jobs.filter((j) => j.signed).map((j) => j.job).sort(), ["cf.audit.read", "cf.dns.list", "cf.zone.read", "gh.repo.create"]);
+  assert.deepEqual(m.jobs.filter((j) => j.card_only).map((j) => j.job), ["gh.repo.create"], "the menu says which job is card only");
   assert.match(m.new_job, /pull request/);
   assert.equal((await callV(new MemoryStore(), fakeVault(true), "/menu", undefined, "unknown" as any)).status, 403);
 });

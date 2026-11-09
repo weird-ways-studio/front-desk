@@ -154,7 +154,7 @@ test("real vault entry point over RPC: card version answer; card refusals arrive
       { method: "cardStop", args: [c.manifest.card] },
       { method: "cardRun", args: [{ card: c.manifest.card, index: 0, receipt: {}, approval_body: "{}", prf: PRF, key_rev: 0 }] },
     );
-    assert.deepEqual(api, { ok: { version: 1, jobs_version: 1, cap: 2 } });
+    assert.deepEqual(api, { ok: { version: 1, jobs_version: 2, cap: 2 } });
     assert.deepEqual(open, { error: "bad_assertion", isError: true }, "signed by the test passkey, not the pinned one");
     assert.deepEqual(extra, { error: "wrong_shape", isError: true });
     assert.deepEqual(status, { error: "unknown_card", isError: true });

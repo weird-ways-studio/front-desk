@@ -8,7 +8,8 @@ import { STUDIO_ZONES } from "../vault/src/zones.ts";
 import { AUDIT_MAX_DAYS, auditWindow } from "../vault/src/vault.ts";
 import { isP256Spki } from "./cboxkey.ts";
 import { baselineDone, name, plainChanges } from "./ghplain.ts";
-import type { CfAcceptResult, GhBaselineResult, HeadcountSetupResult, ReadResult } from "../vault/src/api.ts";
+import { validRepoName } from "../vault/src/ghrepo.ts";
+import type { CfAcceptResult, GhBaselineResult, HeadcountSetupResult, ReadResult, RepoCreateResult } from "../vault/src/api.ts";
 
 // What Ben reads on the approval screen, built from the stored grant (instruction.orient-the-person):
 // what approving does, anything to check, what happens when he taps, and the exact text folded below.
@@ -40,6 +41,9 @@ export interface Job {
   // The request and the collect must carry the enrolled c-box key's signature (src/cboxkey.ts), so a
   // stolen front-desk login alone cannot collect the answer.
   signed?: true;
+  // Offered only on a card (card 77ec1e64 finding 3): /request refuses it `card_only`, and the vault's run() refuses
+  // it `job_not_offered`, so there is one approval path to build and review.
+  cardOnly?: true;
 }
 
 // A failed vault job in words: what is known to be left behind, then the vault's own reason in
@@ -102,6 +106,27 @@ function readDone(result: unknown): string {
 function zoneOnly(params: unknown): Record<string, string> | null {
   const p = (params ?? {}) as { zone?: unknown };
   return params && typeof params === "object" && Object.keys(params).length === 1 && typeof p.zone === "string" && STUDIO_ZONES.includes(p.zone) ? { zone: p.zone } : null;
+}
+
+/** Ben's N2 answer (2026-11-08), shown verbatim on the card for every new repo (REFINE-77ec1e64 Outcome 3). */
+export const REPO_REACH = "The new repo is reachable by the studio's GitHub App (the repo-maker) with the powers it has on every studio repo.";
+
+/** The sentence after a gh.repo.create entry: only what is true (C6a-2 planned shape 1). */
+function repoDone(result: unknown): string {
+  const r = result as (Partial<RepoCreateResult> & { error?: unknown }) | null | undefined;
+  const unknown = (what: string) => `Unknown: it is not known whether the repo was made as asked. Check github.com/weird-ways-studio before asking again.${keys} [created: ${what}]`;
+  const keys = (r?.keys ?? []).some((k) => k.revoke !== "proven") ? " One of the vault's short repo-maker keys could not be proven deleted; it stops working by itself within the hour." : "";
+  // No answer, or the vault refused before the job ran: the shared words (stageWords, notDone).
+  if (!r || typeof r !== "object" || r.created === undefined) return (r?.ok === true ? null : notDone(result, () => "Nothing was made.")) ?? unknown("no facts");
+  if (r.created === "confirmed" && (r as { eligible?: unknown }).eligible === false) {
+    // Each reason gets its own words: an already-listed repo raises no alarm (Codex build r2 N1).
+    const why = String((r as { why?: unknown }).why ?? "unknown");
+    if (why === "listed") return `Not done as planned: weird-ways-studio/${r.name} exists and was already on the nightly check's list with this same id, so nothing was added and the check expects it. Tell the agent: the repo is there.${keys} [created: already_listed]`;
+    return `Not done as planned: weird-ways-studio/${r.name} exists, but the nightly check will not add it by itself (${why === "window" ? "GitHub says it was made outside this card's time" : "its record could not be checked"}). Tonight's alarm names it; if it is yours, accept it with the GitHub list approval.${keys} [created: not_eligible: ${why}]`;
+  }
+  if (r.created === "confirmed") return `Done. weird-ways-studio/${r.name} exists, empty and private. Tonight's check expects it once the Observatory has recorded this result; until then the nightly alarm names it.${keys} Nothing else to do.`;
+  if (r.created === "absent") return r.refusal === "repo_exists" ? `Not done. A repository with that name already exists, so nothing was made.${keys} Tell the agent the words in brackets: [repo_exists]` : `Not done. Nothing was made.${keys} Tell the agent the words in brackets: [${String(r.refusal ?? "a check did not pass")}]`;
+  return unknown(String(r.created));
 }
 
 const ONE_STANDING_KEY = "It never expires: it stays in the vault so the count runs each night without you. A new standing key, by your choice.";
@@ -241,20 +266,40 @@ export const JOBS = {
     validate: (params) => (params && typeof params === "object" && Object.keys(params).length === 0 ? {} : null),
     vault: true,
   },
+  // The vault makes one empty private repo with the repo-maker App, inside a card entry (vault/src/ghrepo.ts;
+  // card 77ec1e64). Card only. The nightly check adds it to its list once the Observatory recorded the result.
+  "gh.repo.create": {
+    mode: "tap",
+    menu: { does: "Make one empty private repository in the studio's GitHub org (card only).", on: "the weird-ways-studio GitHub org", params: "name: lower-case letters, digits and single dashes, 2-64 long" },
+    explain: (p) => ({
+      does: `GitHub: make an empty private repository named "${p.name}" in weird-ways-studio, using the repo-maker App. ${REPO_REACH}`,
+      expect: "Face ID unlocks the vault for a moment. It checks the repo-maker App, checks nobody can skip your review on front-desk's main, checks the name is free, makes the repo with a key that can only create repositories, then deletes both of its short keys and proves them dead. The agent adds the code itself afterwards.",
+      exact: `Repository weird-ways-studio/${p.name}; private; empty`,
+    }),
+    done: repoDone,
+    validate: (params) => {
+      const name = (params as { name?: unknown } | null)?.name;
+      return params && typeof params === "object" && Object.keys(params).join() === "name" && validRepoName(name) ? { name } : null;
+    },
+    vault: true,
+    signed: true,
+    cardOnly: true,
+  },
 } satisfies Record<string, Job>;
 
 export type JobName = keyof typeof JOBS;
 
 /** The agents' menu, generated from JOBS (served at GET /menu). Adding a job is a pull request Ben merges. */
 /**
- * Jobs the desk lets onto a card (card 85818ab1): read-only or touch-nothing jobs, the same four as the vault's
+ * Jobs the desk lets onto a card (card 85818ab1): the read-only or touch-nothing jobs, plus gh.repo.create (card
+ * 77ec1e64, card only) -- the same five as the vault's
  * CARD_JOBS (vault/src/cards.ts) and the Observatory's CARD_ELIGIBLE. Each side checks its own list.
  */
-export const CARD_ELIGIBLE: readonly JobName[] = Object.freeze(["test.echo", "cf.zone.read", "cf.dns.list", "cf.audit.read"] as JobName[]);
+export const CARD_ELIGIBLE: readonly JobName[] = Object.freeze(["test.echo", "cf.zone.read", "cf.dns.list", "cf.audit.read", "gh.repo.create"] as JobName[]);
 
 export function menu() {
   return {
-    jobs: Object.entries(JOBS as Record<string, Job>).map(([job, j]) => ({ job, mode: j.mode, ...j.menu, signed: !!j.signed })),
+    jobs: Object.entries(JOBS as Record<string, Job>).map(([job, j]) => ({ job, mode: j.mode, ...j.menu, signed: !!j.signed, ...(j.cardOnly ? { card_only: true } : {}) })),
     modes: { tap: "Ben approves this one job with Face ID; you never hold a key.", run: "Inside a run Ben opened (not built yet).", key: "A key on the c-box (none offered)." },
     new_job: "Not on the list? Propose it as a pull request to front-desk src/jobs.ts (and vault/src/vault.ts for a vault job); it exists once Ben merges it.",
     card: `Several of ${CARD_ELIGIBLE.join(", ")} on one Face ID tap, run in order: node scripts/agent.mjs post <desk>/card '{"entries":[{"job":...,"params":{...},"reason":"..."}]}', then node scripts/agent.mjs get <desk>/card/<card> once Ben's page says done. At most 2 entries for now.`,

@@ -14,14 +14,15 @@
 // finds nothing due, never a card with no alarm. Proven in real workerd by test/cards.workerd.test.ts.
 import { VaultError, secretBytes } from "./seal.ts";
 import { approvalCheck, canonical, grantHashOf, sha256, unb64, type PasskeyPin } from "./passkey.ts";
-import { CARD_RUN_MS, RECORDER_KEY, cardHashOf, parseManifest, receiptSealed, type Manifest, type Receipt } from "./cardcopy.ts";
+import { CARD_RUN_MS, RECORDER_KEY, REPO_JOB, cardHashOf, parseManifest, receiptSealed, repoIdRefusal, type Manifest, type Receipt } from "./cardcopy.ts";
+import type { GhSnapshot } from "./github.ts";
 
 /** The desk checks this (cardApi) before any card call; a vault on another version is refused before anything is sent. */
 export const CARD_API_VERSION = 1;
 /** The vault's own list of jobs a card may hold (same values as the recorder's). Empty = off switch: every card refused. */
-export const CARD_JOBS: readonly string[] = Object.freeze(["test.echo", "cf.zone.read", "cf.dns.list", "cf.audit.read"]);
-/** Bumped by any change to a card job's behavior; a card opened under another version cannot start an entry. */
-export const JOBS_VERSION = 1;
+export const CARD_JOBS: readonly string[] = Object.freeze(["test.echo", "cf.zone.read", "cf.dns.list", "cf.audit.read", "gh.repo.create"]);
+/** Bumped by any change to a card job's behavior; a card opened under another version cannot start an entry. 2: gh.repo.create (card 77ec1e64, T16). */
+export const JOBS_VERSION = 2;
 /** Entries one card may hold until the F9 measurement raises it (APPROACH §13; Ben D2, 2026-11-08). */
 export const CARD_CAP = 2;
 /** An answer is held until the card closed this long ago (the desk's COLLECT_WINDOW_MS), then deleted (V3). */
@@ -50,6 +51,15 @@ interface Book {
   stopped?: string; // why the card will start nothing more
   closed_at?: number; // written once, when no entry can change any more
 }
+/**
+ * The durable record of a repo a card entry made (card 77ec1e64 Y1, Z2), key `gh.created:<grant>`. Written once, at
+ * settle, and never erased with the answer, so a late result send still carries the id (`repoFacts`). `eligible`: the
+ * entry settled `done` from `dispatching` with GitHub's created_at inside [card open, card deadline] and the id not yet
+ * in the baseline -- only then may `repoRecorded` add it to the nightly list, once the recorder has receipted it.
+ */
+export interface GhCreated { grant: string; card: string; name: string; repo_id: string; created_at: string; eligible: boolean; recorded: boolean; why?: Ineligible }
+/** Why a made repo is not eligible (Codex build r2 N1): the words Ben reads, and whether the nightly alarm names it, differ. */
+export type Ineligible = "listed" | "window" | "repeat" | "bad_id" | "late";
 export interface CardView {
   card: string;
   deadline: number;
@@ -80,6 +90,7 @@ export type RunEntry = (job: string, params: Record<string, string>, prf: string
 export interface CardOptions { now?: () => number; pin?: PasskeyPin; recorderKey?: string; jobs?: readonly string[]; jobsVersion?: number }
 
 const book = (id: string) => `card:${id}`;
+const created = (grant: string) => `gh.created:${grant}`;
 const answerKey = (id: string, i: number) => `cardans:${id}:${i}`;
 const DUE = "cards_due";
 const isText = (v: unknown): v is string => typeof v === "string";
@@ -202,15 +213,7 @@ export class CardBook {
   /** The receipt is the recorder's, for this entry's approval, over exactly the body handed over, which is a card/v1 approval of this card. */
   private async checkApproval(r: CardRun, b: Book, e: Entry): Promise<void> {
     const rc = r.receipt as Receipt | null;
-    if (shapeOf(rc) !== "grant,key,recorded_at,seq,sha256,sig,stage,v" || rc!.v !== 1 || !Number.isSafeInteger(rc!.seq) || ![rc!.key, rc!.recorded_at, rc!.sha256, rc!.sig].every(isText)) throw new VaultError("bad_receipt");
-    let ok = false;
-    try {
-      const key = await crypto.subtle.importKey("raw", unb64(this.recorderKey), "Ed25519", false, ["verify"]);
-      ok = await crypto.subtle.verify("Ed25519", key, unb64(rc!.sig!), receiptSealed(rc!));
-    } catch {
-      ok = false;
-    }
-    if (!ok || rc!.stage !== "approval" || rc!.grant !== e.grant.id || (await sha256(r.approval_body)) !== rc!.sha256) throw new VaultError("bad_receipt");
+    if (!(await this.receiptOk(rc)) || rc!.stage !== "approval" || rc!.grant !== e.grant.id || (await sha256(r.approval_body)) !== rc!.sha256) throw new VaultError("bad_receipt");
     let body: Record<string, unknown>;
     try {
       body = JSON.parse(r.approval_body);
@@ -221,12 +224,25 @@ export class CardBook {
     if (body?.grant !== e.grant.id || body.stage !== "approval" || body.approval_kind !== "card/v1" || body.grant_hash !== e.hash || typeof m === "string" || (await cardHashOf(m)) !== b.hash) throw new VaultError("bad_approval");
   }
 
+  /** True only for a receipt of the exact shape, signed by the pinned recorder key. */
+  private async receiptOk(rc: Receipt | null): Promise<boolean> {
+    if (shapeOf(rc) !== "grant,key,recorded_at,seq,sha256,sig,stage,v" || rc!.v !== 1 || !Number.isSafeInteger(rc!.seq) || ![rc!.key, rc!.recorded_at, rc!.sha256, rc!.sig, rc!.grant, rc!.stage].every(isText)) return false;
+    try {
+      const key = await crypto.subtle.importKey("raw", unb64(this.recorderKey), "Ed25519", false, ["verify"]);
+      return await crypto.subtle.verify("Ed25519", key, unb64(rc!.sig!), receiptSealed(rc!));
+    } catch {
+      return false;
+    }
+  }
+
   /** The job itself. test.echo touches nothing; the reads use today's tap path. A definite error is `failed`; anything unreadable is `unknown`. */
   private async call(g: CardGrant, prf: string): Promise<{ state: EntryState; answer: unknown }> {
     if (g.job === "test.echo") return /^[a-z]{1,20}$/.test(g.params.word ?? "") ? { state: "done", answer: { ok: true, data: { echoed: g.params.word } } } : { state: "failed", answer: { ok: false, error: "bad_params" } };
     try {
       const answer = await this.runEntry(g.job, g.params, prf);
       const ok = (answer as { ok?: unknown } | null)?.ok;
+      // gh.repo.create answers ok: null when the repo may exist (ghrepo.ts): unknown, with its facts kept (X4).
+      if (ok === null && g.job === REPO_JOB) return { state: "unknown", answer };
       return ok === true ? { state: "done", answer } : ok === false ? { state: "failed", answer } : { state: "unknown", answer: { error: "unreadable answer" } };
     } catch (e) {
       return e instanceof VaultError ? { state: "failed", answer: { ok: false, error: e.message } } : { state: "unknown", answer: { error: "no answer from the job" } };
@@ -241,10 +257,21 @@ export class CardBook {
       const kv = this.store.kv;
       const b = kv.get<Book>(book(card))!;
       const e = b.entries[index];
+      const repo = e.grant.job === REPO_JOB ? this.repoMade(b, e, state, answer) : undefined;
       if (e.state !== "dispatching") {
         e.late = state;
         kv.put(book(card), b);
+        if (repo) kv.put(created(e.grant.id), { ...repo, eligible: false, why: repo.why ?? "late" }); // made after the alarm closed it: never eligible (Z2)
         return { state: e.state, card: this.view(b, now) };
+      }
+      if (repo) {
+        kv.put(created(e.grant.id), repo);
+        if (!repo.eligible) {
+          // A repo the nightly list will not accept: the card ends, the checker alerts (X1). The stored answer says so,
+          // so no sentence built from it can say "Done" (Codex build r1 #1).
+          state = "unknown";
+          answer = { ...(answer as object), ok: null, eligible: false, why: repo.why };
+        }
       }
       e.state = state;
       e.at = now;
@@ -258,6 +285,69 @@ export class CardBook {
     });
     await this.rearm();
     return out;
+  }
+
+  /**
+   * Inside settle's transaction: the record of a repo GitHub reported as made (`done` with an id and a time), or
+   * undefined. Eligible (the late path in settle overrides it to false, so only an entry settled from `dispatching`) only if created inside [open, deadline] by GitHub's clock, the
+   * grant has no record yet, and the id is not already in the baseline (X1, Z2, T15).
+   */
+  private repoMade(b: Book, e: Entry, state: EntryState, answer: unknown): GhCreated | undefined {
+    const a = answer as { repo_id?: unknown; created_at?: unknown; name?: unknown } | null;
+    if (state !== "done" || typeof a?.repo_id !== "string" || typeof a.created_at !== "string" || a.name !== e.grant.params.name) return undefined;
+    const at = Date.parse(a.created_at);
+    const base = this.store.kv.get<GhSnapshot | null>("gh.baseline");
+    const line = `${a.name}:${a.repo_id}`;
+    // Settled from `dispatching` is decided by the caller: the late path (alarm already closed it) stores why: "late".
+    // GitHub's created_at has whole seconds: the window starts at the whole second the card opened (Codex build r1 #4).
+    const inWindow = Number.isFinite(at) && at >= Math.floor(b.opened_at / 1000) * 1000 && at <= b.deadline;
+    const why: Ineligible | undefined =
+      (base?.repo_ids ?? []).includes(line) ? "listed"
+      : !inWindow ? "window"
+      : this.store.kv.get(created(e.grant.id)) !== undefined ? "repeat"
+      : repoIdRefusal({ job: REPO_JOB, outcome: "done", repo_id: a.repo_id }) !== undefined ? "bad_id"
+      : undefined;
+    return { grant: e.grant.id, card: b.card, name: a.name, repo_id: a.repo_id, created_at: a.created_at, eligible: why === undefined, recorded: false, ...(why ? { why } : {}) };
+  }
+
+  /** The durable repo record for a grant, so the desk can build the frozen result body after the answer is erased (Y1). */
+  repoFacts(grant: unknown): GhCreated | null {
+    if (!isText(grant)) throw new VaultError("wrong_shape");
+    return this.store.kv.get<GhCreated>(created(grant)) ?? null;
+  }
+
+  /**
+   * The recorder has receipted a done gh.repo.create result: add the repo to the nightly list, once (Y1, Z1-Z3). The
+   * receipt must be the recorder's, for this grant's `result`, over exactly `body`; the body must be that grant's done
+   * gh.repo.create result naming the same repo id as the vault's own record, which must be eligible. No time limit on
+   * when it arrives (Z2). A second call answers "already recorded" and changes nothing.
+   */
+  async repoRecorded(grant: unknown, body: unknown, receipt: unknown, ...rest: unknown[]): Promise<{ recorded: "now" | "already" }> {
+    if (rest.length || !isText(grant) || !isText(body)) throw new VaultError("wrong_shape");
+    const rc = receipt as Receipt | null;
+    if (!(await this.receiptOk(rc)) || rc!.stage !== "result" || rc!.grant !== grant || (await sha256(body)) !== rc!.sha256) throw new VaultError("bad_receipt");
+    let r: Record<string, unknown>;
+    try {
+      r = JSON.parse(body);
+    } catch {
+      throw new VaultError("bad_result");
+    }
+    const first = this.store.kv.get<GhCreated>(created(grant));
+    if (!first) throw new VaultError("no_repo_record");
+    if (r?.grant !== grant || r.stage !== "result" || r.job !== REPO_JOB || r.outcome !== "done" || repoIdRefusal(r) !== undefined || r.repo_id !== first.repo_id) throw new VaultError("bad_result");
+    return this.store.transactionSync(() => {
+      const kv = this.store.kv;
+      const c = kv.get<GhCreated>(created(grant))!;
+      if (c.recorded) return { recorded: "already" as const };
+      if (!c.eligible) throw new VaultError("repo_not_eligible");
+      const base = kv.get<GhSnapshot | null>("gh.baseline");
+      if (!base) throw new VaultError("no_baseline");
+      // Exactly these two lines, nothing else (T11); a line already there (Ben accepted it meanwhile) is not doubled.
+      const add = (list: string[] | undefined, line: string) => (list ?? []).includes(line) ? [...(list ?? [])] : [...(list ?? []), line].sort();
+      kv.put("gh.baseline", { ...base, repos: add(base.repos, `${c.name}:private`), repo_ids: add(base.repo_ids, `${c.name}:${c.repo_id}`) });
+      kv.put(created(grant), { ...c, recorded: true });
+      return { recorded: "now" as const };
+    });
   }
 
   /** Ben's Stop: nothing more starts. An entry already out keeps running to its answer (T5). Idempotent. */

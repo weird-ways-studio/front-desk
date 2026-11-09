@@ -334,5 +334,37 @@
   "          g = { ...(await this.grant(gid)), result: withoutSecret(v.answers[i]) };\n          await this.store.put(`grant:${gid}`, g);\n          if (c.first_stored_at === undefined) {\n            c = { ...(await this.card(id)), first_stored_at: now };\n            await this.store.put(`card:${id}`, c);\n          }",
   "N4 (Codex r3): the erase clock is stored before the answer, so a crash between them never leaves an answer with no clock",
   "test/carddesk.test.ts"
+ ],
+ [
+  "c4-desk-cardonly",
+  "src/desk.ts",
+  "    if ((JOBS[job] as Job).cardOnly) {",
+  "    if (false) {",
+  "T4: the standalone /request refuses gh.repo.create as card_only, before anything is recorded or pushed",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "c4-desk-repoid",
+  "src/carddesk.ts",
+  "outcome, at, ...repo });",
+  "outcome, at });",
+  "repo card: one tap makes it; the result names the repo id; after the receipt the vault adds it to the nightly list once",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "c4-desk-ack-retry",
+  "src/carddesk.ts",
+  "        if (g.job === REPO_JOB) await this.repoAck(gid, now);\n",
+  "",
+  "Z1: the vault callback lost before it ran, or applied with its answer lost -> the next read completes or confirms; one line only",
+  "test/carddesk.test.ts"
+ ],
+ [
+  "c4-desk-ack-confirm",
+  "src/carddesk.ts",
+  "      if (r?.recorded !== \"now\" && r?.recorded !== \"already\") throw new Error(\"no confirmation\");\n",
+  "",
+  "Z1: a vault answer that is not a confirmation (an older vault, an odd reply) leaves the grant unconfirmed and retried",
+  "test/carddesk.test.ts"
  ]
 ]

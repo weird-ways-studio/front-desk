@@ -26,8 +26,9 @@ export interface VaultRunApi {
 }
 
 // Cards (card 85818ab1; rules in cards.ts).
-import type { CardOpen, CardRun, CardView, EntryState } from "./cards.ts";
-export type { CardOpen, CardRun, CardView, EntryState };
+import type { CardOpen, CardRun, CardView, EntryState, GhCreated } from "./cards.ts";
+import type { RepoCreateResult } from "./ghrepo.ts";
+export type { CardOpen, CardRun, CardView, EntryState, GhCreated, RepoCreateResult };
 export interface VaultCardApi {
   cardApi(): Promise<{ version: number; jobs_version: number; cap: number }>;
   cardOpen(req: CardOpen): Promise<CardView>;
@@ -35,4 +36,8 @@ export interface VaultCardApi {
   cardStop(card: string): Promise<CardView>;
   cardStatus(card: string): Promise<CardView>;
   cardAck(card: string, index: number): Promise<boolean>;
+  // gh.repo.create (card 77ec1e64). Optional: only a repo entry's result needs them, so other cards keep working
+  // against a vault that lacks them; a repo result then waits (no body, no line) until a vault that has them answers.
+  repoFacts?(grant: string): Promise<GhCreated | null>;
+  repoRecorded?(grant: string, body: string, receipt: unknown): Promise<{ recorded: "now" | "already" }>;
 }

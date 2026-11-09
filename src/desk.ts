@@ -76,6 +76,9 @@ export interface Grant {
   receipts?: Partial<Record<Stage, Omit<Receipt, "body">>>;
   result_body?: string;
   answer_erased?: true;
+  // gh.repo.create only (card 77ec1e64 Z1): set once the vault confirmed it took the recorder's receipt for this
+  // grant's done result (CardBook.repoRecorded), so the repo is in the nightly list. Unset = retried at every card read.
+  vault_ack?: true;
   // What a vault job reported when it ran at approval. A minted key's secret (result.key.value)
   // is kept only until the agent collects it, then erased; it is never logged or shown to Ben.
   result?: unknown;
@@ -427,6 +430,10 @@ export class Desk {
       throw new DeskError("job_not_offered", 400);
     }
     const job = body.job as JobName;
+    if ((JOBS[job] as Job).cardOnly) {
+      await this.log({ event: "refused", requester, job, detail: `${job}: card_only (send it on a card: POST /card)` }, now);
+      throw new DeskError("card_only", 400);
+    }
     // A key for the agent is made only for a request signed with the enrolled c-box key, so a
     // stolen agent login used elsewhere gets nothing (Codex minted r1 #2, architecture review r1).
     if ((JOBS[job] as Job).signed) await this.requireSigned(source, requester, job, now);
@@ -974,4 +981,21 @@ export class MemoryStore implements Store {
     const keys = [...this.data.keys()].filter((k) => k.startsWith(prefix)).sort();
     return new Map(keys.map((k) => [k, structuredClone(this.data.get(k)) as T]));
   }
+  // The synchronous view of the same data, as a SQLite-backed Durable Object has (the vault's VaultStore needs it),
+  // with a real rollback when the closure throws.
+  transactionSync<T>(fn: () => T): T {
+    const before = new Map([...this.data].map(([k, v]) => [k, structuredClone(v)]));
+    try {
+      return fn();
+    } catch (e) {
+      this.data = before;
+      throw e;
+    }
+  }
+  kv = {
+    get: <T>(k: string) => structuredClone(this.data.get(k)) as T | undefined,
+    put: <T>(k: string, v: T) => void this.data.set(k, structuredClone(v)),
+    delete: (k: string) => this.data.delete(k),
+    list: <T>(o: { prefix?: string } = {}) => [...this.data].filter(([k]) => k.startsWith(o.prefix ?? "")).sort().map(([k, v]) => [k, structuredClone(v)] as [string, T]),
+  };
 }

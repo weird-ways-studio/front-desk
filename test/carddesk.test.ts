@@ -34,8 +34,13 @@ async function rig(o: { runEntry?: RunEntry; jobs?: readonly string[]; signedRec
   if (o.signedReceipts !== false) fr.signer = vb.rec;
   const calls: string[] = [];
   const fail: Partial<Record<string, number>> = {}; // vault call name -> how many next calls throw after doing their work (lost reply)
+  const failBefore: Partial<Record<string, number>> = {}; // vault call name -> how many next calls throw before doing anything
   const lose = async <T>(name: string, p: () => Promise<T> | T): Promise<T> => {
     calls.push(name);
+    if (failBefore[name]) {
+      failBefore[name]!--;
+      throw new Error("vault unreachable");
+    }
     const out = await p();
     if (fail[name]) {
       fail[name]!--;
@@ -50,6 +55,8 @@ async function rig(o: { runEntry?: RunEntry; jobs?: readonly string[]; signedRec
     cardStop: (id: string) => lose("cardStop", () => vb.book.stop(id)),
     cardStatus: (id: string) => lose("cardStatus", () => vb.book.status(id)),
     cardAck: (id: string, i: number) => lose("cardAck", () => vb.book.ack(id, i)),
+    repoFacts: (g: string) => lose("repoFacts", () => vb.book.repoFacts(g)),
+    repoRecorded: (g: string, b: string, r: unknown) => lose("repoRecorded", () => vb.book.repoRecorded(g, b, r)),
     // As vault/src/runs.ts setKeyRev: the vault's own copy of the c-box key generation, never lowered.
     setKeyRev: (rev: number) => lose("setKeyRev", () => {
       const cur = vb.store.kv.get<number>("cbox_rev") ?? 0;
@@ -60,7 +67,7 @@ async function rig(o: { runEntry?: RunEntry; jobs?: readonly string[]; signedRec
   const store = new MemoryStore();
   const desk = new CardDesk(store, site, { recorder: fr.send, vault: vault as never });
   await desk.enroll(await TEST_KEY.register(await desk.enrollOptions(T0), site.origin), T0);
-  return { desk, store, vb, fr, calls, fail, vault };
+  return { desk, store, vb, fr, calls, fail, failBefore, vault };
 }
 
 /** The entry's vault state, or "none" before the card is opened (the tap is still checking). */
@@ -620,4 +627,143 @@ test("R5: two POST /card at once for one requester: exactly one card is created"
   assert.equal((await store.list({ prefix: "card:" })).size, 1);
   // Safeguard working, not just refusing: another requester is not blocked.
   await desk.requestCard({ entries: two }, "other", T0, signedSrc);
+});
+
+// ---- Card build 4 (77ec1e64): gh.repo.create on a card, desk side (THREATS-77ec1e64 T1, T2, T4, T5, T14, Z1) ----
+const REPO_ANSWER = { ok: true, created: "confirmed", name: "new-app", repo_id: "777001", created_at: new Date(T0).toISOString(), keys: [], notes: [] };
+const REPO_BASE = { repos: ["front-desk:public"], repo_ids: ["front-desk:9001"], members: [], owners: [], outside: [], invites: [], apps: [], pats: [], deploy_keys: [], rulesets: [] };
+const repoEntry = (name = "new-app") => ({ job: "gh.repo.create", params: { name }, reason: "77ec1e64: a home for new-app" });
+async function repoRig() {
+  const runs: string[] = [];
+  const r = await rig({ runEntry: async (job, params) => (runs.push(`${job}:${params.name ?? ""}`), job === "gh.repo.create" ? { ...REPO_ANSWER, name: params.name } : { ok: true }) });
+  r.vb.store.kv.put("gh.baseline", REPO_BASE);
+  return { ...r, runs };
+}
+const repoLines = (vb: { store: { kv: { get<T>(k: string): T | undefined } } }) => vb.store.kv.get<typeof REPO_BASE>("gh.baseline")!.repo_ids;
+
+test("repo card: one tap makes it; the result names the repo id; after the receipt the vault adds it to the nightly list once", async () => {
+  const { desk, fr, vb, store } = await repoRig();
+  const { card, grants } = await desk.requestCard({ entries: [repoEntry()] }, "agent", T0, signedSrc);
+  const r = await tap(desk, card.id);
+  assert.deepEqual(r.entries.map((e) => e.state), ["done"]);
+  assert.match(r.entries[0].does, /The new repo is reachable by the studio's GitHub App \(the repo-maker\) with the powers it has on every studio repo\.$/, "Ben's N2 line, verbatim");
+  assert.match(r.entries[0].summary ?? "", /^Done\. weird-ways-studio\/new-app exists, empty and private\./);
+  assert.match(cardView(200, { report: r }).lines[0], /-- Done\. weird-ways-studio\/new-app exists/, "the card page shows the job's own sentence");
+  const res = fr.records.find((x) => x.grant === grants[0].id && x.stage === "result")?.record;
+  assert.ok(res, "the result was recorded (the recorder refuses a done repo result without repo_id)");
+  assert.equal(res.repo_id, "777001");
+  assert.equal(res.outcome, "done");
+  assert.deepEqual(repoLines(vb), ["front-desk:9001", "new-app:777001"]);
+  assert.equal((await store.get<any>(`grant:${grants[0].id}`)).vault_ack, true);
+});
+
+test("T14: recorder down at the result -> no line; back after the answer was erased and the deadline passed -> the body still names the id, the line lands", async () => {
+  const { desk, fr, vb, store } = await repoRig();
+  const { card, grants } = await desk.requestCard({ entries: [repoEntry()] }, "agent", T0, signedSrc);
+  fr.failStage = "result";
+  await tap(desk, card.id);
+  assert.equal(fr.records.some((x) => x.stage === "result"), false);
+  assert.deepEqual(repoLines(vb), ["front-desk:9001"], "no line without the receipt: the night alarms (repo_result_unrecorded, ghrepo.test.ts Y1)");
+  const late = card.manifest.deadline + COLLECT_WINDOW_MS + 60_000;
+  vb.clock.now = late;
+  await vb.book.alarm();
+  fr.failStage = undefined;
+  const got = await desk.collectCard(card.id, "agent", late, signedSrc);
+  assert.equal(got.entries[0].answer, undefined, "the answer itself is gone");
+  const res = fr.records.find((x) => x.grant === grants[0].id && x.stage === "result")!.record;
+  assert.equal(res.repo_id, "777001", "read from the vault's durable record, not the answer");
+  assert.deepEqual(repoLines(vb), ["front-desk:9001", "new-app:777001"]);
+  assert.equal((await store.get<any>(`grant:${grants[0].id}`)).vault_ack, true);
+});
+
+test("T14: the vault's repo record unreadable at the result -> nothing frozen; the next read sends the body with the id", async () => {
+  const { desk, fr, failBefore, vb } = await repoRig();
+  const { card, grants } = await desk.requestCard({ entries: [repoEntry()] }, "agent", T0, signedSrc);
+  failBefore.repoFacts = 1;
+  await tap(desk, card.id);
+  assert.equal(fr.records.some((x) => x.grant === grants[0].id && x.stage === "result"), false, "no body without the id");
+  await desk.collectCard(card.id, "agent", T0 + 1000, signedSrc);
+  assert.equal(fr.records.find((x) => x.grant === grants[0].id && x.stage === "result")!.record.repo_id, "777001");
+  assert.deepEqual(repoLines(vb), ["front-desk:9001", "new-app:777001"]);
+});
+
+test("Z1: the vault callback lost before it ran, or applied with its answer lost -> the next read completes or confirms; one line only", async () => {
+  for (const which of ["before", "after"] as const) {
+    const { desk, failBefore, fail, vb, store, calls } = await repoRig();
+    const { card, grants } = await desk.requestCard({ entries: [repoEntry()] }, "agent", T0, signedSrc);
+    (which === "before" ? failBefore : fail).repoRecorded = 1;
+    await tap(desk, card.id);
+    assert.equal((await store.get<any>(`grant:${grants[0].id}`)).vault_ack, undefined, `${which}: not confirmed yet`);
+    assert.deepEqual(repoLines(vb), which === "before" ? ["front-desk:9001"] : ["front-desk:9001", "new-app:777001"], which);
+    const sends = calls.filter((c) => c === "repoRecorded").length;
+    await desk.collectCard(card.id, "agent", T0 + 1000, signedSrc);
+    assert.equal(calls.filter((c) => c === "repoRecorded").length, sends + 1, `${which}: retried at the read, though the recorder already answered`);
+    assert.equal((await store.get<any>(`grant:${grants[0].id}`)).vault_ack, true, which);
+    assert.deepEqual(repoLines(vb), ["front-desk:9001", "new-app:777001"], `${which}: exactly one line`);
+    await desk.collectCard(card.id, "agent", T0 + 2000, signedSrc);
+    assert.equal(calls.filter((c) => c === "repoRecorded").length, sends + 1, `${which}: no call once confirmed`);
+  }
+});
+
+test("T1: POST /card refuses bad repo names and extra params before recording anything", async () => {
+  const { desk, fr } = await repoRig();
+  for (const params of [{ name: "Bad" }, { name: "a--b" }, { name: "-x" }, { name: "x".repeat(65) }, { name: "ok-name", private: "false" }, {}]) {
+    await refuses(desk.requestCard({ entries: [{ ...repoEntry(), params }] }, "agent", T0, signedSrc), "bad_params");
+  }
+  assert.equal(fr.records.length, 0);
+});
+
+test("T2: the name changed in the desk's stored grant after the request -> the vault refuses to open the card; nothing runs", async () => {
+  const { desk, store, runs, calls } = await repoRig();
+  const { card, grants } = await desk.requestCard({ entries: [repoEntry()] }, "agent", T0, signedSrc);
+  const g = await store.get<any>(`grant:${grants[0].id}`);
+  await store.put(`grant:${grants[0].id}`, { ...g, params: { name: "other-app" } });
+  const r = await tap(desk, card.id);
+  assert.ok(calls.includes("cardOpen"));
+  assert.match(r.stopped ?? "", /bad_card/);
+  assert.deepEqual(runs, [], "no create ran");
+});
+
+test("T4: the standalone /request refuses gh.repo.create as card_only, before anything is recorded or pushed", async () => {
+  const { desk, fr } = await repoRig();
+  await refuses(desk.request({ job: "gh.repo.create", params: { name: "new-app" }, reason: "r" }, "agent", T0, signedSrc), "card_only");
+  assert.equal(fr.records.length, 0);
+});
+
+test("T5: a recorder that refuses the job's request (Observatory list without it) -> card not sent; nothing reaches the vault", async () => {
+  const { desk, fr, calls, runs } = await repoRig();
+  fr.failIf = (r) => r.stage === "request" && r.job === "gh.repo.create";
+  await refuses(desk.requestCard({ entries: [repoEntry()] }, "agent", T0, signedSrc), "card_not_sent");
+  assert.ok(!calls.includes("cardOpen"));
+  assert.deepEqual(runs, []);
+});
+
+test("T17 (desk side): a done repo result without repo_id is refused by the recorder's rule, so it is never sent that way", async () => {
+  const fr = new FakeRecorder();
+  const body = (o: Record<string, unknown>) => ({ v: 1, grant: "g-xxxxxxxx", stage: "result" as const, job: "gh.repo.create", request: "r", outcome: "done", at: 1, ...o });
+  fr.records.push({ stage: "request", grant: "g-xxxxxxxx", body: "q", record: {} }, { stage: "approval", grant: "g-xxxxxxxx", body: "a", record: {} });
+  await assert.rejects(fr.send(body({}) as never), /400/);
+});
+
+test("Z1: a vault answer that is not a confirmation (an older vault, an odd reply) leaves the grant unconfirmed and retried", async () => {
+  for (const odd of [undefined, {}, { recorded: "maybe" }, true]) {
+    const { desk, vault, store } = await repoRig();
+    (vault as any).repoRecorded = async () => odd;
+    const { card, grants } = await desk.requestCard({ entries: [repoEntry()] }, "agent", T0, signedSrc);
+    await tap(desk, card.id);
+    assert.equal((await store.get<any>(`grant:${grants[0].id}`)).vault_ack, undefined, `${JSON.stringify(odd)}: not taken as confirmed`);
+  }
+});
+
+test("r1 #1 (desk): an entry settled unknown because the repo cannot be listed shows the job's own not-done sentence, never Done", async () => {
+  const runs: string[] = [];
+  const r = await rig({ runEntry: async (job, params) => (runs.push(job), { ...REPO_ANSWER, name: params.name, created_at: new Date(T0 + 60 * 60_000).toISOString() }) });
+  r.vb.store.kv.put("gh.baseline", REPO_BASE);
+  const { card } = await r.desk.requestCard({ entries: [repoEntry()] }, "agent", T0, signedSrc);
+  const rep = await tap(r.desk, card.id);
+  assert.equal(rep.entries[0].state, "unknown");
+  assert.match(rep.entries[0].summary ?? "", /^Not done as planned/);
+  const view = cardView(200, { report: rep });
+  assert.doesNotMatch(view.lines[0], /-- Done/);
+  assert.equal(view.head, "Unclear");
 });

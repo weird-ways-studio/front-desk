@@ -43,6 +43,7 @@ const PARAMS: Record<keyof typeof JOBS, Record<string, string>> = {
   "cf.token.headcount.setup": {},
   "gh.app.baseline": { changes: CHANGES.join("\n"), snapshot: "s", base: "b" },
   "cf.token.accept": { ids: `${"a".repeat(32)},${"b".repeat(32)}`, names: "observatory-backup-read\n{\"x\":1}" },
+  "gh.repo.create": { name: "new-app" },
 };
 
 const grant = (job: keyof typeof JOBS): Grant =>
@@ -77,7 +78,8 @@ test("every job's result sentence is plain: Done, Not done or Approved, with no 
   for (const job of Object.keys(JOBS) as (keyof typeof JOBS)[]) {
     for (const result of [ok, { ok: false, error: "github_changed_since_request" }, undefined]) {
       const said = JOBS[job].done(result);
-      assert.match(said, /^(Done|Not done|Approved)\b/, `${job}: ${said}`);
+      // "Unknown:" only for a job whose outcome can be unknown after it ran (gh.repo.create), as the card page says it.
+      assert.match(said, job === "gh.repo.create" ? /^(Done|Not done|Unknown:)/ : /^(Done|Not done|Approved)\b/, `${job}: ${said}`);
       if (result?.ok === false && "vault" in JOBS[job]) assert.match(said, /^Not done\. .+ Tell the agent the words in brackets: \[github_changed_since_request\]$/);
       if (result === undefined && "vault" in JOBS[job]) assert.match(said, /^Not done: no answer came back from the vault, so it is unknown what ran\. Do not tap again/);
       assert.doesNotMatch(said.replace(/\[[^\]]*\]$/, ""), /[{}]|"\w+":/, `${job}: raw data in the result sentence`);
@@ -134,6 +136,10 @@ test("a name someone else chose cannot read as the page's own words", () => {
   // A look-alike of our own App (Cyrillic "\u0430") never reads as the real one.
   assert.match(plainChanges(["apps +wws-front-desk#1:all:contents=write", "apps +wws-front-d\u0435sk#2:all:contents=write"])[0]!.items[1]!, /"wws-front-d\?sk" \(has unusual characters\)/);
   assert.equal(plainChanges(["repos +my-repo_2.0:private"])[0]!.items[0]!, 'New: "my-repo_2.0" (private)', "ordinary names unflagged");
+  // Card 77ec1e64: repository ids read as a number beside the name, in their own section.
+  const ids = plainChanges(["repo_ids +card-proof-77ec1e64:123456789"])[0]!;
+  assert.match(ids.heading, /^Repository ids/);
+  assert.equal(ids.items[0], 'New: "card-proof-77ec1e64" (number 123456789)');
 });
 
 test("a standing key's approval says plainly that it never expires", () => {
