@@ -124,6 +124,7 @@ const ms = (s: unknown) => (typeof s === "string" && /^\d{4}-\d{2}-\d{2}T/.test(
 const when = (t: number) => `${iso(t).slice(0, 16).replace("T", " ")} UTC`;
 const say = (verdict: Verdict, why: string): Judged => ({ verdict, line: `${verdict}: ${why}` });
 
+/** What a run flagged, as "kind count" pairs (no names), for a FAIL line. */
 function counts(n: RunSummary): string {
   const c = n.cloudflare, g = n.github;
   const parts = [
@@ -138,6 +139,7 @@ function counts(n: RunSummary): string {
 // The repo's name in a `name:visibility` entry: the text before the last ':'.
 const repoNamed = (n: RunSummary, repo?: string) => !!repo && n.github.repos_added.some((e) => e.slice(0, e.lastIndexOf(":")) === repo);
 
+/** The FAIL line for a run that alarmed: names the repo when the run listed it as added. */
 function alarmed(n: RunSummary, repo?: string): Judged {
   return repoNamed(n, repo) ? say("FAIL", `repo ${repo} was flagged by the headcount run that started ${when(ms(n.started_at))}`) : say("FAIL", `the headcount run that started ${when(ms(n.started_at))} alarmed (${counts(n)})`);
 }
