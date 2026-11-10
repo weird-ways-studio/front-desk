@@ -134,5 +134,37 @@
   "",
   "T3/T8 GET /headcount: agent 200; no login and Ben's login 403; other methods not served; a read changes nothing",
   "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-truncated-first",
+  "src/headcountrun.ts",
+  "  if (n.truncated !== false) return say(\"UNPROVEN\", `the headcount run that started ${at} had more changes than the summary lists`);\n  if (n.ok !== true || repoNamed(n, repo)) return alarmed(n, repo);\n",
+  "  if (n.ok !== true || repoNamed(n, repo)) return alarmed(n, repo);\n  if (n.truncated !== false) return say(\"UNPROVEN\", `the headcount run that started ${at} had more changes than the summary lists`);\n",
+  "r1#1 a cut-off run is UNPROVEN even when it alarmed (G1); an overlapping alarmed run stays FAIL (G9a)",
+  "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-future",
+  "src/headcountrun.ts",
+  "const future = (t: number) => t > now + SKEW_MS;",
+  "const future = (t: number) => false;",
+  "r1#4 impossible times are UNPROVEN: future runs, completion before start, starts out of order, a future change time",
+  "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-backwards",
+  "src/headcountrun.ts",
+  " || ms(n.completed_at) < ms(n.started_at)) ||",
+  ") ||",
+  "r1#4 impossible times are UNPROVEN: future runs, completion before start, starts out of order, a future change time",
+  "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-order",
+  "src/headcountrun.ts",
+  "if (bySeq.some((n, i) => i > 0 && (n.seq === bySeq[i - 1].seq || ms(n.started_at) <= ms(bySeq[i - 1].started_at)))) return",
+  "if (false) return",
+  "r1#4 impossible times are UNPROVEN: future runs, completion before start, starts out of order, a future change time",
+  "test/headcountrun.test.ts"
  ]
 ]

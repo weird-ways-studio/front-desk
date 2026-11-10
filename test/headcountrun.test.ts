@@ -303,3 +303,38 @@ test("agent.mjs headcount: --after must be a readable ISO time; unknown flags ar
     assert.throws(() => headcountArgs(bad), (e: Error & { exit?: number }) => e.exit === 2);
   }
 });
+
+// ---- Codex build r1 (studio-os REVIEW-codex-6ab972c8-build-r1.md) ----
+
+test("r1#1 a cut-off run is UNPROVEN even when it alarmed (G1); an overlapping alarmed run stays FAIL (G9a)", () => {
+  const cut = run(2, T0, { ok: false, truncated: true, github: { ok: false, repos_added: ["newrepo:private"], repos_removed: [], other_changes: {} } });
+  assert.equal(judge(view([run(1, T0 - 24 * H), cut]), T0 + H).verdict, "UNPROVEN");
+  assert.equal(judge(view([run(1, T0 - 24 * H), cut]), T0 + H, { after: T0 - 12 * H, repo: "newrepo" }).verdict, "UNPROVEN");
+  assert.equal(judge(view([run(1, T0 - 24 * H), cut]), T0 + H, { after: T0 + 30_000, repo: "newrepo" }).verdict, "FAIL");
+});
+
+test("r1#2 an overlapping clean run says later runs cannot replace it, never 'ask again'", () => {
+  const j = judge(view([run(1, T0 - 24 * H), run(2, T0), run(3, T0 + 24 * H)]), T0 + 25 * H, { after: T0 + 30_000 });
+  assert.equal(j.verdict, "UNPROVEN");
+  assert.match(j.line, /cannot prove the change clean, and later runs do not replace it/);
+  assert.doesNotMatch(j.line, /ask again/i);
+});
+
+test("r1#4 impossible times are UNPROVEN: future runs, completion before start, starts out of order, a future change time", () => {
+  const now = Date.parse("2026-11-12T05:00:00Z");
+  // Codex's example: a candidate a day in the future.
+  const ex = view([run(1, Date.parse("2026-11-12T04:17:00Z")), run(2, Date.parse("2026-11-13T04:17:00Z"))]);
+  assert.equal(judge(ex, now).verdict, "UNPROVEN");
+  assert.equal(judge(ex, now, { after: Date.parse("2026-11-12T04:30:00Z") }).verdict, "UNPROVEN");
+  // Within the 5-minute drift allowance is fine.
+  const near = view([run(1, now - 24 * H), run(2, now + 4 * 60_000 - 60_000)]);
+  assert.equal(judge(near, now).verdict, "PASS");
+  const backwards = run(2, T0, { completed_at: iso(T0 - 1000) });
+  assert.equal(judge(view([run(1, T0 - 24 * H), backwards]), T0 + H).verdict, "UNPROVEN");
+  const swapped = view([run(1, T0), run(2, T0 - 24 * H)]);
+  assert.equal(judge(swapped, T0 + H).verdict, "UNPROVEN");
+  assert.equal(judge(swapped, T0 + H, { after: T0 - 30 * H }).verdict, "UNPROVEN");
+  const ok = view([run(1, T0 - 24 * H), run(2, T0)]);
+  assert.equal(judge(ok, T0 + H, { after: T0 + 2 * H }).verdict, "UNPROVEN", "a change time in the future (no run can have completed after it without being in the future itself)");
+  assert.equal(judge(view([run(2, T0)], { seq: 3, started_at: iso(T0 + 48 * H) }), T0 + H).verdict, "UNPROVEN", "a future attempt marker");
+});

@@ -19,6 +19,8 @@ export const LIST_MAX = 50; // entries per repo list
 // Longest allowed time between two runs' starts: the cron in wrangler.jsonc runs once a day (04:17 UTC), plus
 // two hours' slack. A schedule change must change this too (test: "GAP_MS fits the cron").
 export const GAP_MS = 26 * 3600_000;
+// Clock drift allowed between the desk (which stamps runs) and the reader (`now`).
+export const SKEW_MS = 5 * 60_000;
 
 // The GitHub change kinds a summary counts by name (GhSnapshot's lists plus the vault's unreceipted-repo line).
 // `repos` lines go to the two lists instead; anything else counts under "other".
@@ -144,12 +146,12 @@ function alarmed(n: RunSummary, repo?: string): Judged {
   return repoNamed(n, repo) ? say("FAIL", `repo ${repo} was flagged by the headcount run that started ${when(ms(n.started_at))}`) : say("FAIL", `the headcount run that started ${when(ms(n.started_at))} alarmed (${counts(n)})`);
 }
 
-/** One run on its own: errors first (unconfirmed), then the alarm, then a cut-off list, then clean. */
+/** One run on its own: errors first (unconfirmed), then a cut-off list (unconfirmed, G1), then the alarm, then clean. */
 function single(n: RunSummary, repo?: string): Judged {
   const at = when(ms(n.started_at));
   if (!Array.isArray(n.errors) || n.errors.length) return say("UNPROVEN", `the headcount run that started ${at} could not finish its check (${(n.errors ?? []).join(", ") || "errors unreadable"})`);
-  if (n.ok !== true || repoNamed(n, repo)) return alarmed(n, repo);
   if (n.truncated !== false) return say("UNPROVEN", `the headcount run that started ${at} had more changes than the summary lists`);
+  if (n.ok !== true || repoNamed(n, repo)) return alarmed(n, repo);
   if (n.github?.ok !== true) return say("UNPROVEN", `the headcount run that started ${at} did not confirm GitHub`);
   return say("PASS", `the headcount run that started ${at} was clean (Cloudflare and GitHub)${repo ? `; repo ${repo} did not set it off` : ""}`);
 }
@@ -170,6 +172,12 @@ export function judge(view: RunView, now: number, opts: { after?: number; repo?:
   const newest = runs.reduce((a, b) => (b.seq > a.seq ? b : a));
   const attempt = view.attempt;
   if (attempt && (!Number.isSafeInteger(attempt.seq) || Number.isNaN(ms(attempt.started_at)))) return say("UNPROVEN", "the last run's marker is unreadable");
+  // Times must be possible (Codex build r1 #4): nothing later than now (beyond SKEW_MS), no run completing before it
+  // started, and starts rising with the run number. Otherwise the history cannot be trusted.
+  const bySeq = [...runs].sort((a, b) => a.seq - b.seq);
+  const future = (t: number) => t > now + SKEW_MS;
+  if (bySeq.some((n) => future(ms(n.started_at)) || future(ms(n.completed_at)) || ms(n.completed_at) < ms(n.started_at)) || (attempt && future(ms(attempt.started_at)))) return say("UNPROVEN", "a stored run has an impossible time (in the future, or completed before it started)");
+  if (bySeq.some((n, i) => i > 0 && (n.seq === bySeq[i - 1].seq || ms(n.started_at) <= ms(bySeq[i - 1].started_at)))) return say("UNPROVEN", "the stored runs are out of order");
 
   if (opts.after === undefined) {
     if (attempt && attempt.seq > newest.seq) return say("UNPROVEN", `the last run (started ${when(ms(attempt.started_at))}) is still running or did not publish`);
@@ -189,7 +197,7 @@ export function judge(view: RunView, now: number, opts: { after?: number; repo?:
   if (ms(c.started_at) - ms(prev.started_at) > GAP_MS) return say("UNPROVEN", `more than 26 hours between the headcount run that started ${when(ms(prev.started_at))} and the next; a run may be missing`);
   if (ms(c.started_at) <= after) {
     if (Array.isArray(c.errors) && !c.errors.length && c.ok !== true) return alarmed(c, opts.repo);
-    return say("UNPROVEN", `the headcount run that started ${when(ms(c.started_at))} overlapped ${when(after)}; its read may predate the change. Ask again after the next run`);
+    return say("UNPROVEN", `the headcount run that started ${when(ms(c.started_at))} overlapped ${when(after)}; its read may predate the change. This run cannot prove the change clean, and later runs do not replace it`);
   }
   return single(c, opts.repo);
 }
