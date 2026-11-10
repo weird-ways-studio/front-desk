@@ -7,6 +7,10 @@
 //   node scripts/agent.mjs wait <collect-url> [minutes]  collects as soon as Ben approves (default 15 min)
 //   node scripts/agent.mjs menu <desk-url>         lists the jobs you may ask for (generated from src/jobs.ts)
 //   node scripts/agent.mjs get <card-url>          signed GET: a card's states, answers and receipts (card 85818ab1)
+//   node scripts/agent.mjs headcount <desk-url> [--after <iso>] [--repo <name>]
+//                                                  the scheduled count's last runs, then one verdict line (PASS /
+//                                                  FAIL / UNPROVEN, rules in src/headcountrun.ts judge()); exit 0
+//                                                  only on PASS, 1 on FAIL, 2 on UNPROVEN or a usage error
 //
 // The private key file (default ~/.config/front-desk/cbox-key.pem, mode 0600) stays on the c-box and is
 // never put in 1Password or a repo. The Access login comes from CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET
@@ -16,6 +20,8 @@ import { createHash, createPrivateKey, generateKeyPairSync, sign } from "node:cr
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
+// The verdict rules, shared with the desk's tests (Node strips the types; no build step).
+import { judge } from "../src/headcountrun.ts";
 
 
 const KEY = process.env.CBOX_KEY_FILE ?? `${homedir()}/.config/front-desk/cbox-key.pem`;
@@ -52,7 +58,8 @@ async function get(url) {
   return fetch(u, { headers: { ...access(), ...signRequest(readFileSync(KEY), "GET", u.pathname, "") } });
 }
 
-async function main([cmd, url, body = ""]) {
+async function main([cmd, url, body = "", ...more]) {
+  const rest = [body, ...more].filter((x) => x !== "");
   if (cmd === "keygen") {
     if (existsSync(KEY)) throw new Error(`${KEY} exists; remove it first to make a new key`);
     const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
@@ -85,6 +92,17 @@ async function main([cmd, url, body = ""]) {
     console.log(`\nModes: ${Object.entries(m.modes).map(([k, v]) => `${k} = ${v}`).join(" ")}\n${m.new_job}\nAsk: ${m.ask}`);
     return;
   }
+  if (cmd === "headcount" && url) {
+    const opts = headcountArgs(rest);
+    // Could not read = not proven: exit 2, never 1 (FAIL means a run alarmed).
+    const view = await fetch(new URL("/headcount", url), { headers: access() })
+      .then(async (res) => (res.ok ? res.json() : Promise.reject(new Error(`${res.status} ${await res.text()}`))))
+      .catch((e) => { throw Object.assign(new Error(`UNPROVEN: could not read the headcount runs (${e.message})`), { exit: 2 }); });
+    console.log(JSON.stringify(view, null, 2));
+    const j = judge(view, Date.now(), opts);
+    console.log(j.line);
+    process.exit(j.verdict === "PASS" ? 0 : j.verdict === "FAIL" ? 1 : 2);
+  }
   if (cmd === "get" && url) {
     const res = await get(url);
     console.log(res.status, await res.text());
@@ -96,7 +114,19 @@ async function main([cmd, url, body = ""]) {
     console.log(res.status, await res.text());
     return;
   }
-  throw new Error("usage: agent.mjs keygen | agent.mjs post <url> [json] | agent.mjs wait <collect-url> [minutes] | agent.mjs menu <desk-url> | agent.mjs get <card-url>");
+  throw new Error("usage: agent.mjs keygen | agent.mjs post <url> [json] | agent.mjs wait <collect-url> [minutes] | agent.mjs menu <desk-url> | agent.mjs get <card-url> | agent.mjs headcount <desk-url> [--after <iso>] [--repo <name>]");
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) main(process.argv.slice(2)).catch((e) => { console.error(e.message); process.exit(1); });
+/** `--after <iso>` and `--repo <name>`; anything else, or an unreadable time, is a usage error (exit 2). */
+export function headcountArgs(args) {
+  const opts = {};
+  for (let i = 0; i < args.length; i += 2) {
+    const [flag, value] = [args[i], args[i + 1]];
+    if (flag === "--after" && value && /^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(Date.parse(value))) opts.after = Date.parse(value);
+    else if (flag === "--repo" && value) opts.repo = value;
+    else throw Object.assign(new Error(`usage: headcount <desk-url> [--after <iso time>] [--repo <name>] (could not read ${flag ?? "nothing"} ${value ?? ""})`), { exit: 2 });
+  }
+  return opts;
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) main(process.argv.slice(2)).catch((e) => { console.error(e.message); process.exit(e.exit ?? 1); });

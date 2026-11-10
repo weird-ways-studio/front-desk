@@ -9,7 +9,7 @@ import type { VaultApi, VaultCardApi } from "../vault/src/api.ts";
 import { approvePage, cardPage, cboxKeyPage, enrollPage, logPage, passkeysPage, prfCheckPage } from "./page.ts";
 import type { Recorder } from "./recorder.ts";
 
-export const VERSION = "0.12.0";
+export const VERSION = "0.13.0";
 
 // Who is calling, worked out by the Worker from Cloudflare Access (index.ts):
 // owner from Ben's email (callerOf), agent from the service-token ticket (agent.ts).
@@ -35,7 +35,8 @@ export async function callerOf(access: ExecutionContext["access"], ownerEmail: s
 // Which caller each route needs. Ben enrolls, approves and reads the log; the agent asks and collects.
 function needs(m: string, parts: string[]): Caller | null {
   if (parts[0] === "enroll" || parts[0] === "approve" || parts[0] === "log" || parts[0] === "passkeys" || parts[0] === "prf-check" || parts[0] === "cbox-key") return "owner";
-  if ((m === "POST" && parts[0] === "request") || parts[0] === "collect" || parts[0] === "card" || (m === "GET" && parts[0] === "menu")) return "agent";
+  // /headcount (card build 5 6ab972c8): every method needs the agent, so Ben's login and unknown callers get 403.
+  if ((m === "POST" && parts[0] === "request") || parts[0] === "collect" || parts[0] === "card" || parts[0] === "headcount" || (m === "GET" && parts[0] === "menu")) return "agent";
   return null;
 }
 
@@ -90,6 +91,8 @@ export async function route(request: Request, store: Store, who: Who, now = Date
     }
     if (m === "GET" && url.pathname === "/health") return json({ ok: true, version: VERSION });
     if (m === "GET" && url.pathname === "/menu") return json(menu());
+    // The last headcount runs (src/headcountrun.ts); reading writes nothing and adds no log row.
+    if (m === "GET" && url.pathname === "/headcount") return json(await desk.headcountRuns());
     // Agent calls: the raw body is kept so the c-box signature can be checked over it.
     const text = m === "POST" && (parts[0] === "request" || parts[0] === "collect" || parts[0] === "card") ? await request.text() : "";
     const source: Source = {

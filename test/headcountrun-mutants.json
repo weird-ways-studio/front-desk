@@ -1,0 +1,138 @@
+[
+ [
+  "hc-errors-first",
+  "src/headcountrun.ts",
+  "if (!Array.isArray(n.errors) || n.errors.length) return say(\"UNPROVEN\"",
+  "if (false) return say(\"UNPROVEN\"",
+  "T9 now: PASS only for a clean, published run that started within 26 hours",
+  "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-ok",
+  "src/headcountrun.ts",
+  "if (n.ok !== true || repoNamed(n, repo)) return alarmed(n, repo);",
+  "if (repoNamed(n, repo)) return alarmed(n, repo);",
+  "T9 every Cloudflare mismatch, and any alarmed run, is FAIL",
+  "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-repo-named",
+  "src/headcountrun.ts",
+  "if (n.ok !== true || repoNamed(n, repo)) return alarmed(n, repo);",
+  "if (n.ok !== true) return alarmed(n, repo);",
+  "T9 after a change: the first run after it decides; named repo FAIL; a repo_ids-only alarm FAIL unnamed",
+  "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-truncated",
+  "src/headcountrun.ts",
+  "if (n.truncated !== false) return",
+  "if (false) return",
+  "T9 now: PASS only for a clean, published run that started within 26 hours",
+  "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-github-ok",
+  "src/headcountrun.ts",
+  "if (n.github?.ok !== true) return",
+  "if (false) return",
+  "T9 now: PASS only for a clean, published run that started within 26 hours",
+  "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-stale",
+  "src/headcountrun.ts",
+  "if (now - ms(newest.started_at) > GAP_MS) return",
+  "if (false) return",
+  "T9 now: PASS only for a clean, published run that started within 26 hours",
+  "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-unpublished",
+  "src/headcountrun.ts",
+  "if (attempt && attempt.seq > newest.seq) return say(\"UNPROVEN\", `the last run (started",
+  "if (false) return say(\"UNPROVEN\", `the last run (started",
+  "T11 a clean run, then a run whose save fails: UNPROVEN, never the old PASS",
+  "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-pred-exact",
+  "src/headcountrun.ts",
+  "runs.find((n) => n.seq === c.seq - 1)",
+  "runs.find((n) => n.seq < c.seq)",
+  "T9 after a change: the run before the first one must be in the history",
+  "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-gap",
+  "src/headcountrun.ts",
+  "if (ms(c.started_at) - ms(prev.started_at) > GAP_MS) return",
+  "if (false) return",
+  "T13 a run lost before its marker, between two clean runs 48 hours apart: UNPROVEN",
+  "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-overlap",
+  "src/headcountrun.ts",
+  "if (ms(c.started_at) <= after) {",
+  "if (false) {",
+  "T12 a run that overlaps the change: FAIL if it alarmed, else UNPROVEN, and the judge never moves on to a later run",
+  "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-first-run",
+  "src/headcountrun.ts",
+  "const c = done[0];",
+  "const c = done[done.length - 1];",
+  "T12 a run that overlaps the change: FAIL if it alarmed, else UNPROVEN, and the judge never moves on to a later run",
+  "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-error-code",
+  "src/headcountrun.ts",
+  "if (r.error) errors.push(\"headcount_failed\");",
+  "if (r.error) errors.push(r.error as \"headcount_failed\");",
+  "T4 errors are fixed codes only: no part of any message survives",
+  "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-kind-list",
+  "src/headcountrun.ts",
+  "const k = kind && (KINDS as readonly string[]).includes(kind) ? kind : \"other\";",
+  "const k = kind || \"other\";",
+  "T1 the summary holds exactly the listed fields and no key, member, App, PAT or deploy-key string",
+  "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-cap",
+  "src/headcountrun.ts",
+  "repos_added: added.slice(0, LIST_MAX)",
+  "repos_added: added",
+  "T5 more than 50 added repos: 50 listed and truncated",
+  "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-log-isolated",
+  "src/desk.ts",
+  "await this.log({ event: r.ok ? \"headcount_ok\" : \"headcount_mismatch\", detail }, now).catch(() => undefined);",
+  "await this.log({ event: r.ok ? \"headcount_ok\" : \"headcount_mismatch\", detail }, now);",
+  "T6 the log write failing does not stop the summary or the alarm; the summary is built from the result, not the log",
+  "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-save-isolated",
+  "src/desk.ts",
+  "      // logged below, after the alarm\n",
+  "      throw new Error(\"save failed\");\n",
+  "T10 saving failing, and its diagnostic log failing, never stop the alarm, which gets the same ok and words",
+  "test/headcountrun.test.ts"
+ ],
+ [
+  "hc-route-agent-only",
+  "src/routes.ts",
+  "parts[0] === \"headcount\" || ",
+  "",
+  "T3/T8 GET /headcount: agent 200; no login and Ben's login 403; other methods not served; a read changes nothing",
+  "test/headcountrun.test.ts"
+ ]
+]
