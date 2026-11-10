@@ -10,15 +10,16 @@ import { cpSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// Vault mutants run test/cards.test.ts; desk mutants (test/carddesk-mutants.json) name their own test file.
-const mutants = [...JSON.parse(readFileSync("test/cards-mutants.json", "utf8")), ...JSON.parse(readFileSync("test/carddesk-mutants.json", "utf8"))] as [string, string, string, string, string, string?][];
+// Vault mutants run test/cards.test.ts; desk mutants (test/carddesk-mutants.json) and headcount-run mutants
+// (test/headcountrun-mutants.json, card build 5 6ab972c8) name their own test file.
+const mutants = [...JSON.parse(readFileSync("test/cards-mutants.json", "utf8")), ...JSON.parse(readFileSync("test/carddesk-mutants.json", "utf8")), ...JSON.parse(readFileSync("test/headcountrun-mutants.json", "utf8"))] as [string, string, string, string, string, string?][];
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 for (const [id, file, find, replace, name, testFile = "test/cards.test.ts"] of mutants) {
   test(`mutant ${id} is caught by "${name}"`, { timeout: 60_000 }, () => {
     const dir = mkdtempSync(join(tmpdir(), "fd-mut-"));
     try {
-      for (const d of ["src", "vault", "test", "package.json", "tsconfig.json"]) cpSync(d, join(dir, d), { recursive: true });
+      for (const d of ["src", "vault", "test", "scripts", "package.json", "tsconfig.json", "wrangler.jsonc"]) cpSync(d, join(dir, d), { recursive: true });
       symlinkSync(join(process.cwd(), "node_modules"), join(dir, "node_modules"));
       const src = readFileSync(file, "utf8");
       assert.equal(src.split(find).length - 1, 1, `${id}: the text to mutate occurs exactly once`);

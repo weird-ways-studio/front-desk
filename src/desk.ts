@@ -14,6 +14,7 @@ import { ascii, name, plainChanges } from "./ghplain.ts";
 import { JOBS, type Job, type JobName } from "./jobs.ts";
 import { currentKey, fingerprint, keyRev, type CboxKey } from "./cboxkey.ts";
 import type { Headcount, VaultApi, VaultCardApi, VaultRunApi } from "../vault/src/api.ts";
+import { beginRun, runSummary, readRuns, saveRun, type RunAttempt, type RunView } from "./headcountrun.ts";
 import { ALREADY_USED, APPROVAL_API_VERSION, REFUSED_BEFORE_RUN, TOO_OLD } from "../vault/src/approval.ts";
 export type VaultStage = "before" | "used" | "old" | "unknown";
 import { RecorderError, type Receipt, type Recorder, type Stage } from "./recorder.ts";
@@ -674,7 +675,17 @@ export class Desk {
    * clean, a fail with the detail otherwise. A night with no all-clear -- a mismatch, an error, or
    * no run at all -- is what alerts Ben's phone, from healthchecks.io, off the c-box.
    */
-  async headcount(alarm: Alarm | undefined, now: number): Promise<Headcount> {
+  // Also publishes the run summary agents read at GET /headcount (card build 5 6ab972c8, src/headcountrun.ts). The alarm
+  // never depends on that: the log line, the summary and the alarm are separate steps, each in its own try, and
+  // the alarm runs with the same `ok` and words whatever the others did (refinement G6). `clock` gives the
+  // completion time (tests set it).
+  async headcount(alarm: Alarm | undefined, now: number, clock: () => number = Date.now): Promise<Headcount> {
+    let attempt: RunAttempt | undefined;
+    try {
+      attempt = await beginRun(this.store, now);
+    } catch {
+      // No marker: this run leaves no trace in /headcount; the 26 h gap rule still catches it (refinement G3 limit).
+    }
     let r: Headcount;
     try {
       if (!this.hooks.vault) throw new Error("vault not connected");
@@ -683,14 +694,31 @@ export class Desk {
       r = { ok: false, tokens: -1, unexpected: [], stretched: [], missing: [], cleanup: [], github: { ok: false, changes: [] }, error: (e as Error).message.slice(0, 120) };
     }
     const detail = headcountWords(r);
-    await this.log({ event: r.ok ? "headcount_ok" : "headcount_mismatch", detail }, now);
+    await this.log({ event: r.ok ? "headcount_ok" : "headcount_mismatch", detail }, now).catch(() => undefined);
+    let saved = false;
+    try {
+      if (attempt) {
+        await saveRun(this.store, runSummary(r, attempt, clock()));
+        saved = true;
+      }
+    } catch {
+      // logged below, after the alarm
+    }
+    let alarmFailed: string | undefined;
     try {
       if (!alarm) throw new Error("no alarm configured");
       await alarm(r.ok, detail);
     } catch (e) {
-      await this.log({ event: "headcount_alarm_failed", detail: (e as Error).message.slice(0, 120) }, now);
+      alarmFailed = String((e as Error)?.message ?? e).slice(0, 120);
     }
+    if (!saved) await this.log({ event: "headcount_run_save_failed" }, now).catch(() => undefined);
+    if (alarmFailed !== undefined) await this.log({ event: "headcount_alarm_failed", detail: alarmFailed }, now).catch(() => undefined);
     return r;
+  }
+
+  /** What agents read at GET /headcount (src/headcountrun.ts). Reads only. */
+  async headcountRuns(): Promise<RunView> {
+    return readRuns(this.store);
   }
 
   // Checks Ben's passkey answer against a challenge already taken. Every failure is logged through `fail`.
