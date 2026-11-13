@@ -322,3 +322,12 @@ test("E1.6 the bound: over CF_LIST_MAX in either list signs unknown, never a cut
   assert.equal(effectsField({ made: ids, deleted: [], open: 0 }), "unknown");
   assert.equal(effectsField({ made: [], deleted: [], open: 1 }), "unknown");
 });
+
+test("E1.1 headcount replace with one stuck old key: the tap signs unknown and the key stays on retired", async () => {
+  const { vault, cf, store } = await fresh();
+  const first = await run(vault, "cf.token.headcount.setup");
+  cf.rules.push({ method: "DELETE", path: new RegExp(`${first.key_id}$`), respond: () => Response.json({ success: false, errors: [] }, { status: 500 }) });
+  const second = await run(vault, "cf.token.headcount.setup");
+  assert.equal(second.cf, "unknown", "a delete that failed may still have happened");
+  assert.deepEqual((await store.get<any>("headcount")).retired, [first.key_id]);
+});
