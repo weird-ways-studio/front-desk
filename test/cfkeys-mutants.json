@@ -134,5 +134,13 @@
   " });",
   "E1.4 card: the result names the keys the entry made and deleted; a test.echo entry carries no cf",
   "test/cfkeys-desk.test.ts"
+ ],
+ [
+  "sweep-issued-unrecorded",
+  "vault/src/vault.ts",
+  "master.remove(m.account_id, k.id)",
+  "master.call(\"DELETE\", `/accounts/${m.account_id}/tokens/${k.id}`)",
+  "E1.1 sweepIssued: an expired handed-out key deleted is listed; a refused 404 is not; a 500 is unknown",
+  "test/cfkeys.test.ts"
  ]
 ]

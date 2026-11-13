@@ -331,3 +331,77 @@ test("E1.1 headcount replace with one stuck old key: the tap signs unknown and t
   assert.equal(second.cf, "unknown", "a delete that failed may still have happened");
   assert.deepEqual((await store.get<any>("headcount")).retired, [first.key_id]);
 });
+
+// Codex r1 (build) fix-now: the E1.1 failure points for every applicable master job, and the issued-key sweep.
+const USE_PATH: Record<string, RegExp> = { "cf.dns.list": /dns_records/, "cf.zone.read": new RegExp(`/zones/${ZONE_ID}$`), "cf.audit.read": /audit_logs/ };
+const fail = (status: number, success: boolean | undefined = false) => () => Response.json(success === undefined ? {} : { success, errors: [] }, { status });
+
+test("E1.1 every read job: mint refused -> empty lists; use fails -> lists what it did; delete fails -> unknown", async () => {
+  for (const job of Object.keys(USE_PATH)) {
+    {
+      const { vault, cf } = await fresh();
+      cf.rules.push({ method: "POST", path: /tokens$/, respond: fail(403) });
+      const r = await read(vault, job);
+      assert.equal(r.ok, false, job);
+      assert.deepEqual(r.cf, { made: [], deleted: [] }, `${job}: refused mint`);
+    }
+    {
+      const { vault, cf } = await fresh();
+      cf.rules.push({ method: "GET", path: USE_PATH[job], respond: fail(500) });
+      const r = await read(vault, job);
+      assert.equal(r.ok, false, job);
+      assert.equal(r.cf.made.length, job === "cf.audit.read" ? 1 : 2, `${job}: use failed`);
+      assert.deepEqual(r.cf.deleted, r.cf.made, `${job}: every helper still deleted`);
+    }
+    {
+      const { vault, cf } = await fresh();
+      cf.rules.push({ method: "DELETE", path: /tokens\//, times: 9, respond: fail(500) });
+      assert.equal((await read(vault, job)).cf, "unknown", `${job}: delete failed`);
+    }
+  }
+});
+
+test("E1.1 headcount setup: mint refused -> empty lists; list fails -> the new key made and deleted; must-fail mint 500 -> unknown", async () => {
+  {
+    const { vault, cf } = await fresh();
+    cf.rules.push({ method: "POST", path: /tokens$/, respond: fail(403) });
+    const r = await run(vault, "cf.token.headcount.setup");
+    assert.equal(r.ok, false);
+    assert.deepEqual(r.cf, { made: [], deleted: [] });
+  }
+  {
+    const { vault, cf } = await fresh();
+    cf.rules.push({ method: "GET", path: /tokens\?/, respond: fail(500) });
+    const r = await run(vault, "cf.token.headcount.setup");
+    assert.equal(r.ok, false);
+    assert.deepEqual(r.cf, { made: [r.key_id], deleted: [r.key_id] }, "a key that could not list is deleted, and both are named");
+  }
+  {
+    const { vault, cf } = await fresh();
+    let posts = 0;
+    cf.rules.push({ method: "POST", path: /tokens$/, times: 2, respond: (realCall) => (++posts === 1 ? realCall() : fail(500)()) });
+    const r = await run(vault, "cf.token.headcount.setup");
+    assert.equal(r.ok, false);
+    assert.equal(r.cf, "unknown", "a 500 on the must-fail mint may have made a key");
+  }
+});
+
+test("E1.1 sweepIssued: an expired handed-out key deleted is listed; a refused 404 is not; a 500 is unknown", async () => {
+  const old = hexId(0xc1);
+  const cases: [string, Rule | undefined, unknown][] = [
+    ["deleted", undefined, "listed"],
+    ["404", { method: "DELETE", path: /c1$/, respond: fail(404) }, "closed"],
+    ["500", { method: "DELETE", path: /c1$/, respond: fail(500) }, "unknown"],
+  ];
+  for (const [label, rule, want] of cases) {
+    for (const job of ["cf.zone.read", "cf.token.headcount.setup"]) {
+      const { vault, cf, store } = await fresh();
+      cf.tokens.push({ id: old });
+      await store.put("master", { ...(await store.get<any>("master")), issued: [{ id: old, expires_on: "2026-11-13T11:00:00Z" }] });
+      if (rule) cf.rules.push({ ...rule }); // a fresh copy: a rule counts down its own uses
+      const r = job === "cf.zone.read" ? await read(vault, job) : await run(vault, job);
+      if (want === "unknown") assert.equal(r.cf, "unknown", `${job} ${label}`);
+      else assert.equal(r.cf.deleted.includes(old), want === "listed", `${job} ${label}: ${JSON.stringify(r.cf)}`);
+    }
+  }
+});
