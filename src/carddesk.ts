@@ -12,7 +12,7 @@
 
 import type { AuthenticationResponseJSON } from "@simplewebauthn/server";
 import { generateAuthenticationOptions } from "@simplewebauthn/server";
-import { APPROVE_WINDOW_MS, CHALLENGE_TTL_MS, COLLECT_WINDOW_MS, Desk, DeskError, PRF_MASTER_LABEL, assertionOf, challengeCarries, grantHash, hexToBytes, prfOf, saltFor, withoutSecret, type Grant, type Source, type Store } from "./desk.ts";
+import { APPROVE_WINDOW_MS, CHALLENGE_TTL_MS, COLLECT_WINDOW_MS, Desk, DeskError, PRF_MASTER_LABEL, assertionOf, cfOf, challengeCarries, grantHash, hexToBytes, prfOf, saltFor, withoutSecret, type Grant, type Source, type Store } from "./desk.ts";
 import { CARD_ELIGIBLE, JOBS, type Job, type JobName } from "./jobs.ts";
 import { keyRev } from "./cboxkey.ts";
 import type { Receipt } from "./recorder.ts";
@@ -406,7 +406,10 @@ export class CardDesk extends Desk {
         }
         repo = { repo_id: facts.repo_id };
       }
-      const body = JSON.stringify({ v: 1, grant: g.id, stage: "result", job: g.job, request: g.recorded!.request, outcome, at, ...repo });
+      // The Cloudflare keys this entry made and deleted, from the answer stored now; none held when first frozen: "unknown"
+      // (card 139071ea R3). Frozen with the rest, so every resend carries the same lists.
+      const cf = cfOf(g.job, g.result);
+      const body = JSON.stringify({ v: 1, grant: g.id, stage: "result", job: g.job, request: g.recorded!.request, outcome, at, ...repo, ...(cf !== undefined ? { cf } : {}) });
       g = await this.grant(gid);
       if (g.result_body === undefined) {
         g = { ...g, result_body: body };

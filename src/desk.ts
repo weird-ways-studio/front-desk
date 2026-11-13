@@ -16,6 +16,7 @@ import { currentKey, fingerprint, keyRev, type CboxKey } from "./cboxkey.ts";
 import type { Headcount, VaultApi, VaultCardApi, VaultRunApi } from "../vault/src/api.ts";
 import { beginRun, runSummary, readRuns, saveRun, type RunAttempt, type RunView } from "./headcountrun.ts";
 import { ALREADY_USED, APPROVAL_API_VERSION, REFUSED_BEFORE_RUN, TOO_OLD } from "../vault/src/approval.ts";
+import { CF_LIST_MAX, type CfField } from "../vault/src/cloudflare.ts";
 export type VaultStage = "before" | "used" | "old" | "unknown";
 import { RecorderError, type Receipt, type Recorder, type Stage } from "./recorder.ts";
 
@@ -295,6 +296,8 @@ export interface DeskHooks {
   recorder?: Recorder;
   // Ben's phone, for a job that ran but whose result could not be recorded (phoneAlert).
   alert?: Alert;
+  // The completion time of an ordinary tap's result, read after the vault answers (card 139071ea R4). Default Date.now.
+  clock?: () => number;
 }
 
 // The public parts of Ben's passkey answer, kept so the Observatory can check the signature itself
@@ -314,6 +317,28 @@ export function prfOf(input: unknown): string | null {
 }
 
 const isVault = (job: JobName) => (JOBS[job] as Job).vault === true;
+
+// The jobs that open the Cloudflare master (card 139071ea): only their results carry `cf`. The Observatory keeps its own
+// copy of this list (cfRefusal in its src/card.ts).
+export const CF_MASTER_JOBS: readonly string[] = Object.freeze(["cf.zone.read", "cf.dns.list", "cf.audit.read", "cf.token.headcount.setup", "cf.token.accept"]);
+const KEY_ID = /^[0-9a-f]{32}$/;
+const idList = (v: unknown): v is string[] => Array.isArray(v) && v.length <= CF_LIST_MAX && v.every((x) => typeof x === "string" && KEY_ID.test(x));
+
+/**
+ * The `cf` a result record signs (card 139071ea R1, R9), for both the card and the ordinary-tap path: the vault's lists
+ * copied only when well formed (exactly `made` and `deleted`, each at most CF_LIST_MAX 32-hex ids); anything else --
+ * no answer, an error, "unknown", a malformed field -- is "unknown". The desk never builds lists itself. Undefined for
+ * a job that never opens the master: its result carries no `cf`.
+ */
+export function cfOf(job: string, answer: unknown): CfField | undefined {
+  if (!CF_MASTER_JOBS.includes(job)) return undefined;
+  const cf = (answer as { cf?: unknown } | null | undefined)?.cf;
+  if (cf && typeof cf === "object" && !Array.isArray(cf) && Object.keys(cf).sort().join() === "deleted,made") {
+    const { made, deleted } = cf as { made: unknown; deleted: unknown };
+    if (idList(made) && idList(deleted)) return { made: [...made], deleted: [...deleted] };
+  }
+  return "unknown";
+}
 
 /**
  * Where a failed vault call stopped, from its exact error message only (card bb86abf0 R6): "before" = a
@@ -358,10 +383,11 @@ export class Desk {
   }
 
   // After an effect: never throws, since the effect has happened; a miss is logged for Ben.
-  private async recordResult(id: string, ok: boolean, now: number): Promise<void> {
+  // `done.at`: when the job finished (a vault job: read after its answer, R4); `done.cf`: what it did in Cloudflare.
+  private async recordResult(id: string, ok: boolean, now: number, done: { at?: number; cf?: CfField } = {}): Promise<void> {
     const g = await this.grant(id);
     try {
-      const r = await this.record(g, "result", { outcome: ok ? "done" : "failed", at: now }, now);
+      const r = await this.record(g, "result", { outcome: ok ? "done" : "failed", at: done.at ?? now, ...(done.cf !== undefined ? { cf: done.cf } : {}) }, now);
       const latest = await this.grant(id);
       await this.store.put(`grant:${id}`, { ...latest, recorded: { ...latest.recorded!, result: r.seq } });
     } catch {
@@ -656,7 +682,9 @@ export class Desk {
       result = { error: (message || "unknown error").slice(0, 120), vault_stage: vaultStage(message) };
       await this.log({ event: "job_failed", ...this.grantFacts(g), detail: (message || "unknown error").slice(0, 120) }, now);
     }
-    await this.recordResult(id, (result as { ok?: unknown } | null)?.ok === true, now);
+    // The completion time, after the vault answered: every effect of the tap lies between approved_at and this (R4).
+    const finished = (this.hooks.clock ?? Date.now)();
+    await this.recordResult(id, (result as { ok?: unknown } | null)?.ok === true, now, { at: finished, cf: cfOf(g.job, result) });
     // Re-read: other requests ran while the vault worked; only the result is added. If Ben removed or
     // replaced the c-box key meanwhile, a minted key's secret is dropped, never released.
     const latest = await this.grant(id);

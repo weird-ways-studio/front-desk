@@ -3,7 +3,7 @@
 // his tap, uses it for one job from a fixed list, and never returns it.
 // Design: studio-os docs/specifications/face-id-access/C4-SPIKE.md sections 3.4-3.7.
 
-import { Cloudflare, type Fetch } from "./cloudflare.ts";
+import { Cloudflare, effectsField, newEffects, type CfField, type Effects, type Fetch } from "./cloudflare.ts";
 import { STUDIO_ZONES } from "./zones.ts";
 import { GitHub, appJwt, canonical, checkApp, checkInstallation, convert, diff, installationKey, pkcs8FromPem, sha256Hex, snapshot, type AppKind, type GhSnapshot } from "./github.ts";
 import { admit, checkSigned } from "./approval.ts";
@@ -25,6 +25,9 @@ export const DNS_MAX = 500;
 // Cloudflare calls unbounded (card 85818ab1 F9, Codex r1 R7). What is left stays recorded, shows in the tap's
 // result and the nightly count, and is tried again at the next tap.
 export const SWEEP_DELETES = 1;
+// Older headcount keys one setup tries to delete (card 139071ea R10): an attempt cap, so one tap's `cf.deleted` stays
+// within CF_LIST_MAX; every id not tried stays on `retired` for the next setup.
+export const OLD_HEADCOUNT_DELETES = 8;
 export const AUDIT_MAX = 300;
 export const AUDIT_MAX_DAYS = 7;
 // A read's answer is stored in the grant until the agent collects it. Durable Object storage holds at most
@@ -102,6 +105,7 @@ interface HeadcountKey {
 
 export interface HeadcountSetupResult {
   leftover?: string[]; // earlier short keys this tap's sweep could not confirm deleted (R10)
+  cf?: CfField; // the Cloudflare keys this tap made and deleted, or "unknown" (card 139071ea)
   ok: boolean; // true only when the new key could list and was refused a mint
   master: { token_id: string; locked_to_passkey_now: boolean };
   key_id: string | null;
@@ -130,6 +134,7 @@ interface GhMainApp extends GhApp {
 // Job cf.token.accept: which unexpected keys Ben's tap added to what the audit expects.
 export interface CfAcceptResult {
   leftover?: string[]; // earlier short keys this tap's sweep could not confirm deleted (R10)
+  cf?: CfField; // the Cloudflare keys this tap made and deleted, or "unknown" (card 139071ea)
   ok: boolean;
   accepted: string[];
   master: { token_id: string; locked_to_passkey_now: boolean };
@@ -167,6 +172,7 @@ export interface Headcount {
 // A read job's answer. Only `data` is the reading; the rest is what the vault did to get it.
 export interface ReadResult {
   leftover?: string[]; // earlier short keys this tap's sweep could not confirm deleted (R10)
+  cf?: CfField; // the Cloudflare keys this tap made and deleted, or "unknown" (card 139071ea)
   ok: boolean; // true only when the read came back and every short key was deleted
   master: { token_id: string; locked_to_passkey_now: boolean };
   job: string;
@@ -318,11 +324,13 @@ export class VaultLogic {
     const m = await this.master();
     if (!m) throw new VaultError("no_master_key");
     const { token, lockedNow } = await this.unlock(m, prf);
-    const master = new Cloudflare(token, this.fetch);
+    const fx = newEffects();
+    const master = new Cloudflare(token, this.fetch, fx);
     const facts = { token_id: m.token_id, locked_to_passkey_now: lockedNow };
     m.issued = await this.sweepIssued(master, m);
     const leftover = await this.sweepHelpers(master, m);
-    return { ...(await this.read(master, m, job, params)), master: facts, leftover };
+    const r = await this.read(master, m, job, params);
+    return { ...r, master: facts, leftover, cf: effectsField(fx) };
   }
 
   // Job cf.token.headcount.setup: opens the master with Ben's tap and makes the headcount key.
@@ -330,16 +338,18 @@ export class VaultLogic {
     const m = await this.master();
     if (!m) throw new VaultError("no_master_key");
     const { token, lockedNow } = await this.unlock(m, prf);
-    const master = new Cloudflare(token, this.fetch);
+    const fx = newEffects();
+    const master = new Cloudflare(token, this.fetch, fx);
     m.issued = await this.sweepIssued(master, m);
     const leftover = await this.sweepHelpers(master, m);
-    return { ...(await this.setupHeadcount(master, m)), master: { token_id: m.token_id, locked_to_passkey_now: lockedNow }, leftover };
+    const r = await this.setupHeadcount(master, m, fx);
+    return { ...r, master: { token_id: m.token_id, locked_to_passkey_now: lockedNow }, leftover, cf: effectsField(fx) };
   }
 
   // Makes the headcount key: account-wide "API Tokens Read", no expiry, no address pin (the nightly
   // run leaves from Cloudflare's network, whose address varies). Before keeping it, the vault needs
   // it to list keys and to be refused a mint; otherwise it is deleted and the old one kept.
-  private async setupHeadcount(master: Cloudflare, m: Master): Promise<Omit<HeadcountSetupResult, "master">> {
+  private async setupHeadcount(master: Cloudflare, m: Master, fx: Effects): Promise<Omit<HeadcountSetupResult, "master">> {
     const account = m.account_id;
     const r: Omit<HeadcountSetupResult, "master"> = { ok: false, key_id: null, lists: false, mint_refused: false, replaced: [] };
     let value: string | undefined;
@@ -349,24 +359,26 @@ export class VaultLogic {
       const read = groups.filter((g) => TOKENS_READ.test(g.name) && g.scopes.includes("com.cloudflare.api.account"));
       if (read.length !== 1) throw new VaultError("permission_group_unclear: API Tokens Read");
       groupId = read[0].id;
-      const made = await master.call<{ id: string; value: string }>("POST", `/accounts/${account}/tokens`, {
+      const made = await master.create<{ id: string; value: string }>(`/accounts/${account}/tokens`, {
         name: `front-desk headcount ${isoSeconds(this.now())}`,
         policies: [{ effect: "allow", resources: { [`com.cloudflare.api.account.${account}`]: "*" }, permission_groups: [{ id: read[0].id }] }],
       });
       r.key_id = made.id;
       value = made.value;
-      const cf = new Cloudflare(made.value, this.fetch);
+      // The must-fail mint below is tried by this new key, not the master: its create, if Cloudflare wrongly makes it,
+      // is a change of this tap too (T6).
+      const cf = new Cloudflare(made.value, this.fetch, fx);
       r.lists = (await listTokens(cf, account)).some((t) => t.id === made.id);
       try {
         // A complete, valid request (the same narrow policy, 5 minutes), so only a lack of
         // permission can refuse it -- not a malformed body (Codex C5c-2 r1 #1).
-        const leaked = await cf.call<{ id: string }>("POST", `/accounts/${account}/tokens`, {
+        const leaked = await cf.create<{ id: string; value: string }>(`/accounts/${account}/tokens`, {
           name: "front-desk headcount must-fail",
           policies: [{ effect: "allow", resources: { [`com.cloudflare.api.account.${account}`]: "*" }, permission_groups: [{ id: read[0].id }] }],
           expires_on: isoSeconds(this.now() + PROBE_TOKEN_MS),
         });
         r.mint_error = "headcount key could mint";
-        await master.call("DELETE", `/accounts/${account}/tokens/${leaked.id}`).catch((e: Error) => note(r, `leaked key delete failed: ${e.message}`));
+        await master.remove(account, leaked.id).catch((e: Error) => note(r, `leaked key delete failed: ${e.message}`));
       } catch (e) {
         // Only Cloudflare's permission refusal counts; an outage proves nothing about the key.
         r.mint_error = (e as Error).message.slice(0, 120);
@@ -377,7 +389,7 @@ export class VaultLogic {
     }
     r.ok = !r.error && !!r.key_id && r.lists && r.mint_refused;
     if (!r.ok) {
-      if (r.key_id) await master.call("DELETE", `/accounts/${account}/tokens/${r.key_id}`).catch((e: Error) => note(r, `key delete failed: ${e.message}`));
+      if (r.key_id) await master.remove(account, r.key_id).catch((e: Error) => note(r, `key delete failed: ${e.message}`));
       return r;
     }
     // The new key is stored first, then every older one is deleted. One that will not delete stays
@@ -386,8 +398,8 @@ export class VaultLogic {
     const old = await this.store.get<HeadcountKey | null>("headcount");
     const olds = old ? [old.token_id, ...(old.retired ?? [])] : [];
     await this.store.put<HeadcountKey>("headcount", { token_id: r.key_id!, value: value!, made_at: this.now(), group_id: groupId, retired: olds });
-    for (const id of olds) {
-      const gone = await master.call("DELETE", `/accounts/${account}/tokens/${id}`).then(
+    for (const id of olds.slice(0, OLD_HEADCOUNT_DELETES)) {
+      const gone = await master.remove(account, id).then(
         () => true,
         (e: Error) => /^cf_404/.test(e.message) || (note(r, `old headcount key ${id} delete failed: ${e.message}`), false),
       );
@@ -438,8 +450,9 @@ export class VaultLogic {
     if (!m) throw new VaultError("no_master_key");
     const { token, lockedNow } = await this.unlock(m, prf);
     const r: CfAcceptResult = { ok: false, accepted: [], master: { token_id: m.token_id, locked_to_passkey_now: lockedNow } };
+    const fx = newEffects();
     try {
-      r.leftover = await this.sweepHelpers(new Cloudflare(token, this.fetch), m);
+      r.leftover = await this.sweepHelpers(new Cloudflare(token, this.fetch, fx), m);
       const hcIds = await this.headcountId();
       const helpers = await this.helpers();
       const listed = await listTokens(new Cloudflare(token, this.fetch), m.account_id);
@@ -464,6 +477,7 @@ export class VaultLogic {
     } catch (e) {
       note(r, (e as Error).message);
     }
+    r.cf = effectsField(fx);
     return r;
   }
 
@@ -700,7 +714,7 @@ export class VaultLogic {
     const name = `${HELPER_PREFIX}${isoSeconds(this.now())} ${hex(crypto.getRandomValues(new Uint8Array(4)))}`;
     const until = isoSeconds(this.now() + PROBE_TOKEN_MS);
     await this.updateHelpers((list) => [...list, { name, purpose, until }]);
-    const minted = await master.call<{ id: string; value: string }>("POST", `/accounts/${account}/tokens`, { name, policies: [policy], expires_on: until });
+    const minted = await master.create<{ id: string; value: string }>(`/accounts/${account}/tokens`, { name, policies: [policy], expires_on: until });
     await this.updateHelpers((list) => list.map((h) => (h.name === name ? { ...h, id: minted.id } : h)));
     const entry = { id: minted.id, deleted: false };
     r.minted.push(entry);
@@ -708,7 +722,7 @@ export class VaultLogic {
       return await use(new Cloudflare(minted.value, this.fetch));
     } finally {
       try {
-        await master.call("DELETE", `/accounts/${account}/tokens/${minted.id}`);
+        await master.remove(account, minted.id);
         entry.deleted = true;
         await this.updateHelpers((list) => list.filter((h) => h.name !== name));
       } catch (e) {
@@ -751,7 +765,7 @@ export class VaultLogic {
         continue;
       }
       if (sent++ >= SWEEP_DELETES) continue;
-      const gone = await master.call("DELETE", `/accounts/${m.account_id}/tokens/${found.id}`).then(() => true, (e: Error) => /^cf_404/.test(e.message));
+      const gone = await master.remove(m.account_id, found.id).then(() => true, (e: Error) => /^cf_404/.test(e.message));
       if (gone) done.push(h.name);
     }
     await this.updateHelpers((now) => now.filter((h) => !done.includes(h.name)));
@@ -766,7 +780,7 @@ export class VaultLogic {
     for (const k of m.issued ?? []) {
       if (Date.parse(k.expires_on) > this.now()) continue;
       if (sent++ >= SWEEP_DELETES) break;
-      const deleted = await master.call("DELETE", `/accounts/${m.account_id}/tokens/${k.id}`).then(() => true, (e: Error) => /^cf_404/.test(e.message));
+      const deleted = await master.remove(m.account_id, k.id).then(() => true, (e: Error) => /^cf_404/.test(e.message));
       if (deleted) gone.push(k.id);
     }
     // Removes only what this sweep deleted: a key another job recorded meanwhile is kept (Codex minted r2).

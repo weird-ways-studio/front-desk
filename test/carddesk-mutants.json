@@ -346,8 +346,8 @@
  [
   "c4-desk-repoid",
   "src/carddesk.ts",
-  "outcome, at, ...repo });",
-  "outcome, at });",
+  "outcome, at, ...repo, ...(cf",
+  "outcome, at, ...(cf",
   "repo card: one tap makes it; the result names the repo id; after the receipt the vault adds it to the nightly list once",
   "test/carddesk.test.ts"
  ],

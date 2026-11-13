@@ -637,7 +637,7 @@ test("cf.token.accept: the preview names the flagged key and its real scope; aft
   assert.equal((await vault.headcount()).unexpected.length, 1);
   cf.calls.length = 0;
   const r = await accept(vault, OURS);
-  assert.deepEqual(r, { ok: true, accepted: [OURS], leftover: [], master: r.master });
+  assert.deepEqual(r, { ok: true, accepted: [OURS], leftover: [], master: r.master, cf: { made: [], deleted: [] } });
   assert.ok(cf.calls.every((c) => c.method === "GET"), "changes nothing in Cloudflare");
   const m = await store.get<any>("master");
   assert.deepEqual(m.exceptions.map((e: any) => [e.id, e.scope]), [[OURS, SCOPE]]);
