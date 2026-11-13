@@ -350,8 +350,9 @@ test("E1.1 every read job: mint refused -> empty lists; use fails -> lists what 
       cf.rules.push({ method: "GET", path: USE_PATH[job], respond: fail(500) });
       const r = await read(vault, job);
       assert.equal(r.ok, false, job);
-      assert.equal(r.cf.made.length, job === "cf.audit.read" ? 1 : 2, `${job}: use failed`);
-      assert.deepEqual(r.cf.deleted, r.cf.made, `${job}: every helper still deleted`);
+      // The fake numbers keys from 0x101 in creation order; no other key is made in a fresh vault.
+      const helpers = job === "cf.audit.read" ? [hexId(0x101)] : [hexId(0x101), hexId(0x102)];
+      assert.deepEqual(r.cf, { made: helpers, deleted: helpers }, `${job}: use failed, every helper made and still deleted`);
     }
     {
       const { vault, cf } = await fresh();
@@ -400,8 +401,14 @@ test("E1.1 sweepIssued: an expired handed-out key deleted is listed; a refused 4
       await store.put("master", { ...(await store.get<any>("master")), issued: [{ id: old, expires_on: "2026-11-13T11:00:00Z" }] });
       if (rule) cf.rules.push({ ...rule }); // a fresh copy: a rule counts down its own uses
       const r = job === "cf.zone.read" ? await read(vault, job) : await run(vault, job);
-      if (want === "unknown") assert.equal(r.cf, "unknown", `${job} ${label}`);
-      else assert.equal(r.cf.deleted.includes(old), want === "listed", `${job} ${label}: ${JSON.stringify(r.cf)}`);
+      if (want === "unknown") {
+        assert.equal(r.cf, "unknown", `${job} ${label}`);
+        continue;
+      }
+      // Exact lists: the read makes and deletes two helpers (0x101, 0x102); headcount setup makes one key (0x101).
+      const own = job === "cf.zone.read" ? { made: [hexId(0x101), hexId(0x102)], deleted: [hexId(0x101), hexId(0x102)] } : { made: [hexId(0x101)], deleted: [] };
+      const swept = want === "listed" ? [old] : [];
+      assert.deepEqual(r.cf, { made: own.made, deleted: [...swept, ...own.deleted] }, `${job} ${label}`);
     }
   }
 });
