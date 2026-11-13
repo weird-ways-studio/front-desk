@@ -11,8 +11,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // Vault mutants run test/cards.test.ts; desk mutants (test/carddesk-mutants.json) and headcount-run mutants
-// (test/headcountrun-mutants.json, card build 5 6ab972c8) name their own test file.
-const mutants = [...JSON.parse(readFileSync("test/cards-mutants.json", "utf8")), ...JSON.parse(readFileSync("test/carddesk-mutants.json", "utf8")), ...JSON.parse(readFileSync("test/headcountrun-mutants.json", "utf8"))] as [string, string, string, string, string, string?][];
+// (test/headcountrun-mutants.json, card build 5 6ab972c8) and cf-key mutants (test/cfkeys-mutants.json, card 139071ea) name
+// their own test file.
+const mutants = [...JSON.parse(readFileSync("test/cards-mutants.json", "utf8")), ...JSON.parse(readFileSync("test/carddesk-mutants.json", "utf8")), ...JSON.parse(readFileSync("test/headcountrun-mutants.json", "utf8")), ...JSON.parse(readFileSync("test/cfkeys-mutants.json", "utf8"))] as [string, string, string, string, string, string?][];
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 for (const [id, file, find, replace, name, testFile = "test/cards.test.ts"] of mutants) {

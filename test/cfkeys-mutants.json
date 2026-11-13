@@ -1,0 +1,138 @@
+[
+ [
+  "cf-create-success",
+  "vault/src/cloudflare.ts",
+  "if (json && res.ok && json.success === true) {",
+  "if (json && res.ok) {",
+  "E1.2 a create counts only when confirmed; only a recognized refusal closes it",
+  "test/cfkeys.test.ts"
+ ],
+ [
+  "cf-create-hex",
+  "vault/src/cloudflare.ts",
+  "typeof r?.id === \"string\" && KEY_ID.test(r.id) && ",
+  "typeof r?.id === \"string\" && ",
+  "E1.2 a create counts only when confirmed; only a recognized refusal closes it",
+  "test/cfkeys.test.ts"
+ ],
+ [
+  "cf-create-value",
+  "vault/src/cloudflare.ts",
+  " && r.value !== undefined) {",
+  ") {",
+  "E1.2 a create counts only when confirmed; only a recognized refusal closes it",
+  "test/cfkeys.test.ts"
+ ],
+ [
+  "cf-delete-echo",
+  "vault/src/cloudflare.ts",
+  "(r?.id === undefined || r.id === id)",
+  "true",
+  "E1.2 a delete: the same id or no echo is listed; another id, odd envelopes and 5xx are unknown; 404 refused is closed",
+  "test/cfkeys.test.ts"
+ ],
+ [
+  "cf-refused-any-status",
+  "vault/src/cloudflare.ts",
+  "(REFUSED.includes(res.status) || (kind === \"delete\" && res.status === 404))",
+  "true",
+  "E1.2 a create counts only when confirmed; only a recognized refusal closes it",
+  "test/cfkeys.test.ts"
+ ],
+ [
+  "cf-refused-unparsed",
+  "vault/src/cloudflare.ts",
+  "} else if (json && json.success === false && (",
+  "} else if ((",
+  "E1.2 a create counts only when confirmed; only a recognized refusal closes it",
+  "test/cfkeys.test.ts"
+ ],
+ [
+  "cf-open-ignored",
+  "vault/src/cloudflare.ts",
+  "if (fx.open !== 0 || ",
+  "if (",
+  "E1.2 a thrown fetch, or an unresolved attempt followed by a confirmed and a refused one, stays unknown",
+  "test/cfkeys.test.ts"
+ ],
+ [
+  "cf-bound",
+  "vault/src/cloudflare.ts",
+  "fx.made.length > CF_LIST_MAX || fx.deleted.length > CF_LIST_MAX",
+  "false",
+  "E1.6 the bound: over CF_LIST_MAX in either list signs unknown, never a cut list",
+  "test/cfkeys.test.ts"
+ ],
+ [
+  "hc-old-delete-cap",
+  "vault/src/vault.ts",
+  "olds.slice(0, OLD_HEADCOUNT_DELETES)",
+  "olds",
+  "E1.6 a 20-key retired backlog drains over three setups; each tap's lists stay within the bound",
+  "test/cfkeys.test.ts"
+ ],
+ [
+  "probe-shares-effects",
+  "vault/src/vault.ts",
+  "new Cloudflare(made.value, this.fetch, fx)",
+  "new Cloudflare(made.value, this.fetch)",
+  "E1.1 headcount setup: the new key is made; a previous one deleted; a wrongly made must-fail key listed and deleted",
+  "test/cfkeys.test.ts"
+ ],
+ [
+  "cfof-shape",
+  "src/desk.ts",
+  "Object.keys(cf).sort().join() === \"deleted,made\"",
+  "true",
+  "cfOf: copies only well-formed lists; anything else is unknown; no cf for jobs that never open the master",
+  "test/cfkeys-desk.test.ts"
+ ],
+ [
+  "cfof-hex",
+  "src/desk.ts",
+  "typeof x === \"string\" && KEY_ID.test(x)",
+  "typeof x === \"string\"",
+  "cfOf: copies only well-formed lists; anything else is unknown; no cf for jobs that never open the master",
+  "test/cfkeys-desk.test.ts"
+ ],
+ [
+  "cfof-bound",
+  "src/desk.ts",
+  "v.length <= CF_LIST_MAX && ",
+  "",
+  "cfOf: copies only well-formed lists; anything else is unknown; no cf for jobs that never open the master",
+  "test/cfkeys-desk.test.ts"
+ ],
+ [
+  "cfof-master-only",
+  "src/desk.ts",
+  "if (!CF_MASTER_JOBS.includes(job)) return undefined;\n",
+  "",
+  "cfOf: copies only well-formed lists; anything else is unknown; no cf for jobs that never open the master",
+  "test/cfkeys-desk.test.ts"
+ ],
+ [
+  "tap-completion-time",
+  "src/desk.ts",
+  "at: done.at ?? now,",
+  "at: now,",
+  "E1.5 ordinary tap: cf copied from the vault's answer; at is the completion time, after approved_at and every effect",
+  "test/cfkeys-desk.test.ts"
+ ],
+ [
+  "tap-cf",
+  "src/desk.ts",
+  "...(done.cf !== undefined ? { cf: done.cf } : {})",
+  "",
+  "E1.5 ordinary tap: cf copied from the vault's answer; at is the completion time, after approved_at and every effect",
+  "test/cfkeys-desk.test.ts"
+ ],
+ [
+  "card-cf",
+  "src/carddesk.ts",
+  ", ...(cf !== undefined ? { cf } : {}) });",
+  " });",
+  "E1.4 card: the result names the keys the entry made and deleted; a test.echo entry carries no cf",
+  "test/cfkeys-desk.test.ts"
+ ]
+]
