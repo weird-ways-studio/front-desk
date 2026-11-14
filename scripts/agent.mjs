@@ -143,6 +143,9 @@ export async function driveReach(step, demand, print = (x) => console.log(JSON.s
     print(last);
     if (!last || last.state !== "open") break;
   }
+  // A verify read that just ended: one more (empty) call lets the desk deliver its final state to Ben's phone, which the
+  // completing call skipped to stay inside the subrequest budget (src/desk.ts DELIVER_MAX_CALLS).
+  if (last?.acceptance) print(await step(""));
   return last;
 }
 

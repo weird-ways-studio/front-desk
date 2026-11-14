@@ -78,8 +78,11 @@ test("real runtime budget: 18 repos in one slice, 36 in two, 37 refused; verify 
     assert.equal(tap.result.ok, true, JSON.stringify(tap.result));
     note("approval tap, three probes", tap);
     const v = await a.counted("step");
-    assert.deepEqual([v.progress.state, v.progress.acceptance, v.pushes.length], ["complete", "accepted", 1]);
+    assert.deepEqual([v.progress.state, v.progress.acceptance, v.pushes.length], ["complete", "accepted", 0], "a 43-call slice leaves delivery to the next call");
     note("verify completion slice, 18 repos", v);
+    const deliver = await a.counted("step");
+    assert.equal(deliver.pushes.length, 1);
+    note("next step, delivering 'recorded'", deliver);
     assert.ok((await a.one("log")).some((l: string) => /^reach_step: complete 18\/18 calls 43$/.test(l)), "the log line carries the call count");
   } finally {
     await a.mf.dispose();
@@ -119,11 +122,12 @@ test("real runtime budget: 18 repos in one slice, 36 in two, 37 refused; verify 
   }
   t.diagnostic(JSON.stringify(seen));
   assert.deepEqual(seen, {
-    "demand slice, 18 repos": { github: 43, desk: 2 },
+    "demand slice, 18 repos": { github: 43, desk: 1 },
     "approval tap, three probes": { github: 3, desk: 1 },
-    "verify completion slice, 18 repos": { github: 43, desk: 3 },
-    "36 repos, slice 1": { github: 43, desk: 2 },
-    "36 repos, slice 2": { github: 42, desk: 2 },
+    "verify completion slice, 18 repos": { github: 43, desk: 1 },
+    "next step, delivering 'recorded'": { github: 0, desk: 3 },
+    "36 repos, slice 1": { github: 43, desk: 1 },
+    "36 repos, slice 2": { github: 42, desk: 1 },
     "37 repos, refused": { github: 6, desk: 2 },
     "tap, granted probe key not proven deleted": { github: 5, desk: 1 },
     "next step, delivering it": { github: 0, desk: 3 },

@@ -182,6 +182,7 @@ export async function grantHash(g: Pick<Grant, "id" | "job" | "params" | "reques
 export const CRONS = { reach: "47,52 3 * * *", headcount: "17 4 * * *" } as const;
 export const cronJob = (cron: string): keyof typeof CRONS | null => (cron === CRONS.reach ? "reach" : cron === CRONS.headcount ? "headcount" : null);
 export const HEADCOUNT_DEMAND_PER_HOUR = 6;
+export const DELIVER_MAX_CALLS = 40;
 
 // What a failed reach part means for Ben, by its fixed code (vault/src/vault.ts reachFold).
 const REACH_WORDS: [RegExp, string][] = [
@@ -797,7 +798,10 @@ export class Desk {
     const out = { state: p.state, done: Number(p.done) || 0, total: Number(p.total) || 0, code: typeof p.code === "string" ? p.code.slice(0, 60) : null, ...(acceptance ? { acceptance } : {}) };
     const calls = typeof p.calls === "number" ? ` calls ${p.calls}` : "";
     await this.log({ event: night ? "reach_night" : "reach_step", detail: `${String(out.state).slice(0, 10)} ${out.done}/${out.total}${out.code ? ` ${out.code}` : ""}${calls}` }, now);
-    await this.deliverReach(now);
+    // A slice that already made many GitHub calls leaves delivery to the next call, so one invocation chain stays
+    // under Free's 50 subrequests even if the desk, the vault Worker and its Durable Object share one budget (CLAUDE.md
+    // reach budget note). The agent's driver makes that next call (scripts/agent.mjs driveReach).
+    if (!(typeof p.calls === "number" && p.calls > DELIVER_MAX_CALLS)) await this.deliverReach(now);
     return out;
   }
 
@@ -812,7 +816,8 @@ export class Desk {
     const busy = inFlight.get(this.store) ?? new Set<string>();
     inFlight.set(this.store, busy);
     try {
-      for (const r of (await vault.ghReachResults()).slice(0, 10)) {
+      // One result per call: each costs a binding call to acknowledge (budget note); the rest wait for the next call.
+      for (const r of (await vault.ghReachResults()).slice(0, 1)) {
         const id = String(r.id).slice(0, 80);
         if (busy.has(id)) continue;
         busy.add(id);

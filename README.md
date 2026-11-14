@@ -51,16 +51,26 @@ done, every night is red with `reach_no_baseline`, so do not start after about 0
 2. Ben, on his phone in Safari, with the GitHub sign-in for the weird-ways account: App "WWS front desk headcount" ->
    Permissions -> Repository permissions: Webhooks = Read-only; Organization permissions: Webhooks = Read-only -> Save.
    Then org Settings -> GitHub Apps -> the App -> Review request -> Accept. (FROM MEMORY: GitHub's menu names.)
-3. The agent runs a fresh on-demand read: `node scripts/agent.mjs post <desk>/reach/step '{"purpose":"demand"}'`, then
-   `node scripts/agent.mjs post <desk>/reach/step ''` until the state is `complete` (each call is one slice; at most 12
-   calls an hour). The first read makes the vault's fingerprint key.
-4. The agent asks for `gh.reach.baseline` (`/request`, no params); Ben checks the list and taps Face ID within 20
-   minutes of 03:40 UTC at the latest. The agent then steps `/reach/step` with an empty body until the step answers with
-   `acceptance`; Ben gets one phone line: recorded, or why nothing was.
+3. The agent runs a fresh on-demand read: `node scripts/agent.mjs reach <desk> demand` (steps until `complete`; each
+   call is one slice; at most 12 calls an hour). The first read makes the vault's fingerprint key.
+4. The agent asks for `gh.reach.baseline` (`/request`, no params) and runs `node scripts/agent.mjs wait <collect-url>`.
+   Ben checks the list and taps Face ID. **The tap must be strictly before 03:20 UTC** (its 20-minute re-check must end
+   before the 03:40 UTC protected window); a later tap is refused and nothing is approved. After the tap, `wait` drives
+   the re-read itself and makes one closing call; Ben gets one phone line: recorded, or why nothing was.
 5. The agent runs `POST /headcount` (an on-demand count) and expects `{"ok": true}`.
 
-Rollback: redeploy the previous commit (the reach cron goes with it); Ben may remove the two Webhooks permissions on
-GitHub. A lost fingerprint key (`reach_fp_key_lost`) has no recovery built: it needs a reset Ben authorizes separately.
+**Rollback order (Codex build r1 #5).** The previous vault's allowed list does not include the two Webhooks reads, so it
+refuses a headcount App that still has them -- and the main GitHub count goes red with it. So narrow GitHub first, while
+this vault (which accepts both the wide and the narrow App) is still deployed:
+
+1. Ben, on his phone in Safari, with the GitHub sign-in for the weird-ways account: App "WWS front desk headcount" ->
+   Permissions -> set both Webhooks permissions back to No access -> Save; then org Settings -> GitHub Apps -> the App ->
+   Review request -> Accept, so the installation narrows too (FROM MEMORY: GitHub's menu names).
+2. The agent checks the main count still reads (`POST /headcount`; its reach part is red without the permissions,
+   which is expected), then the previous commit is redeployed (the reach crons go with it).
+
+If Ben cannot narrow GitHub, keep this vault deployed rather than rolling it back. A lost fingerprint key
+(`reach_fp_key_lost`) has no recovery built: it needs a reset Ben authorizes separately.
 
 ## The c-box signing key
 

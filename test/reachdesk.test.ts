@@ -209,9 +209,9 @@ test("words: an IPv6 host and a port-carrying URL read correctly; collaborators 
 test("agent.mjs reach: steps until complete, failed, refused or idle; 'demand' only on the first call; a verify read after a tap", async () => {
   const { driveReach, reachAfterCollect } = await import("../scripts/agent.mjs");
   const sent: string[] = [];
-  const answers = [{ state: "open", done: 18, total: 20 }, { state: "complete", done: 20, total: 20, acceptance: "accepted" }];
+  const answers = [{ state: "open", done: 18, total: 20 }, { state: "complete", done: 20, total: 20, acceptance: "accepted" }, { state: "idle" }];
   const last = await driveReach(async (body: string) => (sent.push(body), answers.shift()), true, () => {});
-  assert.deepEqual(sent, ['{"purpose":"demand"}', ""]);
+  assert.deepEqual(sent, ['{"purpose":"demand"}', "", ""], "one closing call delivers the final state");
   assert.equal(last.state, "complete");
   for (const end of ["failed", "refused", "idle"]) {
     let n = 0;
