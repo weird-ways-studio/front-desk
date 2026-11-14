@@ -1,0 +1,227 @@
+// The reach read, desk side (card N2 5fdbf2ce part B; studio-os REFINE-5fdbf2ce-watcher-reach.md 12.3, 12.4): the agent's
+// POST /reach/step, the on-demand headcount, the cron dispatch, and the words Ben reads. The vault is a fake that records
+// its calls; the vault's own rules are tested in test/reach.test.ts.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { CRONS, Desk, MemoryStore, cronJob, headcountWords, reachAcceptWords } from "../src/desk.ts";
+import { route, type Who } from "../src/routes.ts";
+import { JOBS } from "../src/jobs.ts";
+import { plainChanges } from "../src/ghplain.ts";
+import type { Headcount, ReachProgress } from "../vault/src/api.ts";
+
+const NOW = Date.UTC(2026, 10, 14, 10, 0);
+const AGENT: Who = { caller: "agent", requester: "c-box agent" };
+const clean: Headcount = { ok: true, tokens: 4, unexpected: [], stretched: [], missing: [], cleanup: [], github: { ok: true, changes: [] } };
+
+function fakeVault(answer: Partial<ReachProgress> & Record<string, unknown> = { state: "open", done: 18, total: 20, code: null }, hc: Headcount = clean) {
+  const calls: { op: string; args: unknown[] }[] = [];
+  return {
+    calls,
+    async ghReachStep(...args: unknown[]) {
+      calls.push({ op: "ghReachStep", args });
+      return answer as ReachProgress;
+    },
+    async ghReachNight() {
+      calls.push({ op: "ghReachNight", args: [] });
+      return answer as ReachProgress;
+    },
+    async headcount(...args: unknown[]) {
+      calls.push({ op: "headcount", args });
+      return hc;
+    },
+  };
+}
+const post = (store: MemoryStore, vault: unknown, path: string, body: string, who: Who = AGENT, alerts: string[] = []) =>
+  route(new Request(`https://desk.example${path}`, { method: "POST", body }), store, who, NOW, vault as never, undefined, undefined, async (t, x) => void alerts.push(`${t}|${x}`));
+const logOf = async (store: MemoryStore) => JSON.stringify([...(await store.list({ prefix: "log:" })).values()]);
+
+test("R33: POST /reach/step needs the agent's login: Ben's login and unknown callers get 403, the vault is not called", async () => {
+  for (const who of [{ caller: "owner" }, { caller: "unknown" }] as Who[]) {
+    const v = fakeVault();
+    const res = await post(new MemoryStore(), v, "/reach/step", "", who);
+    assert.equal(res.status, 403);
+    assert.deepEqual(v.calls, []);
+  }
+});
+
+test("R34/R36: the body is empty or exactly {\"purpose\":\"demand\"}; any other purpose, scope, hash or baseline is refused before the vault", async () => {
+  for (const [body, purpose] of [["", undefined], ['{"purpose":"demand"}', "demand"]] as const) {
+    const v = fakeVault();
+    const res = await post(new MemoryStore(), v, "/reach/step", body);
+    assert.equal(res.status, 200, body);
+    assert.deepEqual(v.calls, [{ op: "ghReachStep", args: [purpose] }]);
+  }
+  for (const body of ['{"purpose":"night"}', '{"purpose":"verify:abc"}', '{"purpose":"demand","scope":"x"}', '{"baseline":{"repo_hooks":[]}}', '{"lists":"h"}', "{}", "[]", "null", "not json", '"demand"']) {
+    const v = fakeVault();
+    const res = await post(new MemoryStore(), v, "/reach/step", body);
+    assert.deepEqual([res.status, await res.json()], [400, { error: "bad_body" }], body);
+    assert.deepEqual(v.calls, [], body);
+  }
+});
+
+test("R35: the answer carries only bounded progress, whatever else the vault sends", async () => {
+  const v = fakeVault({ state: "complete", done: 2, total: 2, code: null, lists: ["repo-0:1:example.com"], url: "https://example.com/x" });
+  const res = await post(new MemoryStore(), v, "/reach/step", "");
+  assert.deepEqual(await res.json(), { state: "complete", done: 2, total: 2, code: null });
+});
+
+test("R37: each final state the vault keeps is pushed as exactly one phone line, logged, then acknowledged; 'recorded' only when accepted", async () => {
+  for (const [state, words] of [
+    ["accepted", /recorded/],
+    ["refused", /Nothing recorded: GitHub changed after you looked/],
+    ["expired", /Nothing recorded: the re-check did not finish within 20 minutes/],
+    ["superseded", /Nothing recorded: the nightly check started/],
+  ] as const) {
+    const store = new MemoryStore();
+    const alerts: string[] = [];
+    const v = fakeVault({ state: "complete", done: 2, total: 2, code: null, acceptance: state });
+    const kept = [{ id: "g1", kind: "acceptance", state, ...(state === "refused" ? { reason: "reach_changed_since_request" } : {}) }];
+    const acked: string[] = [];
+    Object.assign(v, { ghReachResults: async () => kept.filter((r) => !acked.includes(r.id)), ghReachAck: async (id: string) => (acked.push(id), true) });
+    const res = await post(store, v, "/reach/step", "", AGENT, alerts);
+    assert.equal(((await res.json()) as { acceptance?: string }).acceptance, state);
+    assert.equal(alerts.length, 1, state);
+    assert.match(alerts[0], words);
+    if (state !== "accepted") assert.doesNotMatch(alerts[0], /is now recorded/);
+    assert.match(await logOf(store), new RegExp(`reach_acceptance_${state}`));
+    assert.deepEqual(acked, ["g1"]);
+  }
+  // A step with nothing kept sends nothing.
+  const alerts: string[] = [];
+  await post(new MemoryStore(), fakeVault(), "/reach/step", "", AGENT, alerts);
+  assert.deepEqual(alerts, []);
+  for (const s of ["accepted", "refused", "expired", "superseded"] as const) assert.ok(!/[{}]|reach_/.test(reachAcceptWords(s).split("[")[0]), s);
+});
+
+test("on-demand headcount: POST /headcount asks the vault for the newest read ('any'), pushes the detail when red, never touches the nightly runs", async () => {
+  const red: Headcount = { ...clean, ok: false, github: { ok: false, changes: ["repo_hooks +front-desk:7:example.com:0123456789ab:push:true"] } };
+  const store = new MemoryStore();
+  const v = fakeVault(undefined, red);
+  const alerts: string[] = [];
+  const res = await post(store, v, "/headcount", "", AGENT, alerts);
+  assert.deepEqual(await res.json(), { ok: false });
+  assert.deepEqual(v.calls, [{ op: "headcount", args: ["any"] }]);
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0], /New: webhook on "front-desk" sending push to "example.com"/);
+  assert.deepEqual([...(await store.list({ prefix: "hcrun:" })).keys()], [], "the nightly run summaries are untouched");
+  assert.match(await logOf(store), /headcount_demand_mismatch/);
+  const owner = await post(new MemoryStore(), v, "/headcount", "", { caller: "owner" });
+  assert.equal(owner.status, 403);
+  // The scheduled count still asks for the night's read.
+  const night = fakeVault();
+  await new Desk(new MemoryStore(), { origin: "", rpID: "" }, { vault: night as never }).headcount(async () => undefined, NOW);
+  assert.deepEqual(night.calls, [{ op: "headcount", args: [] }]);
+});
+
+test("on-demand headcounts are capped at 6 an hour", async () => {
+  const store = new MemoryStore();
+  for (let i = 0; i < 6; i++) assert.equal((await post(store, fakeVault(), "/headcount", "")).status, 200);
+  assert.deepEqual(await (await post(store, fakeVault(), "/headcount", "")).json(), { error: "rate_limited" });
+});
+
+test("cron dispatch: wrangler's crons are exactly the reach slices and the headcount, each mapped to its job; anything else runs nothing", async () => {
+  const cfg = readFileSync("wrangler.jsonc", "utf8");
+  assert.deepEqual(JSON.parse(/"crons":\s*(\[[^\]]*\])/.exec(cfg)![1]).sort(), Object.values(CRONS).sort());
+  assert.equal(cronJob(CRONS.reach), "reach");
+  assert.equal(cronJob(CRONS.headcount), "headcount");
+  assert.equal(cronJob("0 0 * * *"), null);
+  // The night slice logs only bounded progress.
+  const store = new MemoryStore();
+  const v = fakeVault({ state: "open", done: 18, total: 20, code: null });
+  await new Desk(store, { origin: "", rpID: "" }, { vault: v as never }).reachNight(NOW);
+  assert.deepEqual(v.calls, [{ op: "ghReachNight", args: [] }]);
+  assert.match(await logOf(store), /"event":"reach_night","detail":"open 18\/20"/);
+});
+
+test("words: webhooks and collaborators in plain words; a destination-only change says so; no raw line in view", () => {
+  const groups = plainChanges([
+    "repo_hooks +front-desk:7:example.com:0123456789ab:pull_request,push:true",
+    "org_hooks +9:example.com:0123456789ab:push:false",
+    "collaborators +front-desk:someone-b:write",
+    "collaborators -front-desk:someone-c:admin",
+    "repo_hooks -studio-os:5:example.com:aaaaaaaaaaaa:push:true",
+    "repo_hooks +studio-os:5:example.com:bbbbbbbbbbbb:push:true",
+  ]);
+  const said = JSON.stringify(groups);
+  assert.match(said, /New: webhook on \\"front-desk\\" sending pull_request, push to \\"example.com\\"/);
+  assert.match(said, /New: organization webhook sending push to \\"example.com\\" \(switched off\)/);
+  assert.match(said, /New: \\"someone-b\\" added directly to \\"front-desk\\" as write/);
+  assert.match(said, /Gone: \\"someone-c\\" no longer directly on \\"front-desk\\" \(was admin\)/);
+  assert.match(said, /Changed: webhook on \\"studio-os\\" to \\"example.com\\": destination changed/);
+  assert.doesNotMatch(said, /0123456789ab|aaaaaaaaaaaa|repo_hooks|org_hooks/);
+});
+
+test("words: each reach failure says what it means for tonight, with the code in brackets for the agent", () => {
+  for (const [code, words] of [
+    ["reach_incomplete: stale", /webhook and collaborator check did not finish/],
+    ["reach_incomplete: newer_failed", /webhook and collaborator check did not finish/],
+    ["reach_incomplete: inventory", /different set of repositories/],
+    ["reach_no_baseline", /not been accepted yet/],
+    ["reach_fp_key_lost", /lost its private fingerprint key/],
+  ] as const) {
+    const said = headcountWords({ ...clean, ok: false, github: { ok: false, changes: [], error: code } });
+    assert.match(said, words, code);
+    assert.ok(said.includes(`[${code}]`) || said.includes(`["${code}"]`) || said.includes(code), code);
+  }
+});
+
+test("job gh.reach.baseline: Ben's screen lists the changes in words; the tap's sentence never says recorded", () => {
+  const p = { changes: "collaborators +front-desk:someone-b:write", lists: "l", base: "b", app_id: "1", installation_id: "2", inventory: "i" };
+  const g = JOBS["gh.reach.baseline"].explain(p);
+  assert.match(JSON.stringify(g.sections), /someone-b/);
+  assert.match(g.expect, /checks GitHub again/);
+  const done = JOBS["gh.reach.baseline"].done({ ok: true, state: "pending", expires_at: NOW });
+  assert.match(done, /^Approved/);
+  assert.doesNotMatch(done, /\brecorded\b(?! yet)/i);
+  assert.match(JOBS["gh.reach.baseline"].done({ ok: false, state: "refused", error: "reach_try_after_0420" }), /^Not done/);
+  assert.deepEqual(JOBS["gh.reach.baseline"].validate({}), {});
+  assert.equal(JOBS["gh.reach.baseline"].validate({ lists: "x" }), null, "the agent cannot choose what is bound");
+});
+
+// Security review (commit review, MEDIUM 1): a webhook removed and a DIFFERENT webhook added on the same repo and host must
+// never read as one "destination changed" line -- the new webhook would be hidden from Ben's screen.
+test("words: a gone hook and a new hook with another id stay Gone and New; only the same repo and id pair as a destination change", () => {
+  const said = JSON.stringify(plainChanges(["repo_hooks -front-desk:1:example.com:aaaaaaaaaaaa:push:true", "repo_hooks +front-desk:2:example.com:bbbbbbbbbbbb:push:true"]));
+  assert.match(said, /New: webhook on \\"front-desk\\" sending push to \\"example.com\\"/);
+  assert.match(said, /Gone: webhook on \\"front-desk\\"/);
+  assert.doesNotMatch(said, /destination changed/);
+  const org = JSON.stringify(plainChanges(["org_hooks -1:example.com:aaaaaaaaaaaa:push:true", "org_hooks +2:example.com:bbbbbbbbbbbb:push:true"]));
+  assert.match(org, /New: organization webhook/);
+  assert.doesNotMatch(org, /destination changed/);
+  // Two new hooks against one gone with the same id cannot happen from one read, but must not pair either.
+  const many = JSON.stringify(plainChanges(["repo_hooks -r:1:example.com:aaaaaaaaaaaa:push:true", "repo_hooks +r:1:example.com:bbbbbbbbbbbb:push:true", "repo_hooks +r:1:example.com:cccccccccccc:push:true"]));
+  assert.equal((many.match(/New: /g) ?? []).length, 2);
+});
+
+// Security review (MEDIUM 2): a host holding ':' (IPv6) is read from both ends, so every field lands where it belongs.
+// name() shows brackets as "?" and flags the name, as for every outside name; the fields are what is tested here.
+test("words: an IPv6 host and a port-carrying URL read correctly; collaborators read repo and login from the front", () => {
+  const said = JSON.stringify(plainChanges(["repo_hooks +front-desk:7:[%3A%3A1]:0123456789ab:push:false", "org_hooks +9:[%3A%3A1]:0123456789ab:pull_request:true", "collaborators +front-desk:someone-b:custom:role"]));
+  assert.match(said, /New: webhook on \\"front-desk\\" sending push to \\"\?::1\?\\" \(has unusual characters\) \(switched off\)/);
+  assert.match(said, /New: organization webhook sending pull_request to \\"\?::1\?\\"/);
+  assert.match(said, /\\"someone-b\\" added directly to \\"front-desk\\" as custom:role/);
+  // An entry whose host was not encoded still reads from both ends: events and the off switch stay in place.
+  assert.match(JSON.stringify(plainChanges(["repo_hooks +r:7:[::1]:0123456789ab:push:false"])), /sending push to \\"\?::1\?\\" \(has unusual characters\) \(switched off\)/);
+});
+
+// Codex build r1 #2: the agent's driver (scripts/agent.mjs reach), so the menu's command exists.
+test("agent.mjs reach: steps until complete, failed, refused or idle; 'demand' only on the first call; a verify read after a tap", async () => {
+  const { driveReach, reachAfterCollect } = await import("../scripts/agent.mjs");
+  const sent: string[] = [];
+  const answers = [{ state: "open", done: 18, total: 20 }, { state: "complete", done: 20, total: 20, acceptance: "accepted" }, { state: "idle" }];
+  const last = await driveReach(async (body: string) => (sent.push(body), answers.shift()), true, () => {});
+  assert.deepEqual(sent, ['{"purpose":"demand"}', "", ""], "one closing call delivers the final state");
+  assert.equal(last.state, "complete");
+  for (const end of ["failed", "refused", "idle"]) {
+    let n = 0;
+    assert.equal((await driveReach(async () => (n++, { state: end }), false, () => {})).state, end);
+    assert.equal(n, 1, end);
+  }
+  let n = 0;
+  await driveReach(async () => (n++, { state: "open" }), false, () => {});
+  assert.equal(n, 4, "bounded: at most ceil(36/18) + 2 calls");
+  assert.equal(reachAfterCollect(JSON.stringify({ ok: true, result: { ok: true, state: "pending", expires_at: 1 } })), true);
+  assert.equal(reachAfterCollect(JSON.stringify({ ok: true, result: { ok: true, zone: "x" } })), false);
+  assert.equal(reachAfterCollect("not json"), false);
+});

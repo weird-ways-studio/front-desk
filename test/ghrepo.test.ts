@@ -12,6 +12,7 @@ import { seal, secretBytes } from "../vault/src/seal.ts";
 import { CREATE_PERMS } from "../vault/src/ghrepo.ts";
 import { MemoryCardStore, PRF, TestRecorder, makeCard, openReq, runReq } from "./cardsign.ts";
 import { TEST_PIN, signedRun } from "./vaultsign.ts";
+import { seedReach } from "./reachseed.ts";
 
 const T = 1_800_000_000_000;
 const MAIN = 202;
@@ -375,6 +376,7 @@ test("Y1: the nightly GitHub count names a job-made repo the recorder has not re
   const live: GhSnapshot = { ...BASELINE, repos: [...BASELINE.repos, "new-app:private"].sort(), repo_ids: [...BASELINE.repo_ids, `new-app:${REPO_ID}`].sort() };
   s.store.kv.put("gh.app.headcount", { id: 101, slug: "wws-front-desk-headcount", key: "k", installation: 1010 });
   (s.vault as any).ghRead = async () => live;
+  seedReach(s.store, live.repo_ids, s.clock.now); // the reach part green (card N2 5fdbf2ce), so only the main count speaks
   const night1 = await (s.vault as any).ghHeadcount();
   assert.equal(night1.ok, false);
   assert.deepEqual(night1.changes, ["repos +new-app:private", `repo_ids +new-app:${REPO_ID}`, "repo_result_unrecorded: new-app"]);
@@ -474,6 +476,7 @@ test("r1 #2: an eligible repo Ben accepted into the list still alarms repo_resul
   const live: GhSnapshot = { ...BASELINE, repos: [...BASELINE.repos, "new-app:private"].sort(), repo_ids: [...BASELINE.repo_ids, `new-app:${REPO_ID}`].sort() };
   s.store.kv.put("gh.app.headcount", { id: 101, slug: "wws-front-desk-headcount", key: "k", installation: 1010 });
   (s.vault as any).ghRead = async () => live;
+  seedReach(s.store, live.repo_ids, s.clock.now); // the reach part green (card N2 5fdbf2ce)
   s.store.kv.put("gh.baseline", live); // Ben accepted the GitHub list with the repo in it, before the receipt arrived
   assert.deepEqual((await (s.vault as any).ghHeadcount()).changes, ["repo_result_unrecorded: new-app"]);
   const { body, receipt } = await resultOf(s, c.grants[0].id);
@@ -484,6 +487,7 @@ test("r1 #2: an eligible repo Ben accepted into the list still alarms repo_resul
   await runRepo(late);
   late.store.kv.put("gh.app.headcount", { id: 101, slug: "x", key: "k", installation: 1010 });
   (late.vault as any).ghRead = async () => live;
+  seedReach(late.store, live.repo_ids, late.clock.now);
   assert.ok((await (late.vault as any).ghHeadcount()).changes.includes("repo_result_unrecorded: new-app"));
   late.store.kv.put("gh.baseline", live);
   assert.deepEqual(await (late.vault as any).ghHeadcount(), { ok: true, changes: [] });

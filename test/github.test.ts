@@ -10,6 +10,7 @@ import { b64url } from "../vault/src/seal.ts";
 import { GH_ESCALATION_REFUSAL, GH_PENDING_MS, GH_STATE_MS, VaultLogic, type GhBaselineResult } from "../vault/src/vault.ts";
 import { ORG, PERMISSIONS, appJwt, checkPermissions, manifest, pkcs8FromPem } from "../vault/src/github.ts";
 import { handleSetup } from "../vault/src/setup.ts";
+import { seedReach } from "./reachseed.ts";
 
 const NOW = Date.UTC(2026, 9, 28, 20, 0, 0);
 const ORIGIN = "https://vault.example.test";
@@ -190,6 +191,7 @@ test("nightly GitHub count: clean, then a planted deploy key and a removed branc
   const { vault, gh } = await connected();
   assert.equal((await baseline(vault)).ok, true);
   assert.deepEqual((await (vault as any).store.get("gh.baseline")).repo_ids, ["front-desk:9001", "studio-os:9002"], "card 77ec1e64: the list holds each repo's id");
+  seedReach((vault as any).store, ["front-desk:9001", "studio-os:9002"], NOW); // the reach part green (card N2 5fdbf2ce)
   gh.calls.length = 0;
   const clean = await (vault as any).ghHeadcount();
   assert.deepEqual(clean, { ok: true, changes: [] });
