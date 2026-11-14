@@ -954,6 +954,9 @@ export class VaultLogic {
         return { org, got };
       }, REACH_PERMS);
       work.org_hooks = read.org;
+      // Judged before the slice is kept, like every other failed slice (its repos are not counted as done).
+      const next = { ...work, org_hooks: read.org, repos: [...work.repos, ...read.got] };
+      if (reachAllRead(next) && reachAllEmpty(next)) throw new VaultError("reach_collabs_empty");
       work.repos.push(...read.got);
       // Hashes for the acceptance check, made before the transaction (WebCrypto is async); it re-reads the list's text.
       if (a) {
@@ -988,7 +991,7 @@ export class VaultLogic {
     }
     work.rev = (cur?.id === work.id ? cur.rev : 0) + 1;
     if (work.failed) (fail(work.seq, work.failed), this.endApproval(work, "refused"));
-    else if (work.inventory && work.org_hooks && work.inventory.every((x) => work.repos.some((d) => d.name === x.slice(0, x.lastIndexOf(":"))))) {
+    else if (reachAllRead(work)) {
       work.complete_at = this.now();
       kv.put("gh.reach.complete", work);
       if (work.purpose === "night") kv.put("gh.reach.night", work);
@@ -1272,7 +1275,7 @@ export interface ReachGen {
   installation_id: number;
   inventory: string[] | null; // sorted "name:repo id", fixed at the first slice
   rev: number;
-  repos: { name: string; hooks: string[]; collabs: string[] }[]; // only repos whose two reads both succeeded
+  repos: { name: string; hooks: string[]; collabs: string[]; priv?: boolean }[]; // only repos whose two reads both succeeded; priv absent (older entry) counts as private
   org_hooks: string[] | null;
   started_at: number;
   failed: string | null; // a fixed code
@@ -1313,6 +1316,14 @@ export interface GhReachAcceptResult {
   error?: string;
 }
 type ReachPre = { lists: string; inventory: string; base: string; baseText: string };
+/** Every repo in the inventory has been read, and the org's hooks too: the generation can complete. */
+const reachAllRead = (g: ReachGen): boolean =>
+  !!g.inventory && !!g.org_hooks && g.inventory.every((x) => g.repos.some((d) => d.name === x.slice(0, x.lastIndexOf(":"))));
+/** The false-empty guard (T9): there is a private repo and every private repo listed nobody. An entry without priv counts as private. */
+export const reachAllEmpty = (g: ReachGen): boolean => {
+  const priv = g.repos.filter((r) => r.priv !== false);
+  return priv.length > 0 && priv.every((r) => !r.collabs.length);
+};
 const listsOf = (g: ReachGen): ReachLists => ({ repo_hooks: g.repos.flatMap((r) => r.hooks).sort(), org_hooks: g.org_hooks ?? [], collaborators: g.repos.flatMap((r) => r.collabs).sort() });
 const inWindow = (t: number) => {
   const m = Math.floor((t % 86_400_000) / 60_000);
