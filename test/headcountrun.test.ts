@@ -290,9 +290,11 @@ test("T14 the predecessor 30 hours before the first run after the change: UNPROV
   assert.equal(judge(view([run(1, T0 - 25 * H), run(2, T0)]), T0 + H, { after: T0 - 12 * H }).verdict, "PASS");
 });
 
+// Card N2 5fdbf2ce added the reach slices' cron ("47,52 3 * * *", src/desk.ts CRONS.reach). It runs no headcount, so the
+// headcount's own schedule -- and with it GAP_MS -- is unchanged: still exactly one "17 4 * * *" headcount a day.
 test("GAP_MS fits the cron: one run a day, so 26 hours", () => {
   const cfg = readFileSync("wrangler.jsonc", "utf8");
-  assert.deepEqual(JSON.parse(/"crons":\s*(\[[^\]]*\])/.exec(cfg)![1]), ["17 4 * * *"], "the schedule changed: change GAP_MS in src/headcountrun.ts to fit, then this test");
+  assert.deepEqual(JSON.parse(/"crons":\s*(\[[^\]]*\])/.exec(cfg)![1]), ["47,52 3 * * *", "17 4 * * *"], "the schedule changed: change GAP_MS in src/headcountrun.ts to fit, then this test");
   assert.equal(GAP_MS, 26 * H);
 });
 

@@ -266,6 +266,9 @@ function fakeVault(stored = false) {
     async cfPreview() {
       return [{ id: "c".repeat(32), name: "observatory-backup-read", scope: "allow Zone Read on {}", over: null as string | null }];
     },
+    async ghReachPreview() {
+      return { changes: ["collaborators +front-desk:someone-b:write"], lists: "l".repeat(64), base: "b".repeat(64), app_id: "101", installation_id: "1010", inventory: "i".repeat(64) };
+    },
   };
 }
 const callV = (store: MemoryStore, vault: ReturnType<typeof fakeVault>, path: string, init?: RequestInit, caller = callerFor(path, init)) =>
@@ -702,6 +705,19 @@ test("gh.app.baseline: refused at request when the vault cannot read GitHub", as
   const res = await agentPost(store, vault, "/request", { job: "gh.app.baseline", params: {}, reason: "x" });
   assert.equal(res.status, 502);
   assert.match(await res.text(), /github_preview_failed: github_not_set_up/);
+});
+
+// gh.reach.baseline (card N2 5fdbf2ce): the desk binds what the vault's preview showed; the agent chooses nothing.
+test("gh.reach.baseline: the request binds the preview's hashes and scope; Ben's screen lists the change; a refused preview says why", async () => {
+  const { store } = await enrolled();
+  const vault = fakeVault(true);
+  const res = await agentPost(store, vault, "/request", { job: "gh.reach.baseline", params: {}, reason: "accept webhooks and collaborators" });
+  assert.equal(res.status, 201);
+  const { id } = (await res.json()) as { id: string };
+  assert.deepEqual((await store.get<any>(`grant:${id}`)).params, { changes: "collaborators +front-desk:someone-b:write", lists: "l".repeat(64), base: "b".repeat(64), app_id: "101", installation_id: "1010", inventory: "i".repeat(64) });
+  assert.match(await (await callV(store, vault, `/approve/${id}`)).text(), /someone-b/);
+  const refused = await agentPost(store, { ...fakeVault(true), ghReachPreview: async () => Promise.reject(new Error("reach_read_first")) }, "/request", { job: "gh.reach.baseline", params: {}, reason: "x" });
+  assert.deepEqual([refused.status, await refused.json()], [409, { error: "reach_preview_refused: reach_read_first" }]);
 });
 
 // The Cloudflare key job shows Ben exactly the keys his tap accepts (vault cfPreview).
