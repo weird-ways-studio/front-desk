@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { build } from "esbuild";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { SoftKey } from "./softkey.ts";
-import { pinOf, signed } from "./vaultsign.ts";
+import { pinOf } from "./vaultsign.ts";
 import { pkcs8FromPem } from "../vault/src/github.ts";
 import { APP, INST, fakeGitHub, pem } from "./reachfake.ts";
 
@@ -51,9 +51,12 @@ async function start(repos: number) {
     const out = await one(method, ...args);
     return { ...out, github_calls: gh.calls.length };
   };
+  await one("enroll", await key.exported());
+  // The agent's request and Ben's tap through production Desk.request / Desk.approve (Codex build r2 C).
   const tapSigned = async () => {
-    const { changes, ...bound } = await one("vault", "ghReachPreview", []);
-    return counted("tap", await signed("gh.reach.baseline", { changes: changes.join("\n") || "none", ...bound }, "B".repeat(43), { key }));
+    const req = await counted("requestReach", DAY);
+    const tap = await counted("approveReach", req.id, DAY);
+    return { req, tap };
   };
   return { mf, gh, one, counted, tapSigned };
 }
@@ -65,6 +68,7 @@ const within = (what: string, r: { github_calls: number; desk_calls: number }) =
 
 test("real runtime budget: 18 repos in one slice, 36 in two, 37 refused; verify completion; the tap; a probe-cleanup failure", { timeout: 120_000 }, async (t) => {
   const seen: Record<string, { github: number; desk: number }> = {};
+  const sends: Record<string, number> = {}; // recorder sends (outside calls from the desk Durable Object)
   const note = (what: string, r: { github_calls: number; desk_calls: number }) => {
     within(what, r);
     seen[what] = { github: r.github_calls, desk: r.desk_calls };
@@ -74,9 +78,12 @@ test("real runtime budget: 18 repos in one slice, 36 in two, 37 refused; verify 
     const s = await a.counted("step", "demand");
     assert.equal(s.progress.state, "complete");
     note("demand slice, 18 repos", s);
-    const tap = await a.tapSigned();
+    const { req, tap } = await a.tapSigned();
     assert.equal(tap.result.ok, true, JSON.stringify(tap.result));
-    note("approval tap, three probes", tap);
+    note("request (preview)", req);
+    note("approval tap through Desk.approve, three probes", tap);
+    sends["request (preview)"] = req.recorder_sends;
+    sends["approval tap through Desk.approve, three probes"] = tap.recorder_sends;
     const v = await a.counted("step");
     assert.deepEqual([v.progress.state, v.progress.acceptance, v.pushes.length], ["complete", "accepted", 0], "a 43-call slice leaves delivery to the next call");
     note("verify completion slice, 18 repos", v);
@@ -111,7 +118,7 @@ test("real runtime budget: 18 repos in one slice, 36 in two, 37 refused; verify 
     await d.counted("step", "demand");
     d.gh.faults.grantWrite = "repository_hooks";
     d.gh.faults.deleteFail = "500";
-    const tap = await d.tapSigned();
+    const { tap } = await d.tapSigned();
     assert.equal(tap.result.ok, false);
     note("tap, granted probe key not proven deleted", tap);
     const after = await d.counted("step");
@@ -120,16 +127,18 @@ test("real runtime budget: 18 repos in one slice, 36 in two, 37 refused; verify 
   } finally {
     await d.mf.dispose();
   }
-  t.diagnostic(JSON.stringify(seen));
+  t.diagnostic(JSON.stringify({ seen, sends }));
+  assert.deepEqual(sends, { "request (preview)": 2, "approval tap through Desk.approve, three probes": 2 });
   assert.deepEqual(seen, {
     "demand slice, 18 repos": { github: 43, desk: 1 },
-    "approval tap, three probes": { github: 3, desk: 1 },
+    "request (preview)": { github: 0, desk: 1 },
+    "approval tap through Desk.approve, three probes": { github: 3, desk: 2 },
     "verify completion slice, 18 repos": { github: 43, desk: 1 },
     "next step, delivering 'recorded'": { github: 0, desk: 3 },
     "36 repos, slice 1": { github: 43, desk: 1 },
     "36 repos, slice 2": { github: 42, desk: 1 },
     "37 repos, refused": { github: 6, desk: 2 },
-    "tap, granted probe key not proven deleted": { github: 5, desk: 1 },
+    "tap, granted probe key not proven deleted": { github: 5, desk: 2 },
     "next step, delivering it": { github: 0, desk: 3 },
   });
 });
