@@ -292,14 +292,17 @@ export async function hookEntry(h: Record<string, unknown>, key: CryptoKey): Pro
   return `${h.id}:${u!.hostname.replace(/%/g, "%25").replace(/:/g, "%3A")}:${dest}:${[...(h.events as string[])].sort().join(",")}:${h.active}`;
 }
 
-/** One repo's hooks and direct collaborators; a private repo with nobody listed fails (a checked expectation). */
-export async function reachRepo(gh: GitHub, r: { name: string; private: boolean }, key: CryptoKey): Promise<{ hooks: string[]; collabs: string[] }> {
+/**
+ * One repo's hooks and direct collaborators, and whether it is private. An empty list is a fact here: a private repo
+ * made in the org lists nobody (owners reach it through the org; L1, 2026-11-14). The false-empty guard (T9) judges
+ * the whole read instead: `reachAllEmpty` in vault.ts.
+ */
+export async function reachRepo(gh: GitHub, r: { name: string; private: boolean }, key: CryptoKey): Promise<{ hooks: string[]; collabs: string[]; priv: boolean }> {
   const hooks: string[] = [];
   for (const h of await reachPage(gh, `/repos/${ORG}/${r.name}/hooks`)) hooks.push(`${r.name}:${await hookEntry(h, key)}`);
   const people = await reachPage(gh, `/repos/${ORG}/${r.name}/collaborators?affiliation=direct`);
   shape(people.every((p) => typeof p.login === "string" && GH_NAME.test(p.login) && typeof p.role_name === "string"));
-  if (r.private && !people.length) throw new VaultError("reach_collabs_empty");
-  return { hooks: hooks.sort(), collabs: people.map((p) => `${r.name}:${p.login}:${p.role_name}`).sort() };
+  return { hooks: hooks.sort(), collabs: people.map((p) => `${r.name}:${p.login}:${p.role_name}`).sort(), priv: r.private === true };
 }
 
 /** The org's own webhooks as sorted hook entries (host and fingerprint only, never the URL). */

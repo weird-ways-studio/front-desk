@@ -121,10 +121,34 @@
  ],
  [
   "reach-collabs-empty",
-  "vault/src/github.ts",
-  "if (r.private && !people.length) throw new VaultError(\"reach_collabs_empty\");",
+  "vault/src/vault.ts",
+  "if (reachAllRead(next) && reachAllEmpty(next)) throw new VaultError(\"reach_collabs_empty\");",
   "",
-  "R24: a private repo with an empty collaborators list -> reach_collabs_empty; an empty public repo list is fine",
+  "R24: every private repo empty -> reach_collabs_empty; one empty private repo, or an empty public one, is fine",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-collabs-any-empty",
+  "vault/src/vault.ts",
+  "return priv.length > 0 && priv.every((r) => !r.collabs.length);",
+  "return priv.some((r) => !r.collabs.length);",
+  "R24: every private repo empty -> reach_collabs_empty; one empty private repo, or an empty public one, is fine",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-collabs-priv-flag",
+  "vault/src/github.ts",
+  "priv: r.private === true };",
+  "priv: false };",
+  "R24: every private repo empty -> reach_collabs_empty; one empty private repo, or an empty public one, is fine",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-collabs-judged-before-keep",
+  "vault/src/vault.ts",
+  "if (reachAllRead(next) && reachAllEmpty(next))",
+  "if (reachAllRead(work) && reachAllEmpty(next))",
+  "R24: every private repo empty -> reach_collabs_empty; one empty private repo, or an empty public one, is fine",
   "test/reach.test.ts"
  ],
  [
@@ -186,7 +210,7 @@
  [
   "reach-complete-all-repos",
   "vault/src/vault.ts",
-  " && work.inventory.every((x) => work.repos.some((d) => d.name === x.slice(0, x.lastIndexOf(\":\"))))",
+  " && g.inventory.every((x) => g.repos.some((d) => d.name === x.slice(0, x.lastIndexOf(\":\"))))",
   "",
   "R6: an incomplete night (only its first slice ran) -> red",
   "test/reach.test.ts"
