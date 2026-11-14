@@ -66,8 +66,8 @@ test("R35: the answer carries only bounded progress, whatever else the vault sen
   assert.deepEqual(await res.json(), { state: "complete", done: 2, total: 2, code: null });
 });
 
-test("R37: a verify read that ended sends Ben exactly one phone line with its final state, and logs it; 'recorded' only when accepted", async () => {
-  for (const [acceptance, words] of [
+test("R37: each final state the vault keeps is pushed as exactly one phone line, logged, then acknowledged; 'recorded' only when accepted", async () => {
+  for (const [state, words] of [
     ["accepted", /recorded/],
     ["refused", /Nothing recorded: GitHub changed after you looked/],
     ["expired", /Nothing recorded: the re-check did not finish within 20 minutes/],
@@ -75,14 +75,19 @@ test("R37: a verify read that ended sends Ben exactly one phone line with its fi
   ] as const) {
     const store = new MemoryStore();
     const alerts: string[] = [];
-    const res = await post(store, fakeVault({ state: acceptance === "expired" ? "failed" : "complete", done: 2, total: 2, code: acceptance === "refused" ? "reach_changed_since_request" : null, acceptance }), "/reach/step", "", AGENT, alerts);
-    assert.equal(((await res.json()) as { acceptance?: string }).acceptance, acceptance);
-    assert.equal(alerts.length, 1, acceptance);
+    const v = fakeVault({ state: "complete", done: 2, total: 2, code: null, acceptance: state });
+    const kept = [{ id: "g1", kind: "acceptance", state, ...(state === "refused" ? { reason: "reach_changed_since_request" } : {}) }];
+    const acked: string[] = [];
+    Object.assign(v, { ghReachResults: async () => kept.filter((r) => !acked.includes(r.id)), ghReachAck: async (id: string) => (acked.push(id), true) });
+    const res = await post(store, v, "/reach/step", "", AGENT, alerts);
+    assert.equal(((await res.json()) as { acceptance?: string }).acceptance, state);
+    assert.equal(alerts.length, 1, state);
     assert.match(alerts[0], words);
-    if (acceptance !== "accepted") assert.doesNotMatch(alerts[0], /is now recorded/);
-    assert.match(await logOf(store), new RegExp(`reach_acceptance_${acceptance}`));
+    if (state !== "accepted") assert.doesNotMatch(alerts[0], /is now recorded/);
+    assert.match(await logOf(store), new RegExp(`reach_acceptance_${state}`));
+    assert.deepEqual(acked, ["g1"]);
   }
-  // An open read sends nothing.
+  // A step with nothing kept sends nothing.
   const alerts: string[] = [];
   await post(new MemoryStore(), fakeVault(), "/reach/step", "", AGENT, alerts);
   assert.deepEqual(alerts, []);
@@ -198,4 +203,25 @@ test("words: an IPv6 host and a port-carrying URL read correctly; collaborators 
   assert.match(said, /\\"someone-b\\" added directly to \\"front-desk\\" as custom:role/);
   // An entry whose host was not encoded still reads from both ends: events and the off switch stay in place.
   assert.match(JSON.stringify(plainChanges(["repo_hooks +r:7:[::1]:0123456789ab:push:false"])), /sending push to \\"\?::1\?\\" \(has unusual characters\) \(switched off\)/);
+});
+
+// Codex build r1 #2: the agent's driver (scripts/agent.mjs reach), so the menu's command exists.
+test("agent.mjs reach: steps until complete, failed, refused or idle; 'demand' only on the first call; a verify read after a tap", async () => {
+  const { driveReach, reachAfterCollect } = await import("../scripts/agent.mjs");
+  const sent: string[] = [];
+  const answers = [{ state: "open", done: 18, total: 20 }, { state: "complete", done: 20, total: 20, acceptance: "accepted" }];
+  const last = await driveReach(async (body: string) => (sent.push(body), answers.shift()), true, () => {});
+  assert.deepEqual(sent, ['{"purpose":"demand"}', ""]);
+  assert.equal(last.state, "complete");
+  for (const end of ["failed", "refused", "idle"]) {
+    let n = 0;
+    assert.equal((await driveReach(async () => (n++, { state: end }), false, () => {})).state, end);
+    assert.equal(n, 1, end);
+  }
+  let n = 0;
+  await driveReach(async () => (n++, { state: "open" }), false, () => {});
+  assert.equal(n, 4, "bounded: at most ceil(36/18) + 2 calls");
+  assert.equal(reachAfterCollect(JSON.stringify({ ok: true, result: { ok: true, state: "pending", expires_at: 1 } })), true);
+  assert.equal(reachAfterCollect(JSON.stringify({ ok: true, result: { ok: true, zone: "x" } })), false);
+  assert.equal(reachAfterCollect("not json"), false);
 });

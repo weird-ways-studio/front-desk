@@ -45,6 +45,12 @@ export class VaultBox extends DurableObject<Env> {
   ghReachPreview() {
     return this.logic().ghReachPreview();
   }
+  ghReachResults() {
+    return this.logic().ghReachResults();
+  }
+  ghReachAck(id: unknown) {
+    return this.logic().ghReachAck(id);
+  }
   ghPreview() {
     return this.logic().ghPreview();
   }
@@ -137,6 +143,13 @@ export default class Vault extends WorkerEntrypoint<Env> {
   // What job gh.reach.baseline would accept, for Ben's approval screen (called at /request). Reads storage only.
   ghReachPreview() {
     return this.box().ghReachPreview();
+  }
+  // Final states and probe-key alarms the desk has not delivered yet; the desk acknowledges each after it pushed it.
+  ghReachResults() {
+    return this.box().ghReachResults();
+  }
+  ghReachAck(id: unknown) {
+    return this.box().ghReachAck(id);
   }
   // What job gh.app.baseline would accept, for Ben's approval screen (called at /request). Reads only.
   ghPreview() {

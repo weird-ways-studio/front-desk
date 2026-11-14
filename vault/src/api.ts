@@ -2,10 +2,10 @@
 
 import type { SignedRun } from "./approval.ts";
 import type { OpRequest, OpResult, RunBook, RunState } from "./runs.ts";
-import type { CfAcceptResult, CfPreviewKey, GhBaselineResult, GhReachAcceptResult, Headcount, HeadcountSetupResult, ReachProgress, ReadResult } from "./vault.ts";
+import type { CfAcceptResult, CfPreviewKey, GhBaselineResult, GhReachAcceptResult, Headcount, HeadcountSetupResult, ReachProgress, ReachResult, ReadResult } from "./vault.ts";
 
 export type { OpRequest, OpResult, RunState, SignedRun };
-export type { CfAcceptResult, CfPreviewKey, GhBaselineResult, GhReachAcceptResult, Headcount, HeadcountSetupResult, ReachProgress, ReadResult };
+export type { CfAcceptResult, CfPreviewKey, GhBaselineResult, GhReachAcceptResult, Headcount, HeadcountSetupResult, ReachProgress, ReachResult, ReadResult };
 
 export interface VaultApi {
   status(): Promise<{ stored: boolean; pending: boolean; token_id?: string }>;
@@ -20,6 +20,8 @@ export interface VaultApi {
 export interface VaultReachApi {
   ghReachNight(): Promise<ReachProgress>;
   ghReachStep(purpose?: "demand"): Promise<ReachProgress>;
+  ghReachResults(): Promise<ReachResult[]>;
+  ghReachAck(id: string): Promise<boolean>;
   ghReachPreview(): Promise<{ changes: string[]; lists: string; base: string; app_id: string; installation_id: string; inventory: string }>;
 }
 

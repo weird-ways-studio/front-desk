@@ -200,11 +200,13 @@ export class VaultLogic {
   private store: VaultStore;
   private fetch: Fetch;
   private now: () => number;
+  private calls = 0;
   private pin: PasskeyPin | undefined;
   // `pin`: Ben's passkey as pinned in passkey.ts; tests pass their own.
   constructor(store: VaultStore, fetchFn: Fetch, now: () => number = Date.now, pin: PasskeyPin | undefined = PASSKEY_PIN) {
     this.store = store;
-    this.fetch = fetchFn;
+    // Every outbound call counts: a reach answer reports this invocation's GitHub calls (counts only; card N2 5fdbf2ce).
+    this.fetch = (input, init) => (this.calls++, fetchFn(input, init));
     this.now = now;
     this.pin = pin;
   }
@@ -685,14 +687,32 @@ export class VaultLogic {
   // is deleted at once, and any other answer (an outage, another 422) proves nothing (Release Checklist 6.1).
   private async probeWrite(hc: GhHeadcountApp, perms: Record<string, string>): Promise<{ refused: boolean; error: string }> {
     const hcApp = new GitHub(await appJwt(hc.id, hc.key, this.now()), this.fetch);
+    let leaked: { token: string; expires_at: string };
     try {
-      const leaked = await installationKey(hcApp, hc.installation!, { permissions: perms });
-      await new GitHub(leaked.token, this.fetch).call("DELETE", "/installation/token").catch(() => undefined);
-      return { refused: false, error: "headcount App was given write" };
+      leaked = await installationKey(hcApp, hc.installation!, { permissions: perms });
     } catch (e) {
       const error = (e as Error).message.slice(0, 120);
       return { refused: GH_ESCALATION_REFUSAL.test(error), error };
     }
+    // Wrongly granted (Codex build r1 #3): delete it and prove it dead -- only a 401 on a probe counts, as in ghrepo.ts --
+    // at most twice. Unproven: recorded (never the key itself) and offered to the desk, which pushes it; the nightly
+    // count reports it red until a day past GitHub's own expiry of the key.
+    const perm = Object.keys(perms).join(",");
+    const gh = new GitHub(leaked.token, this.fetch);
+    let dead = false;
+    for (let i = 0; i < 2 && !dead; i++) {
+      await gh.send("DELETE", "/installation/token").catch(() => undefined);
+      dead = (await gh.send("GET", "/installation/repositories?per_page=1").then((r) => r.status, () => 0)) === 401;
+    }
+    if (!dead) {
+      const id = `probe-${hex(crypto.getRandomValues(new Uint8Array(8)))}`;
+      const until = Date.parse(leaked.expires_at) || this.now() + 3600_000;
+      this.store.transactionSync(() => {
+        this.store.kv.put(`gh.probe.unrevoked:${id}`, { perm, at: this.now(), until });
+        this.store.kv.put(`gh.reach.outbox:${id}`, { id, kind: "probe", perm });
+      });
+    }
+    return { refused: false, error: `given write (${perm}); key ${dead ? "deleted and proven dead" : "could not be confirmed revoked"}` };
   }
 
   // The nightly GitHub count: what can reach the org now, against the list Ben accepted. Reads only.
@@ -712,6 +732,9 @@ export class VaultLogic {
       // A job-made repo the recorder has not yet receipted is not in the list (Y1): say why it shows, until it is.
       // An eligible one alarms until the recorder's receipt lands (Y1), even if Ben accepted it into the list meanwhile
       // (Codex build r1 #2). An ineligible one can never be receipted: it alarms until Ben accepts it with gh.app.baseline.
+      for (const [, u] of this.store.kv.list<{ perm: string; until: number }>({ prefix: "gh.probe.unrevoked:" })) {
+        if (this.now() <= u.until + 26 * 3600_000) r.changes.push(`probe_key_unrevoked: ${u.perm}`);
+      }
       for (const [, c] of this.store.kv.list<GhCreated>({ prefix: "gh.created:" })) {
         if (c.eligible ? !c.recorded : !(base.repo_ids ?? []).includes(`${c.name}:${c.repo_id}`)) r.changes.push(`repo_result_unrecorded: ${c.name}`);
       }
@@ -731,6 +754,10 @@ export class VaultLogic {
 
   /** Nightly cron (03:47 and 03:52 UTC): starts tonight's generation, or continues it; idempotent. */
   async ghReachNight(): Promise<ReachProgress> {
+    return { ...(await this.reachNightStep()), calls: this.calls };
+  }
+
+  private async reachNightStep(): Promise<ReachProgress> {
     const g = this.store.kv.get<ReachGen>("gh.reach.gen");
     const tonight = g?.purpose === "night" && utcDay(g.started_at) === utcDay(this.now());
     if (tonight && g.complete_at !== null) return progress(g);
@@ -743,6 +770,10 @@ export class VaultLogic {
    * bounded progress.
    */
   async ghReachStep(purpose?: unknown): Promise<ReachProgress> {
+    return { ...(await this.reachStepOnce(purpose)), calls: this.calls };
+  }
+
+  private async reachStepOnce(purpose?: unknown): Promise<ReachProgress> {
     if (purpose !== undefined && purpose !== "demand") return refused("reach_bad_purpose");
     const g = this.store.kv.get<ReachGen>("gh.reach.gen");
     const verify = g && isOpen(g) && g.purpose.startsWith("verify:");
@@ -755,7 +786,13 @@ export class VaultLogic {
       this.store.kv.put("gh.reach.calls", { hour, n: n + 1 });
       return true;
     })) return refused("reach_rate_limited");
-    if (verify && g.rev > Math.ceil((g.inventory?.length ?? 1) / REACH_REPOS_PER_RUN) + 1) return refused("reach_verify_steps");
+    // A verify attempt is counted in the approval, in one transaction, before any GitHub call (Codex build r1 #1).
+    if (verify && !this.store.transactionSync(() => {
+      const key = `gh.reach.approval:${g.purpose.slice(7)}`, a = this.store.kv.get<ReachApproval>(key);
+      if (!a || (a.attempts ?? 0) >= a.cap) return false;
+      this.store.kv.put(key, { ...a, attempts: (a.attempts ?? 0) + 1 });
+      return true;
+    })) return refused("reach_verify_steps");
     if (g && isOpen(g)) return this.reachSlice(g, g);
     if (!purpose) return { state: "idle", done: 0, total: 0, code: null };
     if (inWindow(this.now())) return refused("reach_window");
@@ -804,13 +841,18 @@ export class VaultLogic {
       if (!hc?.installation || !id) throw new VaultError("github_not_set_up");
       if (p.app_id !== String(hc.id) || p.installation_id !== String(hc.installation)) throw new VaultError("reach_scope_changed");
       for (const perm of ["repository_hooks", "organization_hooks", "administration"]) {
-        if (!(await this.probeWrite(hc, { [perm]: "write" })).refused) throw new VaultError(`headcount App not refused write (${perm}): nothing approved`);
+        const probe = await this.probeWrite(hc, { [perm]: "write" });
+        if (!probe.refused) throw new VaultError(`headcount App not refused write: ${probe.error}`);
       }
       const expires_at = this.store.transactionSync(() => {
         if (!reachAdmits(this.now())) throw new VaultError("reach_try_after_0420");
         const now = this.store.kv.get<GhHeadcountApp | null>("gh.app.headcount");
         if (now?.id !== hc.id || now.installation !== hc.installation) throw new VaultError("reach_scope_changed");
-        const a: ReachApproval = { id, lists: p.lists, base: p.base, inventory: p.inventory, app_id: hc.id, installation_id: hc.installation!, expires_at: this.now() + REACH_ACCEPT_MS, state: "pending" };
+        const repos = this.store.kv.get<ReachGen>("gh.reach.complete")?.inventory?.length ?? REACH_MAX_REPOS;
+        const a: ReachApproval = {
+          id, lists: p.lists, base: p.base, inventory: p.inventory, app_id: hc.id, installation_id: hc.installation!, expires_at: this.now() + REACH_ACCEPT_MS, state: "pending",
+          cap: Math.ceil(repos / REACH_REPOS_PER_RUN) + 1, attempts: 0,
+        };
         this.store.kv.put(`gh.reach.approval:${id}`, a);
         this.reachReserve(`verify:${id}`);
         return a.expires_at;
@@ -833,7 +875,41 @@ export class VaultLogic {
       : pre.base !== a.base || canonical(this.store.kv.get<ReachLists>("gh.reach.baseline") ?? null) !== pre.baseText ? "reach_baseline_changed"
       : null;
     if (!why) this.store.kv.put("gh.reach.baseline", listsOf(gen));
-    this.store.kv.put(key, { ...a, state: why === "expired" ? "expired" : why ? "refused" : "accepted", ...(why && why !== "expired" ? { reason: why } : {}) });
+    this.finishApproval(a, why === "expired" ? "expired" : why ? "refused" : "accepted", why && why !== "expired" ? why : undefined);
+  }
+
+  // An approval's final state, and the same state in the outbox the desk delivers from (gh.reach.outbox:<id>), in the
+  // caller's transaction: the result survives a lost reply, an agent that stops stepping, and a nightly replacement.
+  private finishApproval(a: ReachApproval, state: ReachApproval["state"], reason?: string): void {
+    this.store.kv.put(`gh.reach.approval:${a.id}`, { ...a, state, ...(reason ? { reason } : {}) });
+    this.store.kv.put(`gh.reach.outbox:${a.id}`, { id: a.id, kind: "acceptance", state, ...(reason ? { reason } : {}) });
+  }
+
+  /**
+   * Final states and probe-key alarms the desk has not yet acknowledged. First ends every pending approval past its
+   * 20 minutes (expired), and fails its verify read if still open, so no timer is needed. Fixed fields only.
+   */
+  ghReachResults(): ReachResult[] {
+    return this.store.transactionSync(() => {
+      const kv = this.store.kv;
+      for (const [, a] of kv.list<ReachApproval>({ prefix: "gh.reach.approval:" })) {
+        if (a.state !== "pending" || this.now() <= a.expires_at) continue;
+        this.finishApproval(a, "expired");
+        const g = kv.get<ReachGen>("gh.reach.gen");
+        if (g && isOpen(g) && g.purpose === `verify:${a.id}`) {
+          kv.put("gh.reach.gen", { ...g, failed: "reach_verify_expired", rev: g.rev + 1 });
+          if (g.seq > (kv.get<{ seq: number }>("gh.reach.fail")?.seq ?? 0)) kv.put("gh.reach.fail", { seq: g.seq, reason: "reach_verify_expired" });
+        }
+      }
+      return [...kv.list<ReachResult | null>({ prefix: "gh.reach.outbox:" })].flatMap(([, r]) => (r ? [r] : []));
+    });
+  }
+
+  /** The desk stored and pushed this result: the vault stops offering it. */
+  ghReachAck(id: unknown): boolean {
+    if (typeof id !== "string" || !this.store.kv.get(`gh.reach.outbox:${id}`)) return false;
+    this.store.kv.put(`gh.reach.outbox:${id}`, null);
+    return true;
   }
 
   // A verify read that failed or was replaced ends its approval (expired past its time, else refused or superseded).
@@ -842,7 +918,7 @@ export class VaultLogic {
     const a = this.store.kv.get<ReachApproval>(key);
     if (!gen.purpose.startsWith("verify:") || a?.state !== "pending") return;
     const state = this.now() > a.expires_at ? "expired" : how;
-    this.store.kv.put(key, { ...a, state, ...(state === "refused" ? { reason: gen.failed ?? "reach_failed" } : {}) });
+    this.finishApproval(a, state, state === "refused" ? (gen.failed ?? "reach_failed") : undefined);
   }
 
   private reachNew(purpose: string): ReachGen {
@@ -1209,6 +1285,7 @@ export interface ReachProgress {
   total: number;
   code: string | null;
   acceptance?: ReachApproval["state"]; // a verify read that just ended: its approval's final state
+  calls?: number; // GitHub calls this invocation made
 }
 export const REACH_DEMAND_PER_HOUR = 12;
 export const REACH_ACCEPT_MS = 20 * 60_000;
@@ -1224,7 +1301,11 @@ interface ReachApproval {
   expires_at: number;
   state: "pending" | "accepted" | "refused" | "expired" | "superseded";
   reason?: string;
+  cap: number; // verify attempts allowed: ceil(repos / 18) + 1
+  attempts?: number;
 }
+// What the desk delivers (ghReachResults): an approval's final state, or a write key not proven revoked. Fixed fields.
+export type ReachResult = { id: string; kind: "acceptance"; state: ReachApproval["state"]; reason?: string } | { id: string; kind: "probe"; perm: string };
 export interface GhReachAcceptResult {
   ok: boolean; // true: approved and its verify read reserved; nothing recorded yet
   state: "pending" | "refused";

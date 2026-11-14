@@ -191,6 +191,13 @@ const REACH_WORDS: [RegExp, string][] = [
   [/^reach_fp_key_lost/, "the webhook check lost its private fingerprint key. It needs a reset only you can authorize; tell the agent"],
 ];
 
+/** A write key GitHub wrongly gave the watcher, not proven dead (vault probeWrite). */
+export const probeWords = (perm: string) =>
+  `A write key GitHub wrongly gave the read-only watcher (${name(perm)}) could not be confirmed deleted. It stops working within an hour on GitHub's own clock; the nightly check reports it until then. Tell the agent now: the watcher's GitHub permissions need checking.`;
+
+// Results being delivered right now, per desk storage (the Durable Object's), so two deliveries at once push once.
+const inFlight = new WeakMap<object, Set<string>>();
+
 /** The one phone line for a webhook-list approval's final state (job gh.reach.baseline). Says "recorded" only when it was. */
 export function reachAcceptWords(state: NonNullable<ReachProgress["acceptance"]>, code?: string | null): string {
   if (state === "accepted") return "The webhook and collaborator list you approved is now recorded; the nightly check expects it from tonight. Nothing else to do.";
@@ -773,6 +780,7 @@ export class Desk {
       alarmFailed = String((e as Error)?.message ?? e).slice(0, 120);
     }
     if (!saved) await this.log({ event: "headcount_run_save_failed" }, now).catch(() => undefined);
+    await this.deliverReach(now);
     if (alarmFailed !== undefined) await this.log({ event: "headcount_alarm_failed", detail: alarmFailed }, now).catch(() => undefined);
     return r;
   }
@@ -787,13 +795,43 @@ export class Desk {
     const p = night ? await vault.ghReachNight() : await vault.ghReachStep(purpose);
     const acceptance = (["accepted", "refused", "expired", "superseded"] as const).find((s) => s === p.acceptance);
     const out = { state: p.state, done: Number(p.done) || 0, total: Number(p.total) || 0, code: typeof p.code === "string" ? p.code.slice(0, 60) : null, ...(acceptance ? { acceptance } : {}) };
-    await this.log({ event: night ? "reach_night" : "reach_step", detail: `${String(out.state).slice(0, 10)} ${out.done}/${out.total}${out.code ? ` ${out.code}` : ""}` }, now);
-    if (acceptance) {
-      const words = reachAcceptWords(acceptance, out.code);
-      await this.log({ event: `reach_acceptance_${acceptance}`, detail: words }, now);
-      await this.hooks.alert?.("Front desk: webhook list", words).catch(() => this.log({ event: "alert_failed", detail: "reach acceptance alert did not reach Ben's phone" }, now));
-    }
+    const calls = typeof p.calls === "number" ? ` calls ${p.calls}` : "";
+    await this.log({ event: night ? "reach_night" : "reach_step", detail: `${String(out.state).slice(0, 10)} ${out.done}/${out.total}${out.code ? ` ${out.code}` : ""}${calls}` }, now);
+    await this.deliverReach(now);
     return out;
+  }
+
+  /**
+   * Delivers what the vault keeps for Ben (vault ghReachResults: an approval's final state, a write key not proven
+   * revoked): logs it, pushes one line, then acknowledges it. At least once from the vault's side; the desk's mark
+   * `reachsent:<id>` (and an in-flight set, for two deliveries at once) keeps it to one push. Never throws.
+   */
+  async deliverReach(now: number): Promise<void> {
+    const vault = this.hooks.vault;
+    if (!vault?.ghReachResults || !vault.ghReachAck) return;
+    const busy = inFlight.get(this.store) ?? new Set<string>();
+    inFlight.set(this.store, busy);
+    try {
+      for (const r of (await vault.ghReachResults()).slice(0, 10)) {
+        const id = String(r.id).slice(0, 80);
+        if (busy.has(id)) continue;
+        busy.add(id);
+        try {
+          if (!(await this.store.get(`reachsent:${id}`))) {
+            await this.store.put(`reachsent:${id}`, now);
+            const state = r.kind === "acceptance" ? (["accepted", "refused", "expired", "superseded"] as const).find((x) => x === r.state) : undefined;
+            const words = state ? reachAcceptWords(state, r.kind === "acceptance" && typeof r.reason === "string" ? r.reason.slice(0, 60) : null) : probeWords(r.kind === "probe" ? String(r.perm).slice(0, 60) : "?");
+            await this.log({ event: state ? `reach_acceptance_${state}` : "probe_key_unrevoked", detail: words }, now);
+            await this.hooks.alert?.(state ? "Front desk: webhook list" : "Front desk: needs you", words).catch(() => this.log({ event: "alert_failed", detail: "reach result did not reach Ben's phone" }, now));
+          }
+          await vault.ghReachAck(id);
+        } finally {
+          busy.delete(id);
+        }
+      }
+    } catch (e) {
+      await this.log({ event: "reach_delivery_failed", detail: String((e as Error)?.message ?? e).slice(0, 60) }, now).catch(() => undefined);
+    }
   }
 
   /** The cron's slice: never throws, so a failure is still one log line. */
@@ -811,6 +849,7 @@ export class Desk {
     if (n >= HEADCOUNT_DEMAND_PER_HOUR) throw new DeskError("rate_limited", 429);
     await this.store.put("rate:headcount", { hour, n: n + 1 });
     if (!this.hooks.vault) throw new DeskError("vault_not_ready", 503);
+    await this.deliverReach(now);
     const r = await this.hooks.vault.headcount("any");
     const detail = headcountWords(r);
     await this.log({ event: r.ok ? "headcount_demand_ok" : "headcount_demand_mismatch", detail }, now);

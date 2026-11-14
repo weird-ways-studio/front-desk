@@ -429,6 +429,8 @@ test("R29: no on-demand start inside 03:40-04:20 UTC; R30: a demand read open at
 test("an open verify read is never replaced by a demand read: demand steps continue it", async () => {
   const s = setup(20);
   s.clock.now = DAY;
+  // An approval as the tap records it (its own tests are below), then its verify read.
+  s.store.kv.put("gh.reach.approval:a1", { id: "a1", state: "pending", expires_at: DAY + 20 * MIN, cap: 3, attempts: 0 });
   s.store.transactionSync(() => (s.vault as any).reachReserve("verify:a1"));
   assert.equal((await demand(s)).state, "open");
   const g = s.store.kv.get<any>("gh.reach.gen");
@@ -816,7 +818,7 @@ test("write probe granted: delete refused, failed or lost -> tap fails, key reco
   const ok = await readDay();
   ok.gh.faults.grantWrite = "repository_hooks";
   const r = await tap(ok);
-  assert.match(r.error ?? "", /given write \(repository_hooks\); its key was deleted/);
+  assert.match(r.error ?? "", /given write \(repository_hooks\); key deleted and proven dead/);
   assert.deepEqual(await ok.vault.ghReachResults(), []);
 });
 
