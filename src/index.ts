@@ -44,9 +44,11 @@ export class FrontDesk extends DurableObject<Env> {
     const phone = { user: this.env.PUSHOVER_USER, token: this.env.PUSHOVER_TOKEN };
     return route(request, this.ctx.storage, who, Date.now(), this.env.VAULT, approvalPush(phone), recorder, phoneAlert(phone));
   }
-  // The nightly count runs in here too, so its log rows join the one log.
+  // The nightly count runs in here too, so its log rows join the one log. Its desk carries the phone hook, so kept reach
+  // results it delivers reach Ben's phone (without one, Desk.deliverReach acknowledges nothing; Codex build r2).
   async headcount(): Promise<void> {
-    await new Desk(this.ctx.storage, { origin: "", rpID: "" }, { vault: this.env.VAULT }).headcount(headcountAlarm(this.env.HC_HEADCOUNT_URL, { user: this.env.PUSHOVER_USER, token: this.env.PUSHOVER_TOKEN }), Date.now());
+    const phone = { user: this.env.PUSHOVER_USER, token: this.env.PUSHOVER_TOKEN };
+    await new Desk(this.ctx.storage, { origin: "", rpID: "" }, { vault: this.env.VAULT, alert: phoneAlert(phone) }).headcount(headcountAlarm(this.env.HC_HEADCOUNT_URL, phone), Date.now());
   }
   // The nightly reach slice (card N2 5fdbf2ce), in here so its log line joins the one log.
   async reachNight(): Promise<void> {
