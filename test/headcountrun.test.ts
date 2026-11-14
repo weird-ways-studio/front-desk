@@ -220,7 +220,8 @@ test("T3/T8 GET /headcount: agent 200; no login and Ben's login 403; other metho
   assert.equal(await dump(), before, "two reads left storage and the log unchanged");
   assert.equal((await get({ caller: "unknown", why: "no ticket" })).status, 403);
   assert.equal((await get({ caller: "owner" })).status, 403);
-  assert.equal((await get({ caller: "agent", requester: "cbox" }, "POST")).status, 404);
+  // POST /headcount is the on-demand count since card N2 5fdbf2ce (test/reachdesk.test.ts); other methods stay unserved.
+  assert.equal((await get({ caller: "agent", requester: "cbox" }, "PUT")).status, 404);
   assert.equal((await get({ caller: "owner" }, "POST")).status, 403);
 });
 

@@ -170,16 +170,16 @@
  [
   "reach-superseded-recorded",
   "vault/src/vault.ts",
-  "if (cur && isOpen(cur)) fail(cur.seq, \"reach_superseded\");",
-  "",
+  "if (cur && isOpen(cur)) (fail(cur.seq, \"reach_superseded\"), this.endApproval(cur, \"superseded\"));",
+  "if (cur && isOpen(cur)) this.endApproval(cur, \"superseded\");",
   "R29: no on-demand start inside 03:40-04:20 UTC; R30: a demand read open at 03:47 is replaced by the night and recorded",
   "test/reach.test.ts"
  ],
  [
   "reach-fail-recorded",
   "vault/src/vault.ts",
-  "if (work.failed) fail(work.seq, work.failed);",
-  "if (work.failed) void 0;",
+  "if (work.failed) (fail(work.seq, work.failed), this.endApproval(work, \"refused\"));",
+  "if (work.failed) this.endApproval(work, \"refused\");",
   "R4: a failure after an earlier complete night -> red (newer failure), even though the older read was complete (R16)",
   "test/reach.test.ts"
  ],
@@ -274,7 +274,7 @@
  [
   "reach-demand-window",
   "vault/src/vault.ts",
-  "if (m >= REACH_WINDOW[0] && m < REACH_WINDOW[1]) return refused(\"reach_window\");",
+  "if (inWindow(this.now())) return refused(\"reach_window\");",
   "",
   "R29: no on-demand start inside 03:40-04:20 UTC; R30: a demand read open at 03:47 is replaced by the night and recorded",
   "test/reach.test.ts"
@@ -290,8 +290,8 @@
  [
   "reach-verify-reserve",
   "vault/src/vault.ts",
-  "if (cur && isOpen(cur) && cur.purpose.startsWith(\"verify:\")) throw new VaultError(\"reach_verify_open\");",
-  "",
+  "const cur = this.store.kv.get<ReachGen>(\"gh.reach.gen\");\n    if (cur && isOpen(cur) && cur.purpose.startsWith(\"verify:\")) throw new VaultError(\"reach_verify_open\");",
+  "const cur = this.store.kv.get<ReachGen>(\"gh.reach.gen\");",
   "an open verify read is never replaced by a demand read: demand steps continue it",
   "test/reach.test.ts"
  ],
@@ -326,5 +326,213 @@
   "\"gh.reach.complete\"",
   "R32/R41: a demand read completed after the night keeps the scheduled count on the night; on demand selects the newest",
   "test/reach.test.ts"
+ ],
+ [
+  "reach-accept-probes",
+  "vault/src/vault.ts",
+  "for (const perm of [\"repository_hooks\", \"organization_hooks\", \"administration\"])",
+  "for (const perm of [\"administration\"])",
+  "R22: any of the three write probes granted -> tap fails, that key is deleted, no approval and no read",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-probe-exact",
+  "vault/src/vault.ts",
+  "return { refused: GH_ESCALATION_REFUSAL.test(error), error };",
+  "return { refused: true, error };",
+  "R22: any of the three write probes granted -> tap fails, that key is deleted, no approval and no read",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-accept-admits",
+  "vault/src/vault.ts",
+  "        if (!reachAdmits(this.now())) throw new VaultError(\"reach_try_after_0420\");\n        const now",
+  "        const now",
+  "R28/R39: admission by the tap's own time: a tap whose 20 minutes reach 03:40 is refused, no approval, no read; the preview says so first",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-admits-20min",
+  "vault/src/vault.ts",
+  "t + REACH_ACCEPT_MS < (t < start",
+  "t < (t < start",
+  "R28/R39: admission by the tap's own time: a tap whose 20 minutes reach 03:40 is refused, no approval, no read; the preview says so first",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-accept-scope",
+  "vault/src/vault.ts",
+  "if (p.app_id !== String(hc.id) || p.installation_id !== String(hc.installation)) throw new VaultError(\"reach_scope_changed\");",
+  "",
+  "removal invalidates the approval (6.3): another App or installation before completion -> refused at the tap or completion",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-accept-one-verify",
+  "vault/src/vault.ts",
+  "this.reachReserve(`verify:${id}`);",
+  "this.store.kv.put(\"gh.reach.gen\", this.reachNew(`verify:${id}`));",
+  "R40 (6.2): two taps at once -> exactly one approval and one verify read",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-complete-lists",
+  "vault/src/vault.ts",
+  "pre.lists !== a.lists || ",
+  "",
+  "R12/R19: GitHub changes between Ben's screen and the re-read -> refused, nothing recorded",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-complete-base",
+  "vault/src/vault.ts",
+  "pre.base !== a.base || canonical(this.store.kv.get<ReachLists>(\"gh.reach.baseline\") ?? null) !== pre.baseText ? \"reach_baseline_changed\"",
+  "false ? \"reach_baseline_changed\"",
+  "R21: the accepted list changed by anyone between preview and completion -> refused, the other write survives",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-verify-expiry",
+  "vault/src/vault.ts",
+  "if (a && (a.state !== \"pending\" || this.now() > a.expires_at)) throw new VaultError(\"reach_verify_expired\");",
+  "",
+  "R20: an approval past its 20 minutes ends expired and its read fails; nothing recorded",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-verify-steps",
+  "vault/src/vault.ts",
+  "if (verify && g.rev > Math.ceil(",
+  "if (false && g.rev > Math.ceil(",
+  "rates: at most 12 on-demand steps an hour; verify steps are exempt but capped per approval",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-demand-rate",
+  "vault/src/vault.ts",
+  "if (n >= REACH_DEMAND_PER_HOUR) return false;",
+  "",
+  "rates: at most 12 on-demand steps an hour; verify steps are exempt but capped per approval",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-preview-fresh",
+  "vault/src/vault.ts",
+  "if (!sel || this.now() - sel.started_at > REACH_FRESH_MS || ",
+  "if (!sel || ",
+  "preview: no fresh complete read -> reach_read_first; an open verify -> reach_verify_open; a lost key -> reach_fp_key_lost",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-preview-verify",
+  "vault/src/vault.ts",
+  "if (cur && isOpen(cur) && cur.purpose.startsWith(\"verify:\")) throw new VaultError(\"reach_verify_open\");\n    if (!sel",
+  "if (!sel",
+  "preview: no fresh complete read -> reach_read_first; an open verify -> reach_verify_open; a lost key -> reach_fp_key_lost",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-tap-writes-nothing",
+  "vault/src/vault.ts",
+  "this.store.kv.put(`gh.reach.approval:${id}`, a);",
+  "this.store.kv.put(`gh.reach.approval:${id}`, a);\n        this.store.kv.put(\"gh.reach.baseline\", { repo_hooks: [], org_hooks: [], collaborators: [] });",
+  "first acceptance: no list and no key yet; the tap writes nothing, the re-read records exactly what Ben saw",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-route-body",
+  "src/routes.ts",
+  "if (text !== \"\" && !demand) return json({ error: \"bad_body\" }, 400);",
+  "",
+  "R34/R36: the body is empty or exactly {\"purpose\":\"demand\"}; any other purpose, scope, hash or baseline is refused before the vault",
+  "test/reachdesk.test.ts"
+ ],
+ [
+  "reach-route-keys",
+  "src/routes.ts",
+  "Object.keys(b).join() === \"purpose\" && ",
+  "",
+  "R34/R36: the body is empty or exactly {\"purpose\":\"demand\"}; any other purpose, scope, hash or baseline is refused before the vault",
+  "test/reachdesk.test.ts"
+ ],
+ [
+  "reach-route-agent",
+  "src/routes.ts",
+  " || parts[0] === \"reach\"",
+  "",
+  "R33: POST /reach/step needs the agent's login: Ben's login and unknown callers get 403, the vault is not called",
+  "test/reachdesk.test.ts"
+ ],
+ [
+  "reach-route-bounded",
+  "src/desk.ts",
+  "const out = { state: p.state, done: Number(p.done) || 0, total: Number(p.total) || 0, code: typeof p.code === \"string\" ? p.code.slice(0, 60) : null, ...(acceptance ? { acceptance } : {}) };",
+  "const out = { ...p } as ReachProgress;",
+  "R35: the answer carries only bounded progress, whatever else the vault sends",
+  "test/reachdesk.test.ts"
+ ],
+ [
+  "reach-accept-words",
+  "src/desk.ts",
+  "if (state === \"accepted\") return",
+  "if (state) return",
+  "R37: a verify read that ended sends Ben exactly one phone line with its final state, and logs it; 'recorded' only when accepted",
+  "test/reachdesk.test.ts"
+ ],
+ [
+  "reach-accept-push",
+  "src/desk.ts",
+  "await this.hooks.alert?.(\"Front desk: webhook list\", words)",
+  "await Promise.resolve(words)",
+  "R37: a verify read that ended sends Ben exactly one phone line with its final state, and logs it; 'recorded' only when accepted",
+  "test/reachdesk.test.ts"
+ ],
+ [
+  "reach-hc-any",
+  "src/desk.ts",
+  "this.hooks.vault.headcount(\"any\")",
+  "this.hooks.vault.headcount()",
+  "on-demand headcount: POST /headcount asks the vault for the newest read ('any'), pushes the detail when red, never touches the nightly runs",
+  "test/reachdesk.test.ts"
+ ],
+ [
+  "reach-hc-cap",
+  "src/desk.ts",
+  "if (n >= HEADCOUNT_DEMAND_PER_HOUR) throw",
+  "if (false) throw",
+  "on-demand headcounts are capped at 6 an hour",
+  "test/reachdesk.test.ts"
+ ],
+ [
+  "reach-cron-map",
+  "src/desk.ts",
+  "cron === CRONS.reach ? \"reach\"",
+  "cron === CRONS.headcount ? \"reach\"",
+  "cron dispatch: wrangler's crons are exactly the reach slices and the headcount, each mapped to its job; anything else runs nothing",
+  "test/reachdesk.test.ts"
+ ],
+ [
+  "reach-words-reach",
+  "src/desk.ts",
+  "if (reach) todo.push(",
+  "if (false) todo.push(",
+  "words: each reach failure says what it means for tonight, with the code in brackets for the agent",
+  "test/reachdesk.test.ts"
+ ],
+ [
+  "reach-words-dest",
+  "src/ghplain.ts",
+  "if (kind.endsWith(\"_hooks\")) {",
+  "if (false) {",
+  "words: webhooks and collaborators in plain words; a destination-only change says so; no raw line in view",
+  "test/reachdesk.test.ts"
+ ],
+ [
+  "reach-request-binds",
+  "src/desk.ts",
+  "Object.assign(params, { lists: seen.lists, ",
+  "Object.assign(params, { ",
+  "gh.reach.baseline: the request binds the preview's hashes and scope; Ben's screen lists the change; a refused preview says why",
+  "test/index.test.ts"
  ]
 ]

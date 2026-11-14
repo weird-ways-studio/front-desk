@@ -13,7 +13,7 @@ import {
 import { ascii, name, plainChanges } from "./ghplain.ts";
 import { JOBS, type Job, type JobName } from "./jobs.ts";
 import { currentKey, fingerprint, keyRev, type CboxKey } from "./cboxkey.ts";
-import type { Headcount, VaultApi, VaultCardApi, VaultRunApi } from "../vault/src/api.ts";
+import type { Headcount, ReachProgress, VaultApi, VaultCardApi, VaultReachApi, VaultRunApi } from "../vault/src/api.ts";
 import { beginRun, runSummary, readRuns, saveRun, type RunAttempt, type RunView } from "./headcountrun.ts";
 import { ALREADY_USED, APPROVAL_API_VERSION, REFUSED_BEFORE_RUN, TOO_OLD } from "../vault/src/approval.ts";
 import { CF_LIST_MAX, type CfField } from "../vault/src/cloudflare.ts";
@@ -177,6 +177,27 @@ export async function grantHash(g: Pick<Grant, "id" | "job" | "params" | "reques
  * first, one line per kind of trouble with its own next step, then the changes, cut to fit `max`
  * with a count of what was left out. The vault's exact reasons stay in brackets for the agent.
  */
+// The schedules in wrangler.jsonc "triggers" (card N2 5fdbf2ce). Cloudflare calls scheduled() in src/index.ts with the
+// expression that fired; cronJob picks the job. The reach slices run at 03:47 and 03:52, the headcount at 04:17.
+export const CRONS = { reach: "47,52 3 * * *", headcount: "17 4 * * *" } as const;
+export const cronJob = (cron: string): keyof typeof CRONS | null => (cron === CRONS.reach ? "reach" : cron === CRONS.headcount ? "headcount" : null);
+export const HEADCOUNT_DEMAND_PER_HOUR = 6;
+
+// What a failed reach part means for Ben, by its fixed code (vault/src/vault.ts reachFold).
+const REACH_WORDS: [RegExp, string][] = [
+  [/^reach_incomplete: (inventory|scope)/, "the webhook and collaborator check read a different set of repositories, or used a different watcher, than tonight's count, so they are unconfirmed. Tell the agent"],
+  [/^reach_incomplete/, "the webhook and collaborator check did not finish tonight, so webhooks and direct collaborators are unconfirmed. Tell the agent; there is nothing to accept"],
+  [/^reach_no_baseline/, "the webhook and collaborator list has not been accepted yet. Ask the agent for the acceptance tap (one Face ID)"],
+  [/^reach_fp_key_lost/, "the webhook check lost its private fingerprint key. It needs a reset only you can authorize; tell the agent"],
+];
+
+/** The one phone line for a webhook-list approval's final state (job gh.reach.baseline). Says "recorded" only when it was. */
+export function reachAcceptWords(state: NonNullable<ReachProgress["acceptance"]>, code?: string | null): string {
+  if (state === "accepted") return "The webhook and collaborator list you approved is now recorded; the nightly check expects it from tonight. Nothing else to do.";
+  const why = state === "expired" ? "the re-check did not finish within 20 minutes" : state === "superseded" ? "the nightly check started before the re-check finished, so ask again after 04:20 UTC" : "GitHub changed after you looked, or the accepted list changed meanwhile";
+  return `Nothing recorded: ${why}. The nightly check still expects the previous list. Ask the agent to ask again.${state === "refused" && code ? ` [${name(code)}]` : ""}`;
+}
+
 export function headcountWords(r: Headcount, max = LOG_DETAIL_MAX): string {
   if (r.ok) return `All clear: ${r.tokens} Cloudflare keys, all expected; GitHub matches the list you accepted.`;
   if (r.error) return `The nightly check could not finish, so tonight is unconfirmed. Tell the agent to fix it; there is nothing to accept. [${name(r.error)}]`;
@@ -201,7 +222,9 @@ export function headcountWords(r: Headcount, max = LOG_DETAIL_MAX): string {
   const todo = ["Front desk nightly check: needs you."];
   if (cf.length) todo.push(`Cloudflare: ${cf.length} key change${cf.length === 1 ? "" : "s"} you did not approve. If one is not yours, tell the agent now: it may be someone else's access. If you made it, tell the agent so it can check it.`);
   if (gh.length) todo.push(`GitHub: ${gh.length} change${gh.length === 1 ? "" : "s"} since the list you accepted. If you made them, ask the agent to accept them (one Face ID tap). If not, tell the agent now.`);
-  if (r.github.error) todo.push(r.github.error === "github_not_set_up" ? "GitHub: not checked, because the GitHub setup is not finished. Tell the agent to finish it; there is nothing to accept." : `GitHub: could not be checked tonight, so it is unconfirmed. Tell the agent to fix it; there is nothing to accept. [${name(r.github.error)}]`);
+  const reach = REACH_WORDS.find(([re]) => re.test(r.github.error ?? ""));
+  if (reach) todo.push(`GitHub webhooks and direct collaborators: ${reach[1]}. [${name(r.github.error!)}]`);
+  else if (r.github.error) todo.push(r.github.error === "github_not_set_up" ? "GitHub: not checked, because the GitHub setup is not finished. Tell the agent to finish it; there is nothing to accept." : `GitHub: could not be checked tonight, so it is unconfirmed. Tell the agent to fix it; there is nothing to accept. [${name(r.github.error)}]`);
   const lines = [...todo];
   const changes = [...cf, ...gh];
   if (changes.length) lines.push("The changes:");
@@ -291,7 +314,7 @@ export interface DeskHooks {
   afterVerify?: (grantId: string) => Promise<void>;
   // The vault Worker (service binding VAULT); absent in tests that do not need it. Its card calls (VaultCardApi) are
   // used only by src/carddesk.ts, which checks they are there.
-  vault?: VaultApi & Partial<VaultCardApi> & Partial<Pick<VaultRunApi, "setKeyRev">>;
+  vault?: VaultApi & Partial<VaultCardApi> & Partial<Pick<VaultRunApi, "setKeyRev">> & Partial<VaultReachApi>;
   // The Observatory's recorder (recorder.ts). Absent = not set up: every request is refused.
   recorder?: Recorder;
   // Ben's phone, for a job that ran but whose result could not be recorded (phoneAlert).
@@ -495,6 +518,16 @@ export class Desk {
       if (params.changes.length > 4000) throw new DeskError("too_many_changes", 400);
       params.snapshot = seen.snapshot;
       params.base = seen.base;
+    }
+    if (job === "gh.reach.baseline") {
+      // Ben's screen lists what his tap approves; the hashes bind it, and the vault records only an exact re-read (card N2 5fdbf2ce).
+      if (!this.hooks.vault?.ghReachPreview) throw new DeskError("vault_not_ready", 503);
+      const seen = await this.hooks.vault.ghReachPreview().catch((e: Error) => {
+        throw new DeskError(`reach_preview_refused: ${String(e?.message ?? e).split(":")[0].slice(0, 40)}`, 409);
+      });
+      params.changes = seen.changes.length ? seen.changes.join("\n") : "none";
+      if (params.changes.length > 4000) throw new DeskError("too_many_changes", 400);
+      Object.assign(params, { lists: seen.lists, base: seen.base, app_id: seen.app_id, installation_id: seen.installation_id, inventory: seen.inventory });
     }
     if (job === "cf.token.accept") {
       // Ben's screen names exactly the keys his tap accepts; the vault refuses if any changed since.
@@ -742,6 +775,47 @@ export class Desk {
     if (!saved) await this.log({ event: "headcount_run_save_failed" }, now).catch(() => undefined);
     if (alarmFailed !== undefined) await this.log({ event: "headcount_alarm_failed", detail: alarmFailed }, now).catch(() => undefined);
     return r;
+  }
+
+  /**
+   * One reach slice (card N2 5fdbf2ce): the agent's POST /reach/step, or the 03:47/03:52 cron (`night`). Passes on only
+   * bounded progress, logs it, and when a verify read just ended, logs and pushes one line with the approval's final state.
+   */
+  async reachStep(purpose: "demand" | undefined, now: number, night = false): Promise<Pick<ReachProgress, "state" | "done" | "total" | "code" | "acceptance">> {
+    const vault = this.hooks.vault;
+    if (!vault?.ghReachStep || !vault.ghReachNight) throw new DeskError("vault_not_ready", 503);
+    const p = night ? await vault.ghReachNight() : await vault.ghReachStep(purpose);
+    const acceptance = (["accepted", "refused", "expired", "superseded"] as const).find((s) => s === p.acceptance);
+    const out = { state: p.state, done: Number(p.done) || 0, total: Number(p.total) || 0, code: typeof p.code === "string" ? p.code.slice(0, 60) : null, ...(acceptance ? { acceptance } : {}) };
+    await this.log({ event: night ? "reach_night" : "reach_step", detail: `${String(out.state).slice(0, 10)} ${out.done}/${out.total}${out.code ? ` ${out.code}` : ""}` }, now);
+    if (acceptance) {
+      const words = reachAcceptWords(acceptance, out.code);
+      await this.log({ event: `reach_acceptance_${acceptance}`, detail: words }, now);
+      await this.hooks.alert?.("Front desk: webhook list", words).catch(() => this.log({ event: "alert_failed", detail: "reach acceptance alert did not reach Ben's phone" }, now));
+    }
+    return out;
+  }
+
+  /** The cron's slice: never throws, so a failure is still one log line. */
+  async reachNight(now: number): Promise<void> {
+    await this.reachStep(undefined, now, true).catch((e: Error) => this.log({ event: "reach_night", detail: `failed ${String(e?.message ?? e).slice(0, 60)}` }, now).catch(() => undefined));
+  }
+
+  /**
+   * An on-demand count (agent POST /headcount): the newest complete reach read of any purpose ("any"). Logged and, when
+   * red, pushed to Ben; never pings healthchecks and never joins the nightly runs. At most HEADCOUNT_DEMAND_PER_HOUR.
+   */
+  async headcountNow(now: number): Promise<{ ok: boolean }> {
+    const hour = Math.floor(now / 3600_000), c = await this.store.get<{ hour: number; n: number }>("rate:headcount");
+    const n = c?.hour === hour ? c.n : 0;
+    if (n >= HEADCOUNT_DEMAND_PER_HOUR) throw new DeskError("rate_limited", 429);
+    await this.store.put("rate:headcount", { hour, n: n + 1 });
+    if (!this.hooks.vault) throw new DeskError("vault_not_ready", 503);
+    const r = await this.hooks.vault.headcount("any");
+    const detail = headcountWords(r);
+    await this.log({ event: r.ok ? "headcount_demand_ok" : "headcount_demand_mismatch", detail }, now);
+    if (!r.ok) await this.hooks.alert?.("Front desk on-demand check", detail).catch(() => undefined);
+    return { ok: r.ok };
   }
 
   /** What agents read at GET /headcount (src/headcountrun.ts). Reads only. */

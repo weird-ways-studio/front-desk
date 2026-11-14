@@ -36,7 +36,7 @@ export async function callerOf(access: ExecutionContext["access"], ownerEmail: s
 function needs(m: string, parts: string[]): Caller | null {
   if (parts[0] === "enroll" || parts[0] === "approve" || parts[0] === "log" || parts[0] === "passkeys" || parts[0] === "prf-check" || parts[0] === "cbox-key") return "owner";
   // /headcount (card build 5 6ab972c8): every method needs the agent, so Ben's login and unknown callers get 403.
-  if ((m === "POST" && parts[0] === "request") || parts[0] === "collect" || parts[0] === "card" || parts[0] === "headcount" || (m === "GET" && parts[0] === "menu")) return "agent";
+  if ((m === "POST" && parts[0] === "request") || parts[0] === "collect" || parts[0] === "card" || parts[0] === "headcount" || parts[0] === "reach" || (m === "GET" && parts[0] === "menu")) return "agent";
   return null;
 }
 
@@ -93,6 +93,17 @@ export async function route(request: Request, store: Store, who: Who, now = Date
     if (m === "GET" && url.pathname === "/menu") return json(menu());
     // The last headcount runs (src/headcountrun.ts); reading writes nothing and adds no log row.
     if (m === "GET" && url.pathname === "/headcount") return json(await desk.headcountRuns());
+    // An on-demand count (card N2 5fdbf2ce): the newest reach read; logged, pushed when red, never the nightly alarm.
+    if (m === "POST" && url.pathname === "/headcount") return json(await desk.headcountNow(now));
+    // One reach slice (card N2 5fdbf2ce, spec 12.3). The body is empty or exactly {"purpose":"demand"}: the agent can
+    // advance the vault's current read or start an on-demand one, never name a purpose, scope, hash or list.
+    if (m === "POST" && url.pathname === "/reach/step") {
+      const text = await request.text();
+      const b = (() => { try { return JSON.parse(text); } catch { return null; } })();
+      const demand = !!b && typeof b === "object" && !Array.isArray(b) && Object.keys(b).join() === "purpose" && b.purpose === "demand";
+      if (text !== "" && !demand) return json({ error: "bad_body" }, 400);
+      return json(await desk.reachStep(demand ? "demand" : undefined, now));
+    }
     // Agent calls: the raw body is kept so the c-box signature can be checked over it.
     const text = m === "POST" && (parts[0] === "request" || parts[0] === "collect" || parts[0] === "card") ? await request.text() : "";
     const source: Source = {

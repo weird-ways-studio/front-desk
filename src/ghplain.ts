@@ -15,6 +15,9 @@ const KINDS: Record<string, string> = {
   pats: "Personal access tokens with access to the organization",
   deploy_keys: "Deploy keys (a machine's key to one repo)",
   rulesets: "Branch protection rules",
+  repo_hooks: "Webhooks on repositories (each sends that repository's pushes to an address)",
+  org_hooks: "Organization webhooks (send events from every repository to an address)",
+  collaborators: "People added directly to single repositories",
 };
 
 // Count words for the done sentence: [one, many].
@@ -29,6 +32,9 @@ const COUNTS: Record<string, [string, string]> = {
   pats: ["personal access token", "personal access tokens"],
   deploy_keys: ["deploy key", "deploy keys"],
   rulesets: ["branch rule", "branch rules"],
+  repo_hooks: ["webhook", "webhooks"],
+  org_hooks: ["organization webhook", "organization webhooks"],
+  collaborators: ["direct collaborator", "direct collaborators"],
 };
 
 /**
@@ -132,8 +138,18 @@ function unshown(raw: string): number {
   return [...all.keys()].filter((k) => !said.test(k)).length;
 }
 
-/** One vault line's item ("Shelflip:private") in words, by kind. */
-function item(kind: string, raw: string): string {
+/** One vault line's item ("Shelflip:private") in words, by kind; `sign` is + (new) or - (gone). */
+function item(kind: string, raw: string, sign = "+"): string {
+  // Reach lines (card N2 5fdbf2ce): "repo:id:host:dest:events:active", "id:host:dest:events:active", "repo:login:role".
+  if (kind === "repo_hooks" || kind === "org_hooks") {
+    const f = raw.split(":");
+    const [repo, , host, , events, active] = kind === "repo_hooks" ? f : ["", ...f];
+    return `${kind === "repo_hooks" ? `webhook on ${name(repo ?? "")}` : "organization webhook"} sending ${(events ?? "").split(",").join(", ")} to ${name(host ?? "")}${active === "false" ? " (switched off)" : ""}`;
+  }
+  if (kind === "collaborators") {
+    const [repo, login, role] = raw.split(":");
+    return sign === "+" ? `${name(login ?? "")} added directly to ${name(repo ?? "")} as ${role}` : `${name(login ?? "")} no longer directly on ${name(repo ?? "")} (was ${role})`;
+  }
   if (kind === "repos") {
     const [repo, vis] = raw.split(":");
     return `${name(repo ?? "")} (${vis})`;
@@ -164,7 +180,7 @@ export function plainChanges(lines: string[]): { heading: string; items: string[
     const g = groups.get(kind) ?? { added: 0, gone: 0, items: [] };
     if (!m) g.items.push(name(line));
     else if (m[2] === "+") (g.added++, g.items.push(`New: ${item(kind, m[3]!)}`));
-    else (g.gone++, g.items.push(`Gone: ${item(kind, m[3]!)}`));
+    else (g.gone++, g.items.push(`Gone: ${item(kind, m[3]!, "-")}`));
     groups.set(kind, g);
   }
   // A changed ruleset arrives as Gone + New with the same repo and id: say, setting by setting, what
@@ -190,6 +206,11 @@ export function plainChanges(lines: string[]): { heading: string; items: string[
     if (kind === "rulesets") continue;
     const said = (i: string) => i.replace(/^(New|Gone): /, "");
     const both = new Set(g.items.filter((i) => i.startsWith("New: ")).map(said).filter((t) => g.items.includes(`Gone: ${t}`)));
+    // A webhook whose words did not change changed its destination (the fingerprint): one line says so.
+    if (kind.endsWith("_hooks")) {
+      g.items = g.items.filter((i) => !(i.startsWith("Gone: ") && both.has(said(i)))).map((i) => (both.has(said(i)) ? `Changed: ${said(i).replace(/ sending .* to /, " to ")}: destination changed (its address, path or delivery settings)` : i));
+      continue;
+    }
     g.items = g.items.map((i) => (both.has(said(i)) ? `${i} (CHANGED in a way these words do not show: read Exact details before approving)` : i));
   }
   // Last line of defence: every item is printable ASCII, whatever path its text came through (rule

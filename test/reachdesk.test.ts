@@ -76,7 +76,7 @@ test("R37: a verify read that ended sends Ben exactly one phone line with its fi
     const store = new MemoryStore();
     const alerts: string[] = [];
     const res = await post(store, fakeVault({ state: acceptance === "expired" ? "failed" : "complete", done: 2, total: 2, code: acceptance === "refused" ? "reach_changed_since_request" : null, acceptance }), "/reach/step", "", AGENT, alerts);
-    assert.equal((await res.json()).acceptance, acceptance);
+    assert.equal(((await res.json()) as { acceptance?: string }).acceptance, acceptance);
     assert.equal(alerts.length, 1, acceptance);
     assert.match(alerts[0], words);
     if (acceptance !== "accepted") assert.doesNotMatch(alerts[0], /is now recorded/);
@@ -98,7 +98,7 @@ test("on-demand headcount: POST /headcount asks the vault for the newest read ('
   assert.deepEqual(await res.json(), { ok: false });
   assert.deepEqual(v.calls, [{ op: "headcount", args: ["any"] }]);
   assert.equal(alerts.length, 1);
-  assert.match(alerts[0], /new webhook on "front-desk" sending push to "example.com"/);
+  assert.match(alerts[0], /New: webhook on "front-desk" sending push to "example.com"/);
   assert.deepEqual([...(await store.list({ prefix: "hcrun:" })).keys()], [], "the nightly run summaries are untouched");
   assert.match(await logOf(store), /headcount_demand_mismatch/);
   const owner = await post(new MemoryStore(), v, "/headcount", "", { caller: "owner" });
@@ -139,7 +139,7 @@ test("words: webhooks and collaborators in plain words; a destination-only chang
     "repo_hooks +studio-os:5:example.com:bbbbbbbbbbbb:push:true",
   ]);
   const said = JSON.stringify(groups);
-  assert.match(said, /New: new webhook on \\"front-desk\\" sending pull_request, push to \\"example.com\\"/);
+  assert.match(said, /New: webhook on \\"front-desk\\" sending pull_request, push to \\"example.com\\"/);
   assert.match(said, /New: organization webhook sending push to \\"example.com\\" \(switched off\)/);
   assert.match(said, /New: \\"someone-b\\" added directly to \\"front-desk\\" as write/);
   assert.match(said, /Gone: \\"someone-c\\" no longer directly on \\"front-desk\\" \(was admin\)/);
