@@ -686,3 +686,28 @@ test("rates: at most 12 on-demand steps an hour; verify steps are exempt but cap
   s.store.kv.put("gh.reach.gen", { ...g, rev: 3 }); // already used its ceil(2/18) + 1 = 2 slices
   assert.deepEqual(await step(s), { state: "refused", done: 0, total: 0, code: "reach_verify_steps" });
 });
+
+// Security review (MEDIUM 2): the host part of an entry never holds ':' -- a port goes into the fingerprint, an IPv6
+// address is stored with ':' as %3A -- so "repo:id:host:dest:events:active" always splits into exactly six fields.
+test("hook entries: a port stays out of the host (it changes dest); an IPv6 host is encoded; the diff is exact", async () => {
+  const r = await withHooks((h) => ({ ...h, config: { ...(h.config as Hook), url: "https://example.com:8443/hook" } }));
+  assert.deepEqual(r.changes.map((c: string) => c.split(":").length), [6, 6]);
+  assert.ok(r.changes.every((c: string) => c.split(":")[2] === "example.com"), JSON.stringify(r.changes));
+  const v6 = setup();
+  v6.gh.org.hooks["repo-0"] = [hook(5, {}, { url: "http://[::1]:8080/x" })];
+  v6.gh.org.orgHooks = [hook(6, {}, { url: "https://[2001:db8::1]/y" })];
+  assert.equal((await nightAll(v6)).state, "complete");
+  const g = v6.store.kv.get<any>("gh.reach.night");
+  const e = g.repos.find((x: any) => x.name === "repo-0").hooks[0];
+  assert.equal(e.split(":").length, 6, e);
+  assert.equal(e.split(":")[2], "[%3A%3A1]");
+  assert.equal(g.org_hooks[0].split(":")[1], "[2001%3Adb8%3A%3A1]");
+});
+
+test("names: a repo or login outside GitHub's own characters (a ':' could shift fields) -> reach_shape", async () => {
+  for (const plant of [(s: S) => (s.gh.org.repos[0] = { name: "a:b", id: 5000, private: false }), (s: S) => (s.gh.org.collabs["repo-0"] = [{ login: "x:y", role_name: "admin" }])]) {
+    const s = setup();
+    plant(s);
+    assert.equal((await nightAll(s)).code, "reach_shape");
+  }
+});

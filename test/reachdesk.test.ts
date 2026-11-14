@@ -173,3 +173,26 @@ test("job gh.reach.baseline: Ben's screen lists the changes in words; the tap's 
   assert.deepEqual(JOBS["gh.reach.baseline"].validate({}), {});
   assert.equal(JOBS["gh.reach.baseline"].validate({ lists: "x" }), null, "the agent cannot choose what is bound");
 });
+
+// Security review (commit review, MEDIUM 1): a webhook removed and a DIFFERENT webhook added on the same repo and host must
+// never read as one "destination changed" line -- the new webhook would be hidden from Ben's screen.
+test("words: a gone hook and a new hook with another id stay Gone and New; only the same repo and id pair as a destination change", () => {
+  const said = JSON.stringify(plainChanges(["repo_hooks -front-desk:1:example.com:aaaaaaaaaaaa:push:true", "repo_hooks +front-desk:2:example.com:bbbbbbbbbbbb:push:true"]));
+  assert.match(said, /New: webhook on \\"front-desk\\" sending push to \\"example.com\\"/);
+  assert.match(said, /Gone: webhook on \\"front-desk\\"/);
+  assert.doesNotMatch(said, /destination changed/);
+  const org = JSON.stringify(plainChanges(["org_hooks -1:example.com:aaaaaaaaaaaa:push:true", "org_hooks +2:example.com:bbbbbbbbbbbb:push:true"]));
+  assert.match(org, /New: organization webhook/);
+  assert.doesNotMatch(org, /destination changed/);
+  // Two new hooks against one gone with the same id cannot happen from one read, but must not pair either.
+  const many = JSON.stringify(plainChanges(["repo_hooks -r:1:example.com:aaaaaaaaaaaa:push:true", "repo_hooks +r:1:example.com:bbbbbbbbbbbb:push:true", "repo_hooks +r:1:example.com:cccccccccccc:push:true"]));
+  assert.equal((many.match(/New: /g) ?? []).length, 2);
+});
+
+// Security review (MEDIUM 2): a host holding ':' (IPv6) is read from both ends, so every field lands where it belongs.
+test("words: an IPv6 host and a port-carrying URL read correctly; collaborators read repo and login from the front", () => {
+  const said = JSON.stringify(plainChanges(["repo_hooks +front-desk:7:[%3A%3A1]:0123456789ab:push:false", "org_hooks +9:[%3A%3A1]:0123456789ab:pull_request:true", "collaborators +front-desk:someone-b:custom:role"]));
+  assert.match(said, /New: webhook on \\"front-desk\\" sending push to \\"\[::1\]\\" \(switched off\)/);
+  assert.match(said, /New: organization webhook sending pull_request to \\"\[::1\]\\"/);
+  assert.match(said, /\\"someone-b\\" added directly to \\"front-desk\\" as custom:role/);
+});
