@@ -141,13 +141,23 @@ function unshown(raw: string): number {
 /** One vault line's item ("Shelflip:private") in words, by kind; `sign` is + (new) or - (gone). */
 function item(kind: string, raw: string, sign = "+"): string {
   // Reach lines (card N2 5fdbf2ce): "repo:id:host:dest:events:active", "id:host:dest:events:active", "repo:login:role".
+  // Read from both ends (commit security review, finding 2): repo and id from the front; active, events and dest from
+  // the back; the host is what is left, with the vault's %3A turned back into ':'.
   if (kind === "repo_hooks" || kind === "org_hooks") {
-    const f = raw.split(":");
-    const [repo, , host, , events, active] = kind === "repo_hooks" ? f : ["", ...f];
-    return `${kind === "repo_hooks" ? `webhook on ${name(repo ?? "")}` : "organization webhook"} sending ${(events ?? "").split(",").join(", ")} to ${name(host ?? "")}${active === "false" ? " (switched off)" : ""}`;
+    const f = kind === "repo_hooks" ? raw.split(":") : ["", ...raw.split(":")];
+    const [active, events] = [f.at(-1), f.at(-2)];
+    let host = f.slice(2, -3).join(":");
+    try {
+      host = decodeURIComponent(host);
+    } catch {
+      // left as the vault wrote it
+    }
+    return `${kind === "repo_hooks" ? `webhook on ${name(f[0] ?? "")}` : "organization webhook"} sending ${(events ?? "").split(",").join(", ")} to ${name(host)}${active === "false" ? " (switched off)" : ""}`;
   }
+  // Repo names and logins never hold ':' (the vault refuses them: reach_shape); the role is everything after.
   if (kind === "collaborators") {
-    const [repo, login, role] = raw.split(":");
+    const [repo, login, ...rest] = raw.split(":");
+    const role = rest.join(":");
     return sign === "+" ? `${name(login ?? "")} added directly to ${name(repo ?? "")} as ${role}` : `${name(login ?? "")} no longer directly on ${name(repo ?? "")} (was ${role})`;
   }
   if (kind === "repos") {
@@ -173,11 +183,13 @@ function item(kind: string, raw: string, sign = "+"): string {
 
 /** The vault's change lines, grouped by kind, each item in words and marked New or Gone. */
 export function plainChanges(lines: string[]): { heading: string; items: string[] }[] {
-  const groups = new Map<string, { added: number; gone: number; items: string[] }>();
+  // `raws`: each item's sign and vault entry, in step with `items`, so webhook pairs are matched on the entry, never on words.
+  const groups = new Map<string, { added: number; gone: number; items: string[]; raws: string[] }>();
   for (const line of lines) {
     const m = /^(\w+) ([+-])(.*)$/.exec(line);
     const kind = m?.[1] ?? "other";
-    const g = groups.get(kind) ?? { added: 0, gone: 0, items: [] };
+    const g = groups.get(kind) ?? { added: 0, gone: 0, items: [], raws: [] };
+    g.raws.push(m ? `${m[2]}${m[3]}` : "?");
     if (!m) g.items.push(name(line));
     else if (m[2] === "+") (g.added++, g.items.push(`New: ${item(kind, m[3]!)}`));
     else (g.gone++, g.items.push(`Gone: ${item(kind, m[3]!, "-")}`));
@@ -206,9 +218,19 @@ export function plainChanges(lines: string[]): { heading: string; items: string[
     if (kind === "rulesets") continue;
     const said = (i: string) => i.replace(/^(New|Gone): /, "");
     const both = new Set(g.items.filter((i) => i.startsWith("New: ")).map(said).filter((t) => g.items.includes(`Gone: ${t}`)));
-    // A webhook whose words did not change changed its destination (the fingerprint): one line says so.
+    // One Gone and one New of the SAME webhook (same repo and id), with the same words: its destination (the
+    // fingerprint) changed, and one line says so. Any other pair -- another id, or more than one of either -- stays
+    // Gone and New, so a new webhook is never hidden behind a removed one (commit security review, finding 1).
     if (kind.endsWith("_hooks")) {
-      g.items = g.items.filter((i) => !(i.startsWith("Gone: ") && both.has(said(i)))).map((i) => (both.has(said(i)) ? `Changed: ${said(i).replace(/ sending .* to /, " to ")}: destination changed (its address, path or delivery settings)` : i));
+      const key = (r: string) => r.slice(1).split(":").slice(0, kind === "repo_hooks" ? 2 : 1).join(":");
+      const at = (sign: string, k: string) => g.raws.flatMap((r, n) => (r[0] === sign && key(r) === k ? [n] : []));
+      const drop = new Set<number>();
+      g.items = g.items.map((i, n) => {
+        const k = key(g.raws[n]!), gone = at("-", k);
+        if (g.raws[n]![0] !== "+" || at("+", k).length !== 1 || gone.length !== 1 || said(g.items[gone[0]!]!) !== said(i)) return i;
+        drop.add(gone[0]!);
+        return `Changed: ${said(i).replace(/ sending .* to /, " to ")}: destination changed (its address, path or delivery settings)`;
+      }).filter((_, n) => !drop.has(n));
       continue;
     }
     g.items = g.items.map((i) => (both.has(said(i)) ? `${i} (CHANGED in a way these words do not show: read Exact details before approving)` : i));

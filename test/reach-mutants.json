@@ -98,7 +98,7 @@
  [
   "reach-host-only",
   "vault/src/github.ts",
-  "${u!.hostname}",
+  "${u!.hostname.replace(/%/g, \"%25\").replace(/:/g, \"%3A\")}",
   "${c!.url}",
   "R10: hook URL path, query and config.secret never reach state, results or errors",
   "test/reach.test.ts"
@@ -114,7 +114,7 @@
  [
   "reach-collab-shape",
   "vault/src/github.ts",
-  "shape(people.every((p) => typeof p.login === \"string\" && typeof p.role_name === \"string\"));",
+  "shape(people.every((p) => typeof p.login === \"string\" && GH_NAME.test(p.login) && typeof p.role_name === \"string\"));",
   "",
   "R23/R42: a hook or collaborator with a missing or unsupported field -> reach_shape, never fingerprinted",
   "test/reach.test.ts"
@@ -534,5 +534,69 @@
   "Object.assign(params, { ",
   "gh.reach.baseline: the request binds the preview's hashes and scope; Ben's screen lists the change; a refused preview says why",
   "test/index.test.ts"
+ ],
+ [
+  "reach-pair-by-id",
+  "src/ghplain.ts",
+  "const key = (r: string) => r.slice(1).split(\":\").slice(0, kind === \"repo_hooks\" ? 2 : 1).join(\":\");",
+  "const key = (r: string) => r.slice(1).split(\":\").slice(0, kind === \"repo_hooks\" ? 1 : 0).join(\":\");",
+  "words: a gone hook and a new hook with another id stay Gone and New; only the same repo and id pair as a destination change",
+  "test/reachdesk.test.ts"
+ ],
+ [
+  "reach-pair-one-to-one",
+  "src/ghplain.ts",
+  "at(\"+\", k).length !== 1 || ",
+  "",
+  "words: a gone hook and a new hook with another id stay Gone and New; only the same repo and id pair as a destination change",
+  "test/reachdesk.test.ts"
+ ],
+ [
+  "reach-parse-ends",
+  "src/ghplain.ts",
+  "let host = f.slice(2, -3).join(\":\");",
+  "let host = f[2] ?? \"\";",
+  "words: an IPv6 host and a port-carrying URL read correctly; collaborators read repo and login from the front",
+  "test/reachdesk.test.ts"
+ ],
+ [
+  "reach-collab-role-rest",
+  "src/ghplain.ts",
+  "const role = rest.join(\":\");",
+  "const role = rest[0];",
+  "words: an IPv6 host and a port-carrying URL read correctly; collaborators read repo and login from the front",
+  "test/reachdesk.test.ts"
+ ],
+ [
+  "reach-host-encode",
+  "vault/src/github.ts",
+  ".replace(/:/g, \"%3A\")",
+  "",
+  "hook entries: a port stays out of the host (it changes dest); an IPv6 host is encoded; the diff is exact",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-host-not-port",
+  "vault/src/github.ts",
+  "${u!.hostname.replace(",
+  "${u!.host.replace(",
+  "hook entries: a port stays out of the host (it changes dest); an IPv6 host is encoded; the diff is exact",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-repo-name-chars",
+  "vault/src/github.ts",
+  "typeof r.name === \"string\" && GH_NAME.test(r.name) && ",
+  "typeof r.name === \"string\" && ",
+  "names: a repo or login outside GitHub's own characters (a ':' could shift fields) -> reach_shape",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-login-chars",
+  "vault/src/github.ts",
+  "GH_NAME.test(p.login) && ",
+  "",
+  "names: a repo or login outside GitHub's own characters (a ':' could shift fields) -> reach_shape",
+  "test/reach.test.ts"
  ]
 ]

@@ -190,9 +190,12 @@ test("words: a gone hook and a new hook with another id stay Gone and New; only 
 });
 
 // Security review (MEDIUM 2): a host holding ':' (IPv6) is read from both ends, so every field lands where it belongs.
+// name() shows brackets as "?" and flags the name, as for every outside name; the fields are what is tested here.
 test("words: an IPv6 host and a port-carrying URL read correctly; collaborators read repo and login from the front", () => {
   const said = JSON.stringify(plainChanges(["repo_hooks +front-desk:7:[%3A%3A1]:0123456789ab:push:false", "org_hooks +9:[%3A%3A1]:0123456789ab:pull_request:true", "collaborators +front-desk:someone-b:custom:role"]));
-  assert.match(said, /New: webhook on \\"front-desk\\" sending push to \\"\[::1\]\\" \(switched off\)/);
-  assert.match(said, /New: organization webhook sending pull_request to \\"\[::1\]\\"/);
+  assert.match(said, /New: webhook on \\"front-desk\\" sending push to \\"\?::1\?\\" \(has unusual characters\) \(switched off\)/);
+  assert.match(said, /New: organization webhook sending pull_request to \\"\?::1\?\\"/);
   assert.match(said, /\\"someone-b\\" added directly to \\"front-desk\\" as custom:role/);
+  // An entry whose host was not encoded still reads from both ends: events and the off switch stay in place.
+  assert.match(JSON.stringify(plainChanges(["repo_hooks +r:7:[::1]:0123456789ab:push:false"])), /sending push to \\"\?::1\?\\" \(has unusual characters\) \(switched off\)/);
 });

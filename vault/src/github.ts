@@ -246,6 +246,8 @@ export interface ReachLists {
   collaborators: string[]; // "repo:login:role_name" as GitHub reports for affiliation=direct
 }
 
+// GitHub's own characters for repo names and logins: never ':', so "repo:login:role" and "repo:id:..." split exactly.
+const GH_NAME = /^[A-Za-z0-9._-]+$/;
 const shape = (ok: unknown): void => {
   if (!ok) throw new VaultError("reach_shape");
 };
@@ -265,7 +267,7 @@ export async function reachPage(gh: GitHub, path: string): Promise<Record<string
 /** The org's repos as the reach read keeps them: name, id, private. */
 export async function reachRepos(gh: GitHub): Promise<{ name: string; id: number; private: boolean }[]> {
   const repos = await reachPage(gh, `/orgs/${ORG}/repos?type=all`);
-  shape(repos.every((r) => typeof r.name === "string" && Number.isSafeInteger(r.id) && (r.id as number) > 0 && typeof r.private === "boolean"));
+  shape(repos.every((r) => typeof r.name === "string" && GH_NAME.test(r.name) && Number.isSafeInteger(r.id) && (r.id as number) > 0 && typeof r.private === "boolean"));
   return repos as unknown as { name: string; id: number; private: boolean }[];
 }
 
@@ -285,7 +287,9 @@ export async function hookEntry(h: Record<string, unknown>, key: CryptoKey): Pro
   const what = canonical({ url: c!.url, content_type: c!.content_type, insecure_ssl: String(c!.insecure_ssl), scheme: u!.protocol.slice(0, -1) });
   const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(what)));
   const dest = [...mac.slice(0, 6)].map((b) => b.toString(16).padStart(2, "0")).join("");
-  return `${h.id}:${u!.hostname}:${dest}:${[...(h.events as string[])].sort().join(",")}:${h.active}`;
+  // hostname, never host: a port goes into dest, not the entry. ':' (an IPv6 address) is stored as %3A, so the entry
+  // always splits into exactly its fields (commit security review, finding 2).
+  return `${h.id}:${u!.hostname.replace(/%/g, "%25").replace(/:/g, "%3A")}:${dest}:${[...(h.events as string[])].sort().join(",")}:${h.active}`;
 }
 
 /** One repo's hooks and direct collaborators; a private repo with nobody listed fails (a checked expectation). */
@@ -293,7 +297,7 @@ export async function reachRepo(gh: GitHub, r: { name: string; private: boolean 
   const hooks: string[] = [];
   for (const h of await reachPage(gh, `/repos/${ORG}/${r.name}/hooks`)) hooks.push(`${r.name}:${await hookEntry(h, key)}`);
   const people = await reachPage(gh, `/repos/${ORG}/${r.name}/collaborators?affiliation=direct`);
-  shape(people.every((p) => typeof p.login === "string" && typeof p.role_name === "string"));
+  shape(people.every((p) => typeof p.login === "string" && GH_NAME.test(p.login) && typeof p.role_name === "string"));
   if (r.private && !people.length) throw new VaultError("reach_collabs_empty");
   return { hooks: hooks.sort(), collabs: people.map((p) => `${r.name}:${p.login}:${p.role_name}`).sort() };
 }
