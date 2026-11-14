@@ -644,7 +644,9 @@ test("verify cap: five simultaneous steps held at a fetch barrier -> at most cei
 });
 
 // ---- Codex build r1 #2: the final state of an approval is kept in the vault until the desk delivers it ----
-function withDesk(s: S, o: { loseStep?: number; loseAck?: number; failAck?: number } = {}) {
+// failLog: the next N log writes fail. push: "rejected" (Pushover answers non-2xx: nothing shown), "lost" (Pushover took
+// it -- the line reaches the phone -- but the answer is lost), N times. noSender: a desk with no phone set up.
+function withDesk(s: S, o: { loseStep?: number; loseAck?: number; failAck?: number; failLog?: number; push?: "rejected" | "lost"; pushFails?: number; noSender?: boolean } = {}) {
   const alerts: string[] = [];
   const v = s.vault;
   const vault = {
@@ -664,9 +666,21 @@ function withDesk(s: S, o: { loseStep?: number; loseAck?: number; failAck?: numb
     headcount: (x?: "any") => v.headcount(x),
   };
   const deskStore = new MemoryStore();
-  const desk = new Desk(deskStore, { origin: "", rpID: "" }, { vault: vault as never, alert: async (t, x) => void alerts.push(`${t}|${x}`) });
+  const put = deskStore.put.bind(deskStore);
+  deskStore.put = async (k, v) => {
+    if (k.startsWith("log:") && o.failLog && o.failLog-- > 0) throw new Error("storage write failed");
+    return put(k, v);
+  };
+  const alert = async (t: string, x: string) => {
+    if (o.push && o.pushFails && o.pushFails-- > 0) {
+      if (o.push === "lost") alerts.push(`${t}|${x}`);
+      throw new Error(o.push === "lost" ? "pushover unreachable" : "pushover answered 500");
+    }
+    alerts.push(`${t}|${x}`);
+  };
+  const desk = new Desk(deskStore, { origin: "", rpID: "" }, { vault: vault as never, ...(o.noSender ? {} : { alert }) });
   const log = async () => JSON.stringify([...(await deskStore.list({ prefix: "log:" })).values()]);
-  return { desk, alerts, log };
+  return { desk, alerts, log, deskStore };
 }
 
 test("delivery: the reply of the completing step is lost; the next step still delivers 'recorded' once", async () => {
@@ -785,4 +799,64 @@ test("names: a repo or login outside GitHub's own characters (a ':' could shift 
     plant(s);
     assert.equal((await nightAll(s)).code, "reach_shape");
   }
+});
+
+// ---- Codex build r2: the desk acknowledges a kept result only after it is logged AND pushed ----
+const kept = async (s: S) => (await s.vault.ghReachResults()).length;
+async function oneResult() {
+  const s = await readDay();
+  assert.equal((await tap(s)).ok, true);
+  await s.vault.ghReachStep(); // completes the re-read: one result kept
+  assert.equal(await kept(s), 1);
+  return s;
+}
+
+test("delivery r2: a failed log write acknowledges nothing; the next delivery logs, pushes and acknowledges", async () => {
+  const s = await oneResult();
+  const d = withDesk(s, { failLog: 1 });
+  await d.desk.deliverReach(s.clock.now);
+  assert.deepEqual([d.alerts.length, await kept(s)], [0, 1]);
+  await d.desk.deliverReach(s.clock.now);
+  assert.deepEqual([d.alerts.length, await kept(s)], [1, 0]);
+  assert.equal((await d.log()).match(/reach_acceptance_accepted/g)?.length, 1);
+});
+
+test("delivery r2: Pushover refuses -> not acknowledged, retried; logged once, pushed once", async () => {
+  const s = await oneResult();
+  const d = withDesk(s, { push: "rejected", pushFails: 2 });
+  await d.desk.deliverReach(s.clock.now);
+  await d.desk.deliverReach(s.clock.now);
+  assert.deepEqual([d.alerts.length, await kept(s)], [0, 1], "still kept after two refusals");
+  await d.desk.deliverReach(s.clock.now);
+  assert.deepEqual([d.alerts.length, await kept(s)], [1, 0]);
+  assert.equal((await d.log()).match(/reach_acceptance_accepted/g)?.length, 1, "logged once");
+  assert.equal((await d.log()).match(/alert_failed/g)?.length, 2);
+});
+
+test("delivery r2: a lost Pushover answer is retried -- Ben may get the line twice, never zero (uncertainty policy)", async () => {
+  const s = await oneResult();
+  const d = withDesk(s, { push: "lost", pushFails: 1 });
+  await d.desk.deliverReach(s.clock.now);
+  assert.equal(await kept(s), 1, "unknown whether it arrived: not acknowledged");
+  await d.desk.deliverReach(s.clock.now);
+  assert.deepEqual([d.alerts.length, await kept(s)], [2, 0], "a possible duplicate line, never a silent drop");
+});
+
+test("delivery r2: interrupted after the log line, before the push -> the next delivery pushes without a second log line", async () => {
+  const s = await oneResult();
+  const d = withDesk(s);
+  const [r] = await s.vault.ghReachResults();
+  await d.deskStore.put(`reachsent:${r!.id}`, { logged: s.clock.now });
+  await d.desk.deliverReach(s.clock.now);
+  assert.deepEqual([d.alerts.length, await kept(s)], [1, 0]);
+  assert.equal((await d.log()).match(/reach_acceptance/g), null, "no second log line");
+});
+
+test("delivery r2: a desk with no phone sender never acknowledges; a desk with one then delivers", async () => {
+  const s = await oneResult();
+  await withDesk(s, { noSender: true }).desk.deliverReach(s.clock.now);
+  assert.equal(await kept(s), 1);
+  const d = withDesk(s);
+  await d.desk.deliverReach(s.clock.now);
+  assert.deepEqual([d.alerts.length, await kept(s)], [1, 0]);
 });
