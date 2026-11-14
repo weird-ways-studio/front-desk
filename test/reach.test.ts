@@ -500,3 +500,10 @@ test("a repo named like an object property (constructor, __proto__, toString) is
   accept(s);
   assert.equal(s.store.kv.get<any>("gh.reach.baseline").repo_hooks.length, 3);
 });
+
+test("a generation is read by one App installation only: a slice after the installation changed fails reach_scope_changed", async () => {
+  const s = setup(20);
+  await night(s);
+  s.store.kv.put("gh.app.headcount", { ...s.store.kv.get<any>("gh.app.headcount"), installation: 1011 });
+  assert.equal((await night(s)).code, "reach_scope_changed");
+});

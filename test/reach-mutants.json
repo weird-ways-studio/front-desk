@@ -1,0 +1,330 @@
+[
+ [
+  "reach-allow-hooks",
+  "vault/src/github.ts",
+  " repository_hooks: \"read\", organization_hooks: \"read\" },",
+  " },",
+  "allowed list: the headcount App may read webhooks, never write them (R11)",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-narrow-key",
+  "vault/src/vault.ts",
+  "}, REACH_PERMS);",
+  "});",
+  "a nightly read: two slices of at most 18 repos, one narrowed key each, deleted, no redirects followed; the night folds in green",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-redirect-manual",
+  "vault/src/github.ts",
+  "undefined, \"manual\")",
+  "undefined)",
+  "a nightly read: two slices of at most 18 repos, one narrowed key each, deleted, no redirects followed; the night folds in green",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-redirect-3xx",
+  "vault/src/github.ts",
+  "if (res.status >= 300 && res.status < 400) throw new VaultError(\"reach_redirect\");",
+  "",
+  "R4/R5: a refusal, outage, redirect or full page on any of the three lists fails the generation; the night is red, never 'none'",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-full-page",
+  "vault/src/github.ts",
+  "if (items.length >= 100) throw new VaultError(\"reach_too_many\");",
+  "",
+  "R4/R5: a refusal, outage, redirect or full page on any of the three lists fails the generation; the night is red, never 'none'",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-not-array",
+  "vault/src/github.ts",
+  "shape(Array.isArray(items));",
+  "",
+  "R23/R42: a hook or collaborator with a missing or unsupported field -> reach_shape, never fingerprinted",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-content-type",
+  "vault/src/github.ts",
+  "shape(c!.content_type === \"json\" || c!.content_type === \"form\");",
+  "",
+  "R23/R42: a hook or collaborator with a missing or unsupported field -> reach_shape, never fingerprinted",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-insecure-ssl",
+  "vault/src/github.ts",
+  "shape([\"0\", \"1\", 0, 1].includes(c!.insecure_ssl as string));",
+  "",
+  "R23/R42: a hook or collaborator with a missing or unsupported field -> reach_shape, never fingerprinted",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-ssl-normalize",
+  "vault/src/github.ts",
+  "insecure_ssl: String(c!.insecure_ssl)",
+  "insecure_ssl: c!.insecure_ssl",
+  "R43: insecure_ssl 0 and \"0\" fingerprint the same; the secret field does not enter the fingerprint",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-dest-url",
+  "vault/src/github.ts",
+  "url: c!.url, content_type",
+  "content_type",
+  "R2/R3/R3b: a removed hook, changed events, host, active, role, or a same-host path change -> red",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-url-scheme",
+  "vault/src/github.ts",
+  "shape(u!.protocol === \"https:\" || u!.protocol === \"http:\");",
+  "",
+  "R23/R42: a hook or collaborator with a missing or unsupported field -> reach_shape, never fingerprinted",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-hook-active",
+  "vault/src/github.ts",
+  "typeof h.active === \"boolean\"",
+  "true",
+  "R23/R42: a hook or collaborator with a missing or unsupported field -> reach_shape, never fingerprinted",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-host-only",
+  "vault/src/github.ts",
+  "${u!.hostname}",
+  "${c!.url}",
+  "R10: hook URL path, query and config.secret never reach state, results or errors",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-repo-id",
+  "vault/src/github.ts",
+  "Number.isSafeInteger(r.id) && (r.id as number) > 0 && typeof r.private",
+  "typeof r.private",
+  "R23/R42: a hook or collaborator with a missing or unsupported field -> reach_shape, never fingerprinted",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-collab-shape",
+  "vault/src/github.ts",
+  "shape(people.every((p) => typeof p.login === \"string\" && typeof p.role_name === \"string\"));",
+  "",
+  "R23/R42: a hook or collaborator with a missing or unsupported field -> reach_shape, never fingerprinted",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-collabs-empty",
+  "vault/src/github.ts",
+  "if (r.private && !people.length) throw new VaultError(\"reach_collabs_empty\");",
+  "",
+  "R24: a private repo with an empty collaborators list -> reach_collabs_empty; an empty public repo list is fine",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-inventory-changed",
+  "vault/src/vault.ts",
+  "if (work.inventory && canonical(inv) !== canonical(work.inventory)) throw new VaultError(\"reach_inventory_changed\");",
+  "",
+  "R17: a repo replaced under the same name between slices -> reach_inventory_changed; the next slice starts again",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-over-budget",
+  "vault/src/vault.ts",
+  "if (inv.length > REACH_MAX_REPOS) throw",
+  "if (inv.length > 99) throw",
+  "R9/R8: every slice stays within 43 GitHub calls; 36 repos complete in two slices; 37 -> reach_over_budget",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-per-run",
+  "vault/src/vault.ts",
+  ".slice(0, REACH_REPOS_PER_RUN)",
+  "",
+  "R9/R8: every slice stays within 43 GitHub calls; 36 repos complete in two slices; 37 -> reach_over_budget",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-scope-changed",
+  "vault/src/vault.ts",
+  "if (hc.id !== work.app_id || hc.installation !== work.installation_id) throw new VaultError(\"reach_scope_changed\");",
+  "",
+  "a generation is read by one App installation only: a slice after the installation changed fails reach_scope_changed",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-cas",
+  "vault/src/vault.ts",
+  "if (cur?.id !== before?.id || cur?.rev !== before?.rev) throw new VaultError(\"reach_superseded\");",
+  "",
+  "R15 (6.2): an on-demand read and the nightly start at once -> one wins, the other reach_superseded",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-superseded-recorded",
+  "vault/src/vault.ts",
+  "if (cur && isOpen(cur)) fail(cur.seq, \"reach_superseded\");",
+  "",
+  "R29: no on-demand start inside 03:40-04:20 UTC; R30: a demand read open at 03:47 is replaced by the night and recorded",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-fail-recorded",
+  "vault/src/vault.ts",
+  "if (work.failed) fail(work.seq, work.failed);",
+  "if (work.failed) void 0;",
+  "R4: a failure after an earlier complete night -> red (newer failure), even though the older read was complete (R16)",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-complete-all-repos",
+  "vault/src/vault.ts",
+  " && work.inventory.every((x) => work.repos.some((d) => d.name === x.slice(0, x.lastIndexOf(\":\"))))",
+  "",
+  "R6: an incomplete night (only its first slice ran) -> red",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-night-only",
+  "vault/src/vault.ts",
+  "if (work.purpose === \"night\") kv.put(\"gh.reach.night\", work);",
+  "kv.put(\"gh.reach.night\", work);",
+  "R32/R41: a demand read completed after the night keeps the scheduled count on the night; on demand selects the newest",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-fpkey-rekey",
+  "vault/src/vault.ts",
+  "if (hasHooks(this.store.kv.get<ReachLists>(\"gh.reach.baseline\"))) throw new VaultError(\"reach_fp_key_lost\");",
+  "",
+  "R38: fingerprint key lost while the accepted list holds hooks -> red reach_fp_key_lost; the read never re-keys",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-fold-fpkey",
+  "vault/src/vault.ts",
+  "if (hasHooks(base) && !kv.get(\"gh.reach.fp_key\")) return \"reach_fp_key_lost\";",
+  "",
+  "R38: fingerprint key lost while the accepted list holds hooks -> red reach_fp_key_lost; the read never re-keys",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-fold-stale",
+  "vault/src/vault.ts",
+  "this.now() - sel.started_at > REACH_FRESH_MS ? \"stale\"",
+  "false ? \"stale\"",
+  "R6/R27: no night, a night older than 60 minutes from its start, or yesterday's -> red",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-fold-newer-open",
+  "vault/src/vault.ts",
+  "cur && cur.seq > sel.seq && isOpen(cur) ? \"newer_open\"",
+  "false ? \"newer_open\"",
+  "R25/R26: failure -> replacement -> open, and a newer open read over an older complete one -> red",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-fold-newer-failed",
+  "vault/src/vault.ts",
+  "(kv.get<{ seq: number }>(\"gh.reach.fail\")?.seq ?? 0) > sel.seq ? \"newer_failed\"",
+  "false ? \"newer_failed\"",
+  "R4: a failure after an earlier complete night -> red (newer failure), even though the older read was complete (R16)",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-fold-inventory",
+  "vault/src/vault.ts",
+  "canonical(sel.inventory) !== canonical([...repoIds].sort()) ? \"inventory\"",
+  "false ? \"inventory\"",
+  "R18: the read's repo list differs from the main count's -> red; another App or installation -> red",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-fold-scope",
+  "vault/src/vault.ts",
+  "sel.app_id !== hc.id || sel.installation_id !== hc.installation ? \"scope\"",
+  "false ? \"scope\"",
+  "R18: the read's repo list differs from the main count's -> red; another App or installation -> red",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-fold-no-baseline",
+  "vault/src/vault.ts",
+  "if (!base) return \"reach_no_baseline\";",
+  "if (!base) return [];",
+  "no accepted reach list yet -> red reach_no_baseline (fail closed)",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-fold-red",
+  "vault/src/vault.ts",
+  "r.ok = r.changes.length === 0 && !r.error;",
+  "r.ok = r.changes.length === 0;",
+  "R4/R5: a refusal, outage, redirect or full page on any of the three lists fails the generation; the night is red, never 'none'",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-demand-window",
+  "vault/src/vault.ts",
+  "if (m >= REACH_WINDOW[0] && m < REACH_WINDOW[1]) return refused(\"reach_window\");",
+  "",
+  "R29: no on-demand start inside 03:40-04:20 UTC; R30: a demand read open at 03:47 is replaced by the night and recorded",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-verify-kept",
+  "vault/src/vault.ts",
+  "if (g && isOpen(g)) return this.reachSlice(g, g);",
+  "if (g && isOpen(g) && !g.purpose.startsWith(\"verify:\")) return this.reachSlice(g, g);",
+  "an open verify read is never replaced by a demand read: demand steps continue it",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-verify-reserve",
+  "vault/src/vault.ts",
+  "if (cur && isOpen(cur) && cur.purpose.startsWith(\"verify:\")) throw new VaultError(\"reach_verify_open\");",
+  "",
+  "an open verify read is never replaced by a demand read: demand steps continue it",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-night-idempotent",
+  "vault/src/vault.ts",
+  "if (tonight && g.complete_at !== null) return progress(g);",
+  "",
+  "R31: the 03:47 and 03:52 invocations continue one night; a third call after completion reads nothing",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-night-restart",
+  "vault/src/vault.ts",
+  "tonight && !g.failed ? g :",
+  "tonight ? g :",
+  "R17: a repo replaced under the same name between slices -> reach_inventory_changed; the next slice starts again",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-bad-purpose",
+  "vault/src/vault.ts",
+  "if (purpose !== undefined && purpose !== \"demand\") return refused(\"reach_bad_purpose\");",
+  "",
+  "step: nothing open and no purpose -> idle; an unknown purpose is refused",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-fold-select",
+  "vault/src/vault.ts",
+  "select === \"any\" ? \"gh.reach.complete\" : \"gh.reach.night\"",
+  "\"gh.reach.complete\"",
+  "R32/R41: a demand read completed after the night keeps the scheduled count on the night; on demand selects the newest",
+  "test/reach.test.ts"
+ ]
+]
