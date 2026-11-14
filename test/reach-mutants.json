@@ -482,8 +482,8 @@
  [
   "reach-accept-push",
   "src/desk.ts",
-  "await this.hooks.alert?.(state ? \"Front desk: webhook list\" : \"Front desk: needs you\", words)",
-  "await Promise.resolve(words)",
+  "const failed = await alert(state ? \"Front desk: webhook list\" : \"Front desk: needs you\", words).then(",
+  "const failed = await Promise.resolve(words).then(",
   "R37: each final state the vault keeps is pushed as exactly one phone line, logged, then acknowledged; 'recorded' only when accepted",
   "test/reachdesk.test.ts"
  ],
@@ -650,7 +650,7 @@
  [
   "reach-deliver-mark",
   "src/desk.ts",
-  "if (!(await this.store.get(`reachsent:${id}`))) {",
+  "if (!done.pushed) {",
   "if (true) {",
   "delivery is at least once and pushed once: a lost acknowledgement is retried without a second push (6.2)",
   "test/reach.test.ts"
@@ -726,5 +726,53 @@
   "demand ?",
   "agent.mjs reach: steps until complete, failed, refused or idle; 'demand' only on the first call; a verify read after a tap",
   "test/reachdesk.test.ts"
+ ],
+ [
+  "reach-ack-after-push",
+  "src/desk.ts",
+  "              continue;\n",
+  "",
+  "delivery r2: Pushover refuses -> not acknowledged, retried; logged once, pushed once",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-ack-after-push-lost",
+  "src/desk.ts",
+  "              continue;\n",
+  "",
+  "delivery r2: a lost Pushover answer is retried -- Ben may get the line twice, never zero (uncertainty policy)",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-log-before-ack",
+  "src/desk.ts",
+  "            await this.log({ event: state ? `reach_acceptance_${state}` : \"probe_key_unrevoked\", detail: words }, now);\n",
+  "            await this.log({ event: state ? `reach_acceptance_${state}` : \"probe_key_unrevoked\", detail: words }, now).catch(() => undefined);\n",
+  "delivery r2: a failed log write acknowledges nothing; the next delivery logs, pushes and acknowledges",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-logged-kept",
+  "src/desk.ts",
+  "if (!done.logged) {",
+  "if (true) {",
+  "delivery r2: interrupted after the log line, before the push -> the next delivery pushes without a second log line",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-no-sender",
+  "src/desk.ts",
+  "    const alert = this.hooks.alert;\n",
+  "    const alert = this.hooks.alert ?? (async () => undefined);\n",
+  "delivery r2: a desk with no phone sender never acknowledges; a desk with one then delivers",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-entry-headcount-phone",
+  "src/index.ts",
+  "{ vault: this.env.VAULT, alert: phoneAlert(phone) }).headcount(",
+  "{ vault: this.env.VAULT }).headcount(",
+  "production entry: the scheduled headcount pushes a kept result through Pushover, then acknowledges it once",
+  "test/reachentry.workerd.test.ts"
  ]
 ]
