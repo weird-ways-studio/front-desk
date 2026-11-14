@@ -11,6 +11,9 @@
 //                                                  the scheduled count's last runs, then one verdict line (PASS /
 //                                                  FAIL / UNPROVEN, rules in src/headcountrun.ts judge()); exit 0
 //                                                  only on PASS, 1 on FAIL, 2 on UNPROVEN or a usage error
+//   node scripts/agent.mjs reach <desk-url> [demand]  steps the vault's webhook read (POST /reach/step) until it is
+//                                                  complete, failed, refused or idle; "demand" starts an on-demand read.
+//                                                  `wait` runs it by itself after a gh.reach.baseline tap (card N2 5fdbf2ce)
 //
 // The private key file (default ~/.config/front-desk/cbox-key.pem, mode 0600) stays on the c-box and is
 // never put in 1Password or a repo. The Access login comes from CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET
@@ -79,6 +82,8 @@ async function main([cmd, url, body = "", ...more]) {
       if (!waiting || Date.now() > until) {
         console.log(res.status, waiting ? `still waiting after ${body || 15} min` : text);
         if (!res.ok) process.exit(1);
+        // An approved webhook list is recorded only after the vault reads GitHub again: drive that read now.
+        if (reachAfterCollect(text)) await driveReach(reachStep(new URL(url).origin), false);
         return;
       }
       await new Promise((r) => setTimeout(r, 5_000));
@@ -103,6 +108,10 @@ async function main([cmd, url, body = "", ...more]) {
     console.log(j.line);
     process.exit(j.verdict === "PASS" ? 0 : j.verdict === "FAIL" ? 1 : 2);
   }
+  if (cmd === "reach" && url) {
+    const last = await driveReach(reachStep(url), body === "demand");
+    process.exit(last?.state === "complete" ? 0 : 1);
+  }
   if (cmd === "get" && url) {
     const res = await get(url);
     console.log(res.status, await res.text());
@@ -114,7 +123,37 @@ async function main([cmd, url, body = "", ...more]) {
     console.log(res.status, await res.text());
     return;
   }
-  throw new Error("usage: agent.mjs keygen | agent.mjs post <url> [json] | agent.mjs wait <collect-url> [minutes] | agent.mjs menu <desk-url> | agent.mjs get <card-url> | agent.mjs headcount <desk-url> [--after <iso>] [--repo <name>]");
+  throw new Error("usage: agent.mjs keygen | agent.mjs post <url> [json] | agent.mjs wait <collect-url> [minutes] | agent.mjs menu <desk-url> | agent.mjs get <card-url> | agent.mjs headcount <desk-url> [--after <iso>] [--repo <name>] | agent.mjs reach <desk-url> [demand]");
+}
+
+/** POST /reach/step with the Access login; the answer as JSON (bounded progress, or {error}). */
+const reachStep = (desk) => async (body) => {
+  const res = await fetch(new URL("/reach/step", desk), { method: "POST", headers: access(), body });
+  return res.json();
+};
+
+/**
+ * Steps a reach read until it is complete, failed, refused or idle: "demand" only on the first call, at most
+ * ceil(36 / 18) + 2 calls (a read never needs more than two slices; the vault caps verify steps too).
+ */
+export async function driveReach(step, demand, print = (x) => console.log(JSON.stringify(x))) {
+  let last;
+  for (let i = 0; i < 4; i++) {
+    last = await step(i === 0 && demand ? '{"purpose":"demand"}' : "");
+    print(last);
+    if (!last || last.state !== "open") break;
+  }
+  return last;
+}
+
+/** True when a collect's answer is a gh.reach.baseline approval waiting for its re-read (state pending). */
+export function reachAfterCollect(text) {
+  try {
+    const r = JSON.parse(text)?.result;
+    return r?.state === "pending" && typeof r.expires_at === "number";
+  } catch {
+    return false;
+  }
 }
 
 /** `--after <iso>` and `--repo <name>`; anything else, or an unreadable time, is a usage error (exit 2). */
