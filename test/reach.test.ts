@@ -265,13 +265,25 @@ test("R23/R42: a hook or collaborator with a missing or unsupported field -> rea
   }
 });
 
-test("R24: a private repo with an empty collaborators list -> reach_collabs_empty; an empty public repo list is fine", async () => {
+// L1 live (2026-11-14): a private repo made in the org lists no direct collaborators (owners reach it through the
+// org), so one empty private repo is a fact to show Ben, not a failed read. A read where EVERY private repo is empty
+// is the false-empty threat (T9) and fails, at the end of the generation, across slices.
+test("R24: every private repo empty -> reach_collabs_empty; one empty private repo, or an empty public one, is fine", async () => {
   const s = setup();
   s.gh.org.collabs["repo-0"] = []; // public
   assert.equal((await nightAll(s)).state, "complete");
+  const one = setup(4);
+  one.gh.org.collabs["repo-1"] = []; // private; repo-3 (private) still lists owner-a
+  assert.equal((await nightAll(one)).state, "complete");
+  assert.ok(!one.store.kv.get<any>("gh.reach.complete").repos.find((r: any) => r.name === "repo-1").collabs.length);
   const p = setup();
-  p.gh.org.collabs["repo-1"] = []; // private
+  p.gh.org.collabs["repo-1"] = []; // the only private repo
   assert.deepEqual(await nightAll(p), { state: "failed", done: 0, total: 2, code: "reach_collabs_empty" });
+  const many = setup(20); // two slices; the private repos empty in both
+  for (let i = 1; i < 20; i += 2) many.gh.org.collabs[`repo-${i}`] = [];
+  assert.deepEqual(await night(many), { state: "open", done: 18, total: 20, code: null }, "the first slice cannot judge yet");
+  assert.deepEqual(await night(many), { state: "failed", done: 18, total: 20, code: "reach_collabs_empty" });
+  assert.equal(many.store.kv.get("gh.reach.complete"), undefined, "nothing complete is saved");
 });
 
 test("R17: a repo replaced under the same name between slices -> reach_inventory_changed; the next slice starts again", async () => {
