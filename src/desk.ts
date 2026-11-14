@@ -807,12 +807,17 @@ export class Desk {
 
   /**
    * Delivers what the vault keeps for Ben (vault ghReachResults: an approval's final state, a write key not proven
-   * revoked): logs it, pushes one line, then acknowledges it. At least once from the vault's side; the desk's mark
-   * `reachsent:<id>` (and an in-flight set, for two deliveries at once) keeps it to one push. Never throws.
+   * revoked). Progress is kept per result in `reachsent:<id>` ({logged, pushed}), each step written after it succeeded,
+   * and the vault is acknowledged ONLY once both are done, so a failed log write, a refused push or an interruption is
+   * retried at the next call (Codex build r2). No phone sender: nothing is acknowledged; the vault keeps it.
+   * Uncertainty policy: a push whose answer is lost (Pushover may have taken it) counts as not pushed and is sent again:
+   * Ben may get the same line twice, never zero. An in-flight set stops two deliveries at once from both pushing.
+   * Never throws.
    */
   async deliverReach(now: number): Promise<void> {
     const vault = this.hooks.vault;
-    if (!vault?.ghReachResults || !vault.ghReachAck) return;
+    const alert = this.hooks.alert;
+    if (!vault?.ghReachResults || !vault.ghReachAck || !alert) return;
     const busy = inFlight.get(this.store) ?? new Set<string>();
     inFlight.set(this.store, busy);
     try {
@@ -822,12 +827,21 @@ export class Desk {
         if (busy.has(id)) continue;
         busy.add(id);
         try {
-          if (!(await this.store.get(`reachsent:${id}`))) {
-            await this.store.put(`reachsent:${id}`, now);
-            const state = r.kind === "acceptance" ? (["accepted", "refused", "expired", "superseded"] as const).find((x) => x === r.state) : undefined;
-            const words = state ? reachAcceptWords(state, r.kind === "acceptance" && typeof r.reason === "string" ? r.reason.slice(0, 60) : null) : probeWords(r.kind === "probe" ? String(r.perm).slice(0, 60) : "?");
+          const state = r.kind === "acceptance" ? (["accepted", "refused", "expired", "superseded"] as const).find((x) => x === r.state) : undefined;
+          const words = state ? reachAcceptWords(state, r.kind === "acceptance" && typeof r.reason === "string" ? r.reason.slice(0, 60) : null) : probeWords(r.kind === "probe" ? String(r.perm).slice(0, 60) : "?");
+          const key = `reachsent:${id}`;
+          let done = (await this.store.get<{ logged?: number; pushed?: number }>(key)) ?? {};
+          if (!done.logged) {
             await this.log({ event: state ? `reach_acceptance_${state}` : "probe_key_unrevoked", detail: words }, now);
-            await this.hooks.alert?.(state ? "Front desk: webhook list" : "Front desk: needs you", words).catch(() => this.log({ event: "alert_failed", detail: "reach result did not reach Ben's phone" }, now));
+            await this.store.put(key, (done = { ...done, logged: now }));
+          }
+          if (!done.pushed) {
+            const failed = await alert(state ? "Front desk: webhook list" : "Front desk: needs you", words).then(() => null, (e: Error) => String(e?.message ?? e).slice(0, 40));
+            if (failed !== null) {
+              await this.log({ event: "alert_failed", detail: `reach result not yet on Ben's phone, tried again at the next call (${failed})` }, now).catch(() => undefined);
+              continue;
+            }
+            await this.store.put(key, (done = { ...done, pushed: now }));
           }
           await vault.ghReachAck(id);
         } finally {
