@@ -6,8 +6,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
-import { MemoryStore } from "../src/desk.ts";
-import { VaultLogic, type GhReachAcceptResult } from "../vault/src/vault.ts";
+import { Desk, MemoryStore } from "../src/desk.ts";
+import { VaultLogic, type GhReachAcceptResult, type ReachProgress } from "../vault/src/vault.ts";
 import { signedRun, testVault } from "./vaultsign.ts";
 import { b64url } from "../vault/src/seal.ts";
 import { ORG, PERMISSIONS, REACH_PERMS, checkPermissions, pkcs8FromPem, type GhSnapshot } from "../vault/src/github.ts";
@@ -36,7 +36,8 @@ function fakeGitHub(n = 2) {
   const calls: { method: string; path: string; redirect?: string }[] = [];
   const minted: unknown[] = [];
   // A probe permission GitHub wrongly grants (R22); every other write ask is refused as GitHub does.
-  const faults = { grantWrite: "" };
+  // deleteFail: how GitHub answers the delete of a wrongly granted key ("403", "500", "throw" or "" = 204 and revoked).
+  const faults = { grantWrite: "", deleteFail: "" };
   const deleted: string[] = [];
   const tokens = new Set<string>();
   // A test may answer any one path itself (a refusal, a redirect, a slow answer).
@@ -66,10 +67,14 @@ function fakeGitHub(n = 2) {
       }
     }
     if (tokens.has(auth)) {
+      if (deleted.includes(auth)) return json({ message: "Bad credentials" }, 401);
       if (method === "DELETE" && path === "/installation/token") {
+        if (faults.deleteFail === "throw") throw new TypeError("network connection lost");
+        if (faults.deleteFail) return json({ message: "no" }, Number(faults.deleteFail));
         deleted.push(auth);
         return new Response(null, { status: 204 });
       }
+      if (path.startsWith("/installation/repositories")) return json({ total_count: 1, repositories: [] });
       if (url.pathname === `/orgs/${ORG}/repos`) return json(org.repos);
       if (url.pathname === `/orgs/${ORG}/hooks`) return json(org.orgHooks);
       const m = url.pathname.match(new RegExp(`^/repos/${ORG}/([\\w-]+)/(hooks|collaborators)$`));
@@ -96,9 +101,14 @@ function setup(n = 2, at = NIGHT) {
 }
 type S = ReturnType<typeof setup>;
 const dump = (store: MemoryStore) => JSON.stringify([...(store as unknown as { data: Map<string, unknown> }).data]);
-const night = (s: S) => s.vault.ghReachNight();
-const demand = (s: S) => s.vault.ghReachStep("demand");
-const step = (s: S) => s.vault.ghReachStep();
+// Progress without its per-call GitHub count (asserted in the budget tests), so rows compare whole answers.
+const bare = async (p: Promise<ReachProgress>) => {
+  const { calls: _c, ...rest } = await p;
+  return rest as ReachProgress;
+};
+const night = (s: S) => bare(s.vault.ghReachNight());
+const demand = (s: S) => bare(s.vault.ghReachStep("demand"));
+const step = (s: S) => bare(s.vault.ghReachStep());
 // Runs nightly slices until the generation ends.
 async function nightAll(s: S) {
   let p = await night(s);
@@ -433,7 +443,7 @@ test("step: nothing open and no purpose -> idle; an unknown purpose is refused",
   const s = setup();
   s.clock.now = DAY;
   assert.deepEqual(await step(s), { state: "idle", done: 0, total: 0, code: null });
-  for (const bad of ["night", "verify:x", { purpose: "demand" }]) assert.deepEqual(await s.vault.ghReachStep(bad), { state: "refused", done: 0, total: 0, code: "reach_bad_purpose" });
+  for (const bad of ["night", "verify:x", { purpose: "demand" }]) assert.deepEqual(await bare(s.vault.ghReachStep(bad)), { state: "refused", done: 0, total: 0, code: "reach_bad_purpose" });
   assert.equal(s.gh.calls.length, 0);
 });
 
@@ -680,11 +690,134 @@ test("rates: at most 12 on-demand steps an hour; verify steps are exempt but cap
   assert.deepEqual(await step(s), { state: "refused", done: 0, total: 0, code: "reach_rate_limited" });
   s.clock.now += 60 * MIN;
   assert.equal((await demandAll(s)).state, "complete");
-  for (let i = 0; i < 9; i++) await step(s);
+});
+
+// Codex build r1 #1: verify attempts are counted in one transaction BEFORE any GitHub call, so simultaneous calls
+// cannot all reach GitHub; the cap is ceil(repos / 18) + 1 per approval (2 repos: 2 attempts).
+test("verify cap: five simultaneous steps held at a fetch barrier -> at most ceil(2/18) + 1 = 2 reach GitHub", async () => {
+  const s = await readDay();
   assert.equal((await tap(s)).ok, true);
-  const g = s.store.kv.get<any>("gh.reach.gen");
-  s.store.kv.put("gh.reach.gen", { ...g, rev: 3 }); // already used its ceil(2/18) + 1 = 2 slices
-  assert.deepEqual(await step(s), { state: "refused", done: 0, total: 0, code: "reach_verify_steps" });
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  s.gh.set((p) => (p.startsWith(`/orgs/${ORG}/repos`) ? held.then(() => Response.json(s.gh.org.repos)) : undefined));
+  const before = s.gh.calls.filter((c) => c.path === "/app").length;
+  const all = Promise.all([1, 2, 3, 4, 5].map(() => step(s)));
+  await new Promise((r) => setTimeout(r, 30));
+  s.gh.set(undefined);
+  release();
+  const got = await all;
+  assert.equal(s.gh.calls.filter((c) => c.path === "/app").length - before, 2, "only two attempts reached GitHub");
+  assert.equal(got.filter((p) => p.code === "reach_verify_steps").length, 3);
+  assert.deepEqual(await step(s), { state: "idle", done: 0, total: 0, code: null }, "the read ended; a later step starts nothing");
+});
+
+// ---- Codex build r1 #2: the final state of an approval is kept in the vault until the desk delivers it ----
+function withDesk(s: S, o: { loseStep?: number; loseAck?: number } = {}) {
+  const alerts: string[] = [];
+  const v = s.vault;
+  const vault = {
+    ghReachStep: async (p?: "demand") => {
+      const r = await v.ghReachStep(p);
+      if (o.loseStep && o.loseStep-- > 0) throw new Error("network connection lost");
+      return r;
+    },
+    ghReachNight: () => v.ghReachNight(),
+    ghReachResults: () => v.ghReachResults(),
+    ghReachAck: async (id: string) => {
+      const r = await v.ghReachAck(id);
+      if (o.loseAck && o.loseAck-- > 0) throw new Error("network connection lost");
+      return r;
+    },
+    headcount: (x?: "any") => v.headcount(x),
+  };
+  const deskStore = new MemoryStore();
+  const desk = new Desk(deskStore, { origin: "", rpID: "" }, { vault: vault as never, alert: async (t, x) => void alerts.push(`${t}|${x}`) });
+  const log = async () => JSON.stringify([...(await deskStore.list({ prefix: "log:" })).values()]);
+  return { desk, alerts, log };
+}
+
+test("delivery: the reply of the completing step is lost; the next step still delivers 'recorded' once", async () => {
+  const s = await readDay();
+  assert.equal((await tap(s)).ok, true);
+  const d = withDesk(s, { loseStep: 1 });
+  await assert.rejects(d.desk.reachStep(undefined, s.clock.now), /connection lost/);
+  assert.ok(s.store.kv.get("gh.reach.baseline"), "the vault committed");
+  assert.deepEqual(d.alerts, []);
+  await d.desk.reachStep(undefined, s.clock.now);
+  assert.equal(d.alerts.length, 1);
+  assert.match(d.alerts[0], /is now recorded/);
+  assert.match(await d.log(), /reach_acceptance_accepted/);
+  await d.desk.reachStep(undefined, s.clock.now);
+  assert.equal(d.alerts.length, 1, "delivered once");
+  assert.deepEqual(await s.vault.ghReachResults(), [], "acknowledged");
+});
+
+test("delivery: the agent stops stepping; after 20 minutes the next scheduled count delivers 'expired' and ends the read", async () => {
+  const s = await readDay(20);
+  assert.equal((await tap(s)).ok, true);
+  const d = withDesk(s);
+  s.clock.now += 21 * MIN;
+  await d.desk.headcount(async () => undefined, s.clock.now);
+  assert.equal(d.alerts.length, 1);
+  assert.match(d.alerts[0], /did not finish within 20 minutes/);
+  assert.equal(s.store.kv.get<any>("gh.reach.gen").failed, "reach_verify_expired", "the open read is ended, not left open");
+});
+
+test("delivery: a nightly start replaces an open verify read; the night slice delivers 'superseded'", async () => {
+  const s = setup(2, Date.UTC(2026, 10, 14, 3, 5));
+  await demandAll(s);
+  s.clock.now = Date.UTC(2026, 10, 14, 3, 19);
+  assert.equal((await tap(s)).ok, true);
+  const d = withDesk(s);
+  s.clock.now = Date.UTC(2026, 10, 14, 3, 30);
+  await d.desk.reachNight(s.clock.now);
+  assert.equal(d.alerts.length, 1);
+  assert.match(d.alerts[0], /nightly check started/);
+});
+
+test("delivery is at least once and pushed once: a lost acknowledgement is retried without a second push (6.2)", async () => {
+  const s = await readDay();
+  assert.equal((await tap(s)).ok, true);
+  const d = withDesk(s, { loseAck: 1 });
+  await d.desk.reachStep(undefined, s.clock.now);
+  assert.equal(d.alerts.length, 1);
+  assert.equal((await s.vault.ghReachResults()).length, 0, "the vault acted on the ack before the reply was lost");
+  // Two deliveries at once with an undelivered result: one push.
+  const t = await readDay();
+  assert.equal((await tap(t)).ok, true);
+  await t.vault.ghReachStep();
+  const e = withDesk(t);
+  await Promise.all([e.desk.deliverReach(t.clock.now), e.desk.deliverReach(t.clock.now)]);
+  assert.equal(e.alerts.length, 1);
+});
+
+// ---- Codex build r1 #3: a write key GitHub wrongly grants is deleted and proven dead, or recorded and reported ----
+test("write probe granted: delete refused, failed or lost -> tap fails, key recorded as unrevoked, pushed once, nightly red", async () => {
+  for (const how of ["403", "500", "throw"]) {
+    const s = await readDay();
+    s.gh.faults.grantWrite = "organization_hooks";
+    s.gh.faults.deleteFail = how;
+    const r = await tap(s);
+    assert.equal(r.ok, false, how);
+    assert.match(r.error ?? "", /could not be confirmed revoked/, how);
+    const d = withDesk(s);
+    await d.desk.deliverReach(s.clock.now);
+    assert.equal(d.alerts.length, 1, how);
+    assert.match(d.alerts[0], /could not be confirmed deleted/);
+    s.gh.faults.grantWrite = "";
+    s.gh.faults.deleteFail = "";
+    accept(s);
+    const n = await hc(s, "any");
+    assert.equal(n.ok, false, how);
+    assert.ok(n.changes.includes("probe_key_unrevoked: organization_hooks"), JSON.stringify(n.changes));
+    assert.ok(!dump(s.store).includes("ghs_reach_"), "the key itself is never stored");
+  }
+  // Deleted and proven dead (the probe gets 401): the tap still fails, nothing is recorded.
+  const ok = await readDay();
+  ok.gh.faults.grantWrite = "repository_hooks";
+  const r = await tap(ok);
+  assert.match(r.error ?? "", /given write \(repository_hooks\); its key was deleted/);
+  assert.deepEqual(await ok.vault.ghReachResults(), []);
 });
 
 // Security review (MEDIUM 2): the host part of an entry never holds ':' -- a port goes into the fingerprint, an IPv6
