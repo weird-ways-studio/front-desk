@@ -13,8 +13,8 @@
 import { DurableObject } from "cloudflare:workers";
 import { agentOf, type AgentConfig } from "./agent.ts";
 import { callerOf, route, type Who } from "./routes.ts";
-import { Desk, approvalPush, headcountAlarm, phoneAlert } from "./desk.ts";
-import type { VaultApi, VaultCardApi } from "../vault/src/api.ts";
+import { Desk, approvalPush, cronJob, headcountAlarm, phoneAlert } from "./desk.ts";
+import type { VaultApi, VaultCardApi, VaultReachApi } from "../vault/src/api.ts";
 import { recorderFrom } from "./recorder.ts";
 
 interface Env extends AgentConfig {
@@ -35,7 +35,7 @@ interface Env extends AgentConfig {
   RECORDER_CLIENT_ID?: string;
   RECORDER_CLIENT_SECRET?: string;
   // The vault Worker (vault/), reached only through this service binding (wrangler.jsonc "services").
-  VAULT: Service & VaultApi & VaultCardApi;
+  VAULT: Service & VaultApi & VaultCardApi & VaultReachApi;
 }
 
 export class FrontDesk extends DurableObject<Env> {
@@ -44,9 +44,15 @@ export class FrontDesk extends DurableObject<Env> {
     const phone = { user: this.env.PUSHOVER_USER, token: this.env.PUSHOVER_TOKEN };
     return route(request, this.ctx.storage, who, Date.now(), this.env.VAULT, approvalPush(phone), recorder, phoneAlert(phone));
   }
-  // The nightly count runs in here too, so its log rows join the one log.
+  // The nightly count runs in here too, so its log rows join the one log. Its desk carries the phone hook, so kept reach
+  // results it delivers reach Ben's phone (without one, Desk.deliverReach acknowledges nothing; Codex build r2).
   async headcount(): Promise<void> {
-    await new Desk(this.ctx.storage, { origin: "", rpID: "" }, { vault: this.env.VAULT }).headcount(headcountAlarm(this.env.HC_HEADCOUNT_URL, { user: this.env.PUSHOVER_USER, token: this.env.PUSHOVER_TOKEN }), Date.now());
+    const phone = { user: this.env.PUSHOVER_USER, token: this.env.PUSHOVER_TOKEN };
+    await new Desk(this.ctx.storage, { origin: "", rpID: "" }, { vault: this.env.VAULT, alert: phoneAlert(phone) }).headcount(headcountAlarm(this.env.HC_HEADCOUNT_URL, phone), Date.now());
+  }
+  // The nightly reach slice (card N2 5fdbf2ce), in here so its log line joins the one log.
+  async reachNight(): Promise<void> {
+    await new Desk(this.ctx.storage, { origin: "", rpID: "" }, { vault: this.env.VAULT, alert: phoneAlert({ user: this.env.PUSHOVER_USER, token: this.env.PUSHOVER_TOKEN }) }).reachNight(Date.now());
   }
 }
 
@@ -61,8 +67,12 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     return env.DESK.get(env.DESK.idFromName("desk")).handle(request, await whoIs(request, env, ctx));
   },
-  // Cloudflare calls this on the schedule in wrangler.jsonc "triggers" (the nightly headcount).
-  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(env.DESK.get(env.DESK.idFromName("desk")).headcount());
+  // Cloudflare calls this on each schedule in wrangler.jsonc "triggers", with the expression that fired; cronJob
+  // (src/desk.ts CRONS) picks the job: the reach slices at 03:47/03:52, the headcount at 04:17. Anything else runs nothing.
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    const job = cronJob(controller.cron);
+    const desk = env.DESK.get(env.DESK.idFromName("desk"));
+    if (job === "reach") ctx.waitUntil(desk.reachNight());
+    else if (job === "headcount") ctx.waitUntil(desk.headcount());
   },
 };

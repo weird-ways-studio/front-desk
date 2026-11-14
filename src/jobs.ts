@@ -243,6 +243,29 @@ export const JOBS = {
     validate: (params) => (params && typeof params === "object" && Object.keys(params).length === 0 ? {} : null),
     vault: true,
   },
+  // Webhooks and direct collaborators as the nightly check's reach list (vault/src/vault.ts ghReachAccept; card N2
+  // 5fdbf2ce). The tap only approves: the vault saves the list after its own re-read matches what this screen showed.
+  "gh.reach.baseline": {
+    mode: "tap",
+    menu: { does: "Accept the studio's webhooks and direct collaborators as the nightly check's list.", on: "the weird-ways-studio GitHub org", params: "none (the desk adds the changes; drive a fresh read first: node scripts/agent.mjs reach <desk> demand)" },
+    explain: (p) => {
+      const lines = p.changes && p.changes !== "none" ? p.changes.split("\n") : [];
+      return {
+        does: lines.length
+          ? "GitHub webhooks and direct collaborators: accept everything below as what the nightly check expects."
+          : "GitHub webhooks and direct collaborators: nothing changed since the list you accepted. Approving confirms it again.",
+        sections: plainChanges(lines),
+        warn: lines.length ? "If you do not recognise every line, do not approve: a webhook sends your code to its address, and a collaborator can reach that repository." : undefined,
+        expect: "Face ID approves. The vault checks the watcher still cannot give itself write access, then checks GitHub again (the agent drives it: a few minutes, at most 20). Only if GitHub still shows exactly this is the list saved. You get one phone message with the result.",
+        exact: lines.join("\n") || undefined,
+      };
+    },
+    done: (r) =>
+      notDone(r, () => "Nothing was approved, so the nightly check still expects the previous list.") ??
+      "Approved -- checking GitHub again (up to 20 minutes). Nothing is saved yet; you will get one phone message saying whether it was.",
+    validate: (params) => (params && typeof params === "object" && Object.keys(params).length === 0 ? {} : null),
+    vault: true,
+  },
   // Adds Cloudflare keys the nightly count flagged to what it expects (vault/src/vault.ts acceptKeys).
   "cf.token.accept": {
     mode: "tap",

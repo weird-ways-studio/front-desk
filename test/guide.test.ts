@@ -44,6 +44,7 @@ const PARAMS: Record<keyof typeof JOBS, Record<string, string>> = {
   "gh.app.baseline": { changes: CHANGES.join("\n"), snapshot: "s", base: "b" },
   "cf.token.accept": { ids: `${"a".repeat(32)},${"b".repeat(32)}`, names: "observatory-backup-read\n{\"x\":1}" },
   "gh.repo.create": { name: "new-app" },
+  "gh.reach.baseline": { changes: "repo_hooks +front-desk:7:example.com:0123456789ab:push:true\ncollaborators +front-desk:someone-b:write", lists: "l", base: "b", app_id: "1", installation_id: "2", inventory: "i" },
 };
 
 const grant = (job: keyof typeof JOBS): Grant =>

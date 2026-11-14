@@ -38,6 +38,40 @@ A second Worker, `front-desk-vault`, holds the master key: a Cloudflare token th
 - **Go-live and rollback order for `cf` (card 139071ea R7):** go live here first, then the Observatory's rule (its `CF_FROM`, chosen after this desk is live). Roll back the Observatory's rule FIRST, then this desk: a desk rolled back while the rule stands has every new Cloudflare result refused. Turning the rule back on later needs a fresh `CF_FROM`, never the old one.
 - **Not recorded:** the nightly count (not a grant). **Limit:** a tampered front-desk deploy could skip recording; Ben's review of `main` is the control, and the Observatory's later auditor the cross-check.
 
+## Webhooks and direct collaborators (card N2 5fdbf2ce)
+
+The nightly check also reads every repository's webhooks and direct collaborators, and the organization's webhooks,
+with the read-only headcount App, and compares them with a list Ben accepted (job `gh.reach.baseline`).
+
+**Go-live order (spec REFINE-5fdbf2ce 4.4).** Do all of it in one sitting that ends before 03:40 UTC. Until step 4 is
+done, every night is red with `reach_no_baseline`, so do not start after about 03:00 UTC:
+
+1. Merge: the vault deploys first with the wider allowed list (webhooks read). The App still has its old, narrower
+   permissions, which the vault accepts, so the main count keeps working.
+2. Ben, on his phone in Safari, with the GitHub sign-in for the weird-ways account: App "WWS front desk headcount" ->
+   Permissions -> Repository permissions: Webhooks = Read-only; Organization permissions: Webhooks = Read-only -> Save.
+   Then org Settings -> GitHub Apps -> the App -> Review request -> Accept. (FROM MEMORY: GitHub's menu names.)
+3. The agent runs a fresh on-demand read: `node scripts/agent.mjs reach <desk> demand` (steps until `complete`; each
+   call is one slice; at most 12 calls an hour). The first read makes the vault's fingerprint key.
+4. The agent asks for `gh.reach.baseline` (`/request`, no params) and runs `node scripts/agent.mjs wait <collect-url>`.
+   Ben checks the list and taps Face ID. **The tap must be strictly before 03:20 UTC** (its 20-minute re-check must end
+   before the 03:40 UTC protected window); a later tap is refused and nothing is approved. After the tap, `wait` drives
+   the re-read itself and makes one closing call; Ben gets one phone line: recorded, or why nothing was.
+5. The agent runs `POST /headcount` (an on-demand count) and expects `{"ok": true}`.
+
+**Rollback order (Codex build r1 #5).** The previous vault's allowed list does not include the two Webhooks reads, so it
+refuses a headcount App that still has them -- and the main GitHub count goes red with it. So narrow GitHub first, while
+this vault (which accepts both the wide and the narrow App) is still deployed:
+
+1. Ben, on his phone in Safari, with the GitHub sign-in for the weird-ways account: App "WWS front desk headcount" ->
+   Permissions -> set both Webhooks permissions back to No access -> Save; then org Settings -> GitHub Apps -> the App ->
+   Review request -> Accept, so the installation narrows too (FROM MEMORY: GitHub's menu names).
+2. The agent checks the main count still reads (`POST /headcount`; its reach part is red without the permissions,
+   which is expected), then the previous commit is redeployed (the reach crons go with it).
+
+If Ben cannot narrow GitHub, keep this vault deployed rather than rolling it back. A lost fingerprint key
+(`reach_fp_key_lost`) has no recovery built: it needs a reset Ben authorizes separately.
+
 ## The c-box signing key
 
 Proof that a key request comes from the c-box, not just from someone holding the agent's Access login, without a fixed home IP (design and review: studio-os `docs/specifications/face-id-access/C5C1-CBOX-ADDRESS-DESIGN.md`).
