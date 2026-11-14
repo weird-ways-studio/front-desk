@@ -102,7 +102,7 @@ async function demandAll(s: S) {
 // What part B's acceptance writes: the lists of the latest complete read, taken as the accepted list.
 function accept(s: S) {
   const g = s.store.kv.get<any>("gh.reach.complete");
-  const repos = Object.values(g.repos) as { hooks: string[]; collabs: string[] }[];
+  const repos = g.repos as { hooks: string[]; collabs: string[] }[];
   s.store.kv.put("gh.reach.baseline", { repo_hooks: repos.flatMap((r) => r.hooks).sort(), org_hooks: g.org_hooks, collaborators: repos.flatMap((r) => r.collabs).sort() });
 }
 const hc = (s: S, select?: "night" | "any") => (s.vault as any).ghHeadcount(select);
@@ -137,7 +137,7 @@ test("a nightly read: two slices of at most 18 repos, one narrowed key each, del
   assert.equal(s.gh.calls.filter((c) => c.path.startsWith(`/orgs/${ORG}/hooks`)).length, 1, "org hooks read once per generation");
   const g = s.store.kv.get<any>("gh.reach.night");
   assert.equal(g.complete_at, NIGHT);
-  assert.equal(g.repos["repo-1"].collabs[0], "repo-1:owner-a:admin");
+  assert.equal(g.repos.find((r: any) => r.name === "repo-1").collabs[0], "repo-1:owner-a:admin");
   assert.deepEqual(s.store.kv.get<any>("gh.reach.complete"), g);
   accept(s);
   s.clock.now = NIGHT + 30 * MIN;
@@ -412,7 +412,7 @@ test("an open verify read is never replaced by a demand read: demand steps conti
   assert.equal((await demand(s)).state, "open");
   const g = s.store.kv.get<any>("gh.reach.gen");
   assert.equal(g.purpose, "verify:a1");
-  assert.equal(Object.keys(g.repos).length, 18);
+  assert.equal(g.repos.length, 18);
   assert.throws(() => s.store.transactionSync(() => (s.vault as any).reachReserve("verify:a2")), /reach_verify_open/);
   assert.equal((await step(s)).state, "complete");
   assert.equal(s.store.kv.get("gh.reach.night"), undefined, "a verify read never becomes the night");
@@ -483,4 +483,20 @@ test("the main count still names its own changes alongside a red reach part, and
   s.store.kv.put("gh.baseline", null);
   s.store.kv.put("gh.app.headcount", null);
   assert.deepEqual(await hc(s), { ok: false, changes: [], error: "github_not_set_up" });
+});
+
+test("a repo named like an object property (constructor, __proto__, toString) is read like any other", async () => {
+  const s = setup(3);
+  s.gh.org.repos = ["constructor", "__proto__", "toString"].map((name, i) => ({ name, id: 7000 + i, private: false }));
+  // The fake's own maps must not have a prototype either, or it would answer with Object's own properties.
+  s.gh.org.hooks = Object.create(null);
+  s.gh.org.collabs = Object.create(null);
+  for (const r of s.gh.org.repos) {
+    s.gh.org.hooks[r.name as string] = [hook(40)];
+    s.gh.org.collabs[r.name as string] = [];
+  }
+  assert.deepEqual(await nightAll(s), { state: "complete", done: 3, total: 3, code: null });
+  for (const name of ["constructor", "__proto__", "toString"]) assert.ok(s.gh.calls.some((c) => c.path.startsWith(`/repos/${ORG}/${name}/hooks`)), name);
+  accept(s);
+  assert.equal(s.store.kv.get<any>("gh.reach.baseline").repo_hooks.length, 3);
 });

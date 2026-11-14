@@ -15,7 +15,8 @@ const enc = new TextEncoder();
 // The main App (the repo-maker) has its key sealed to Ben's passkey. repository_creation joins for job gh.repo.create
 // (card 77ec1e64): Ben adds it on GitHub only AFTER this vault is deployed, or checkApp would refuse the App meanwhile.
 export const PERMISSIONS = {
-  headcount: { organization_administration: "read", members: "read", organization_personal_access_tokens: "read", administration: "read", metadata: "read" },
+  // Webhooks read (card N2 5fdbf2ce): allowed here BEFORE Ben grants them on GitHub (the 77ec1e64 order).
+  headcount: { organization_administration: "read", members: "read", organization_personal_access_tokens: "read", administration: "read", metadata: "read", repository_hooks: "read", organization_hooks: "read" },
   main: { administration: "write", contents: "write", metadata: "read", repository_creation: "write" },
 } as const;
 export type AppKind = keyof typeof PERMISSIONS;
@@ -89,9 +90,11 @@ export class GitHub {
   }
 
   /** The raw answer, for callers that must tell statuses apart (ghrepo.ts: a create reply, a revoke probe). */
-  send(method: string, path: string, body?: unknown): Promise<Response> {
+  // `redirect: "manual"` on reach reads: a redirect is a failure, never followed (it would also count as a subrequest).
+  send(method: string, path: string, body?: unknown, redirect?: "manual"): Promise<Response> {
     return this.fetch(API + path, {
       method,
+      ...(redirect ? { redirect } : {}),
       headers: {
         accept: "application/vnd.github+json",
         "x-github-api-version": "2022-11-28",
@@ -220,12 +223,83 @@ export async function sha256Hex(text: string): Promise<string> {
 }
 
 /** Every entry added or gone since the baseline, as "kind +entry" / "kind -entry". */
-export function diff(base: GhSnapshot, now: GhSnapshot): string[] {
+export function diff<T extends object>(base: T, now: T): string[] {
   const out: string[] = [];
-  for (const kind of Object.keys(now) as (keyof GhSnapshot)[]) {
-    const was = base[kind] ?? [];
-    for (const x of now[kind]) if (!was.includes(x)) out.push(`${kind} +${x}`);
-    for (const x of was) if (!now[kind].includes(x)) out.push(`${kind} -${x}`);
+  const b = base as Record<string, string[] | undefined>, n = now as Record<string, string[]>;
+  for (const kind of Object.keys(n)) {
+    const was = b[kind] ?? [];
+    for (const x of n[kind]) if (!was.includes(x)) out.push(`${kind} +${x}`);
+    for (const x of was) if (!n[kind].includes(x)) out.push(`${kind} -${x}`);
   }
   return out;
+}
+
+// ---- Reach (card N2 5fdbf2ce; studio-os REFINE-5fdbf2ce-watcher-reach.md v1.3 sections 11-13): who and what GitHub
+// sends code to or lets in, per repo. Raw URLs, paths, queries and config.secret never leave these functions: errors
+// are fixed codes, hooks become "id:host:dest:events:active" where dest is a keyed fingerprint of the destination. ----
+
+/** The one key a reach slice mints: nothing else. */
+export const REACH_PERMS = { metadata: "read", repository_hooks: "read", organization_hooks: "read" } as const;
+export interface ReachLists {
+  repo_hooks: string[]; // "repo:id:host:dest:events:active"
+  org_hooks: string[]; // "id:host:dest:events:active"
+  collaborators: string[]; // "repo:login:role_name" as GitHub reports for affiliation=direct
+}
+
+const shape = (ok: unknown): void => {
+  if (!ok) throw new VaultError("reach_shape");
+};
+
+/** One page of a reach list, or a fixed code: 3xx, non-2xx, not an array, or a full page all fail the slice. */
+export async function reachPage(gh: GitHub, path: string): Promise<Record<string, unknown>[]> {
+  const res = await gh.send("GET", `${path}${path.includes("?") ? "&" : "?"}per_page=100`, undefined, "manual");
+  if (res.status >= 300 && res.status < 400) throw new VaultError("reach_redirect");
+  if (!res.ok) throw new VaultError(`reach_gh_${res.status}`);
+  const items = (await res.json().catch(() => null)) as Record<string, unknown>[];
+  shape(Array.isArray(items));
+  if (items.length >= 100) throw new VaultError("reach_too_many");
+  shape(items.every((x: unknown) => x && typeof x === "object"));
+  return items;
+}
+
+/** The org's repos as the reach read keeps them: name, id, private. */
+export async function reachRepos(gh: GitHub): Promise<{ name: string; id: number; private: boolean }[]> {
+  const repos = await reachPage(gh, `/orgs/${ORG}/repos?type=all`);
+  shape(repos.every((r) => typeof r.name === "string" && Number.isSafeInteger(r.id) && (r.id as number) > 0 && typeof r.private === "boolean"));
+  return repos as unknown as { name: string; id: number; private: boolean }[];
+}
+
+/** A hook as "id:host:dest:events:active"; anything GitHub does not document for the fingerprint fails reach_shape. */
+export async function hookEntry(h: Record<string, unknown>, key: CryptoKey): Promise<string> {
+  const c = h.config as Record<string, unknown> | undefined;
+  shape(Number.isSafeInteger(h.id) && c && typeof c === "object" && typeof c.url === "string" && Array.isArray(h.events) && h.events.every((e) => typeof e === "string") && typeof h.active === "boolean");
+  let u: URL | undefined;
+  try {
+    u = new URL(c!.url as string);
+  } catch {
+    shape(false);
+  }
+  shape(u!.protocol === "https:" || u!.protocol === "http:");
+  shape(c!.content_type === "json" || c!.content_type === "form");
+  shape(["0", "1", 0, 1].includes(c!.insecure_ssl as string));
+  const what = canonical({ url: c!.url, content_type: c!.content_type, insecure_ssl: String(c!.insecure_ssl), scheme: u!.protocol.slice(0, -1) });
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(what)));
+  const dest = [...mac.slice(0, 6)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${h.id}:${u!.hostname}:${dest}:${[...(h.events as string[])].sort().join(",")}:${h.active}`;
+}
+
+/** One repo's hooks and direct collaborators; a private repo with nobody listed fails (a checked expectation). */
+export async function reachRepo(gh: GitHub, r: { name: string; private: boolean }, key: CryptoKey): Promise<{ hooks: string[]; collabs: string[] }> {
+  const hooks: string[] = [];
+  for (const h of await reachPage(gh, `/repos/${ORG}/${r.name}/hooks`)) hooks.push(`${r.name}:${await hookEntry(h, key)}`);
+  const people = await reachPage(gh, `/repos/${ORG}/${r.name}/collaborators?affiliation=direct`);
+  shape(people.every((p) => typeof p.login === "string" && typeof p.role_name === "string"));
+  if (r.private && !people.length) throw new VaultError("reach_collabs_empty");
+  return { hooks: hooks.sort(), collabs: people.map((p) => `${r.name}:${p.login}:${p.role_name}`).sort() };
+}
+
+export async function reachOrgHooks(gh: GitHub, key: CryptoKey): Promise<string[]> {
+  const out: string[] = [];
+  for (const h of await reachPage(gh, `/orgs/${ORG}/hooks`)) out.push(await hookEntry(h, key));
+  return out.sort();
 }

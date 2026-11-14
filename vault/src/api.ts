@@ -2,18 +2,24 @@
 
 import type { SignedRun } from "./approval.ts";
 import type { OpRequest, OpResult, RunBook, RunState } from "./runs.ts";
-import type { CfAcceptResult, CfPreviewKey, GhBaselineResult, Headcount, HeadcountSetupResult, ReadResult } from "./vault.ts";
+import type { CfAcceptResult, CfPreviewKey, GhBaselineResult, Headcount, HeadcountSetupResult, ReachProgress, ReadResult } from "./vault.ts";
 
 export type { OpRequest, OpResult, RunState, SignedRun };
-export type { CfAcceptResult, CfPreviewKey, GhBaselineResult, Headcount, HeadcountSetupResult, ReadResult };
+export type { CfAcceptResult, CfPreviewKey, GhBaselineResult, Headcount, HeadcountSetupResult, ReachProgress, ReadResult };
 
 export interface VaultApi {
   status(): Promise<{ stored: boolean; pending: boolean; token_id?: string }>;
   run(req: SignedRun): Promise<ReadResult | HeadcountSetupResult | GhBaselineResult | CfAcceptResult>;
-  headcount(): Promise<Headcount>;
+  headcount(select?: "any"): Promise<Headcount>;
   ghPreview(): Promise<{ changes: string[]; snapshot: string; base: string }>;
   cfPreview(): Promise<CfPreviewKey[]>;
   approvalApi(): Promise<{ version: number }>;
+}
+
+// The reach read (card N2 5fdbf2ce). Separate from VaultApi until the desk calls it (part B).
+export interface VaultReachApi {
+  ghReachNight(): Promise<ReachProgress>;
+  ghReachStep(purpose?: "demand"): Promise<ReachProgress>;
 }
 
 // Runs (4a-2a; rules in runs.ts). Separate from VaultApi until the desk uses them (4a-2b).

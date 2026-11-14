@@ -5,7 +5,7 @@
 
 import { Cloudflare, effectsField, newEffects, type CfField, type Effects, type Fetch } from "./cloudflare.ts";
 import { STUDIO_ZONES } from "./zones.ts";
-import { GitHub, appJwt, canonical, checkApp, checkInstallation, convert, diff, installationKey, pkcs8FromPem, sha256Hex, snapshot, type AppKind, type GhSnapshot } from "./github.ts";
+import { GitHub, REACH_PERMS, appJwt, canonical, checkApp, checkInstallation, convert, diff, installationKey, pkcs8FromPem, reachOrgHooks, reachRepo, reachRepos, sha256Hex, snapshot, type AppKind, type GhSnapshot, type ReachLists } from "./github.ts";
 import { admit, checkSigned } from "./approval.ts";
 import { createRepo, type RepoCreateResult } from "./ghrepo.ts";
 import type { GhCreated } from "./cards.ts";
@@ -492,8 +492,9 @@ export class VaultLogic {
    * the vault expects -- the setup baseline, the master, the headcount key itself, and keys handed
    * out and not yet deleted (Cloudflare keeps expired keys listed). Reads only; changes nothing.
    */
-  async headcount(): Promise<Headcount> {
-    const r: Headcount = { ok: false, tokens: -1, unexpected: [], stretched: [], missing: [], cleanup: [], github: await this.ghHeadcount() };
+  // `select`: "any" only for an on-demand count (card N2 5fdbf2ce); anything else is the scheduled night's selection.
+  async headcount(select?: unknown): Promise<Headcount> {
+    const r: Headcount = { ok: false, tokens: -1, unexpected: [], stretched: [], missing: [], cleanup: [], github: await this.ghHeadcount(select === "any" ? "any" : "night") };
     try {
       const m = await this.master();
       if (!m?.by_passkey) throw new VaultError("no_master_key");
@@ -598,11 +599,11 @@ export class VaultLogic {
 
   // A one-hour read key from the headcount App, used, then revoked (expiry is the backstop). First the
   // watcher checks itself: still read-only, still on all repositories (Codex C6a-1 r1 #1, #3).
-  private async ghRead<T>(hc: GhHeadcountApp, use: (gh: GitHub) => Promise<T>): Promise<T> {
+  private async ghRead<T>(hc: GhHeadcountApp, use: (gh: GitHub) => Promise<T>, narrow?: Record<string, string>): Promise<T> {
     const app = new GitHub(await appJwt(hc.id, hc.key, this.now()), this.fetch);
     await checkApp(app, "headcount");
     await checkInstallation(app, hc.installation!, "headcount");
-    const k = await installationKey(app, hc.installation!);
+    const k = await installationKey(app, hc.installation!, narrow && { permissions: narrow });
     const gh = new GitHub(k.token, this.fetch);
     try {
       return await use(gh);
@@ -686,24 +687,174 @@ export class VaultLogic {
   }
 
   // The nightly GitHub count: what can reach the org now, against the list Ben accepted. Reads only.
-  private async ghHeadcount(): Promise<Headcount["github"]> {
+  // `select` (card N2 5fdbf2ce, spec 13.2): the scheduled 04:17 count folds in the latest nightly reach read; an
+  // on-demand count ("any") the latest complete read of any purpose. Same checks either way.
+  private async ghHeadcount(select: "night" | "any" = "night"): Promise<Headcount["github"]> {
     const r: Headcount["github"] = { ok: false, changes: [] };
     try {
       const base = await this.store.get<GhSnapshot | null>("gh.baseline");
       const hc = await this.store.get<GhHeadcountApp | null>("gh.app.headcount");
       if (!base || !hc?.installation) throw new VaultError("github_not_set_up");
-      r.changes = diff(base, await this.ghRead(hc, snapshot));
+      const snap = await this.ghRead(hc, snapshot);
+      r.changes = diff(base, snap);
+      const reach = this.reachFold(select, snap.repo_ids, hc);
+      if (typeof reach === "string") note(r, reach);
+      else r.changes.push(...reach);
       // A job-made repo the recorder has not yet receipted is not in the list (Y1): say why it shows, until it is.
       // An eligible one alarms until the recorder's receipt lands (Y1), even if Ben accepted it into the list meanwhile
       // (Codex build r1 #2). An ineligible one can never be receipted: it alarms until Ben accepts it with gh.app.baseline.
       for (const [, c] of this.store.kv.list<GhCreated>({ prefix: "gh.created:" })) {
         if (c.eligible ? !c.recorded : !(base.repo_ids ?? []).includes(`${c.name}:${c.repo_id}`)) r.changes.push(`repo_result_unrecorded: ${c.name}`);
       }
-      r.ok = r.changes.length === 0;
+      r.ok = r.changes.length === 0 && !r.error;
     } catch (e) {
       note(r, (e as Error).message);
     }
     return r;
+  }
+
+  // ---- Reach (card N2 5fdbf2ce; studio-os REFINE-5fdbf2ce-watcher-reach.md v1.3, sections 11-13 override earlier
+  // ones). Every read is a generation (`gh.reach.gen`, one at a time), read in slices of at most REACH_REPOS_PER_RUN
+  // repos, each slice ending in one transactionSync compare-and-write on (gen id, rev). Storage: gh.reach.seq (+1 per
+  // generation), gh.reach.fail {seq, reason} (newest failed or superseded), gh.reach.night (latest complete nightly),
+  // gh.reach.complete (latest complete of any purpose), gh.reach.fp_key (HMAC key; never logged or returned),
+  // gh.reach.baseline (the accepted ReachLists; written by part B's acceptance only). ----
+
+  /** Nightly cron (03:47 and 03:52 UTC): starts tonight's generation, or continues it; idempotent. */
+  async ghReachNight(): Promise<ReachProgress> {
+    const g = this.store.kv.get<ReachGen>("gh.reach.gen");
+    const tonight = g?.purpose === "night" && utcDay(g.started_at) === utcDay(this.now());
+    if (tonight && g.complete_at !== null) return progress(g);
+    return this.reachSlice(tonight && !g.failed ? g : this.reachNew("night"), g);
+  }
+
+  /**
+   * One slice of the current generation (whatever its purpose), or, with purpose "demand" and nothing open, a new
+   * on-demand generation -- refused inside the protected window. Never replaces an open generation. Returns only
+   * bounded progress.
+   */
+  async ghReachStep(purpose?: unknown): Promise<ReachProgress> {
+    if (purpose !== undefined && purpose !== "demand") return refused("reach_bad_purpose");
+    const g = this.store.kv.get<ReachGen>("gh.reach.gen");
+    if (g && isOpen(g)) return this.reachSlice(g, g);
+    if (!purpose) return { state: "idle", done: 0, total: 0, code: null };
+    const m = new Date(this.now()).getUTCHours() * 60 + new Date(this.now()).getUTCMinutes();
+    if (m >= REACH_WINDOW[0] && m < REACH_WINDOW[1]) return refused("reach_window");
+    return this.reachSlice(this.reachNew("demand"), g);
+  }
+
+  /**
+   * Opens a verify generation for part B's acceptance. Synchronous: call it inside the tap's own transactionSync, so
+   * the approval and this slot are reserved together (spec 13.1). Refuses while a verify generation is open.
+   */
+  reachReserve(purpose: `verify:${string}`): void {
+    const cur = this.store.kv.get<ReachGen>("gh.reach.gen");
+    if (cur && isOpen(cur) && cur.purpose.startsWith("verify:")) throw new VaultError("reach_verify_open");
+    this.reachCommit(this.reachNew(purpose), cur);
+  }
+
+  // Runs inside the completing slice's transaction, after the generation is written complete. Part B's verify
+  // acceptance hooks in here (spec 11.3); it must record a refusal rather than throw (a throw rolls the slice back).
+  protected onReachComplete(_gen: ReachGen): void {}
+
+  private reachNew(purpose: string): ReachGen {
+    const hc = this.store.kv.get<GhHeadcountApp | null>("gh.app.headcount");
+    return {
+      id: hex(crypto.getRandomValues(new Uint8Array(8))), seq: 0, purpose, app_id: hc?.id ?? 0, installation_id: hc?.installation ?? 0,
+      inventory: null, rev: 0, repos: [], org_hooks: null, started_at: this.now(), failed: null, complete_at: null,
+    };
+  }
+
+  // `start` is the generation this slice works on; `before` is what gh.reach.gen held when it began (the same object
+  // when continuing). Reads happen on a copy; only the final transaction writes.
+  private async reachSlice(start: ReachGen, before: ReachGen | undefined): Promise<ReachProgress> {
+    const work: ReachGen = structuredClone(start);
+    try {
+      const hc = await this.store.get<GhHeadcountApp | null>("gh.app.headcount");
+      if (!hc?.installation) throw new VaultError("reach_not_set_up");
+      if (hc.id !== work.app_id || hc.installation !== work.installation_id) throw new VaultError("reach_scope_changed");
+      const key = await this.reachKey();
+      const read = await this.ghRead(hc, async (gh) => {
+        const repos = await reachRepos(gh);
+        const inv = repos.map((r) => `${r.name}:${r.id}`).sort();
+        if (work.inventory && canonical(inv) !== canonical(work.inventory)) throw new VaultError("reach_inventory_changed");
+        work.inventory = inv;
+        if (inv.length > REACH_MAX_REPOS) throw new VaultError("reach_over_budget");
+        const org = work.org_hooks ?? (await reachOrgHooks(gh, key));
+        const got: ReachGen["repos"] = [];
+        // An array, not an object keyed by name: a repo named "constructor" or "__proto__" is a repo like any other.
+        for (const r of repos.filter((x) => !work.repos.some((d) => d.name === x.name)).slice(0, REACH_REPOS_PER_RUN)) got.push({ name: r.name, ...(await reachRepo(gh, r, key)) });
+        return { org, got };
+      }, REACH_PERMS);
+      work.org_hooks = read.org;
+      work.repos.push(...read.got);
+    } catch (e) {
+      work.failed = (e as Error).message.split(":")[0].slice(0, 40);
+    }
+    try {
+      this.store.transactionSync(() => this.reachCommit(work, before));
+    } catch (e) {
+      if ((e as Error).message === "reach_superseded") return refused("reach_superseded");
+      throw e;
+    }
+    return progress(work);
+  }
+
+  // The one compare-and-write: refuses unless gh.reach.gen is still exactly what the slice began from.
+  private reachCommit(work: ReachGen, before: ReachGen | undefined): void {
+    const kv = this.store.kv;
+    const cur = kv.get<ReachGen>("gh.reach.gen");
+    if (cur?.id !== before?.id || cur?.rev !== before?.rev) throw new VaultError("reach_superseded");
+    const fail = (seq: number, reason: string) => {
+      if (seq > (kv.get<{ seq: number }>("gh.reach.fail")?.seq ?? 0)) kv.put("gh.reach.fail", { seq, reason });
+    };
+    if (cur?.id !== work.id) {
+      if (cur && isOpen(cur)) fail(cur.seq, "reach_superseded");
+      work.seq = (kv.get<number>("gh.reach.seq") ?? 0) + 1;
+      kv.put("gh.reach.seq", work.seq);
+    }
+    work.rev = (cur?.id === work.id ? cur.rev : 0) + 1;
+    if (work.failed) fail(work.seq, work.failed);
+    else if (work.inventory && work.org_hooks && work.inventory.every((x) => work.repos.some((d) => d.name === x.slice(0, x.lastIndexOf(":"))))) {
+      work.complete_at = this.now();
+      kv.put("gh.reach.complete", work);
+      if (work.purpose === "night") kv.put("gh.reach.night", work);
+    }
+    kv.put("gh.reach.gen", work);
+    if (work.complete_at !== null) this.onReachComplete(work);
+  }
+
+  // The fingerprint key: made once, inside one transaction. Never re-made while the accepted list holds hooks (13.4).
+  private async reachKey(): Promise<CryptoKey> {
+    const raw = this.store.transactionSync(() => {
+      const k = this.store.kv.get<string>("gh.reach.fp_key");
+      if (k) return k;
+      if (hasHooks(this.store.kv.get<ReachLists>("gh.reach.baseline"))) throw new VaultError("reach_fp_key_lost");
+      const made = b64url(crypto.getRandomValues(new Uint8Array(32)));
+      this.store.kv.put("gh.reach.fp_key", made);
+      return made;
+    });
+    return crypto.subtle.importKey("raw", fromB64url(raw), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  }
+
+  // The fold-in (spec 11.2 items 3-4, 12.1, 13.2): the reach changes, or one fixed reason the reach part is red.
+  private reachFold(select: "night" | "any", repoIds: string[], hc: GhHeadcountApp): string[] | string {
+    const kv = this.store.kv;
+    const base = kv.get<ReachLists>("gh.reach.baseline");
+    if (hasHooks(base) && !kv.get("gh.reach.fp_key")) return "reach_fp_key_lost";
+    const sel = kv.get<ReachGen>(select === "any" ? "gh.reach.complete" : "gh.reach.night");
+    const cur = kv.get<ReachGen>("gh.reach.gen");
+    const why = !sel ? "no_result"
+      : this.now() - sel.started_at > REACH_FRESH_MS ? "stale"
+      : cur && cur.seq > sel.seq && isOpen(cur) ? "newer_open"
+      : (kv.get<{ seq: number }>("gh.reach.fail")?.seq ?? 0) > sel.seq ? "newer_failed"
+      : canonical(sel.inventory) !== canonical([...repoIds].sort()) ? "inventory"
+      : sel.app_id !== hc.id || sel.installation_id !== hc.installation ? "scope"
+      : null;
+    if (why) return `reach_incomplete: ${why}`;
+    if (!base) return "reach_no_baseline";
+    const repos = sel!.repos;
+    return diff(base, { repo_hooks: repos.flatMap((r) => r.hooks).sort(), org_hooks: sel!.org_hooks!, collaborators: repos.flatMap((r) => r.collabs).sort() });
   }
 
   // Mints a short key, uses it, and always deletes it (its expiry is the backstop).
@@ -933,6 +1084,43 @@ async function audit(master: Cloudflare, m: Master, r: Evidence, expected: strin
     r.audit.error = (e as Error).message.slice(0, 120);
   }
 }
+
+// Reach (card N2 5fdbf2ce). 18 repos x 2 reads + 7 = 43 GitHub calls per slice, under Workers Free's 50 subrequests;
+// two nightly slices cover 36 repos, and more fails closed (spec 11.7).
+export const REACH_REPOS_PER_RUN = 18;
+export const REACH_MAX_REPOS = 2 * REACH_REPOS_PER_RUN;
+export const REACH_FRESH_MS = 60 * 60_000;
+export const REACH_WINDOW = [3 * 60 + 40, 4 * 60 + 20] as const; // minutes of the UTC day: no demand starts (12.2)
+
+export interface ReachGen {
+  id: string;
+  seq: number;
+  purpose: string; // night | demand | verify:<approval id>
+  app_id: number;
+  installation_id: number;
+  inventory: string[] | null; // sorted "name:repo id", fixed at the first slice
+  rev: number;
+  repos: { name: string; hooks: string[]; collabs: string[] }[]; // only repos whose two reads both succeeded
+  org_hooks: string[] | null;
+  started_at: number;
+  failed: string | null; // a fixed code
+  complete_at: number | null;
+}
+// What a reach call returns: never lists, hosts, URLs or keys.
+export interface ReachProgress {
+  state: "open" | "complete" | "failed" | "idle" | "refused";
+  done: number;
+  total: number;
+  code: string | null;
+}
+const isOpen = (g: ReachGen) => !g.failed && g.complete_at === null;
+const utcDay = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+const hasHooks = (b: ReachLists | undefined | null) => !!b && (b.repo_hooks.length > 0 || b.org_hooks.length > 0);
+const refused = (code: string): ReachProgress => ({ state: "refused", done: 0, total: 0, code });
+const progress = (g: ReachGen): ReachProgress => ({
+  state: g.failed ? "failed" : g.complete_at !== null ? "complete" : "open",
+  done: g.repos.length, total: g.inventory?.length ?? 0, code: g.failed,
+});
 
 function note(r: { error?: string }, message: string): void {
   r.error = `${r.error ? `${r.error}; ` : ""}${message.slice(0, 120)}`;

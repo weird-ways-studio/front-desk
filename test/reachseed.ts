@@ -6,7 +6,7 @@ import type { VaultStore } from "../vault/src/vault.ts";
 export function seedReach(store: Pick<VaultStore, "kv">, repoIds: string[], at: number, app = { id: 101, installation: 1010 }): void {
   const gen = {
     id: "seed", seq: 1, purpose: "night", app_id: app.id, installation_id: app.installation, inventory: [...repoIds].sort(), rev: 1,
-    repos: Object.fromEntries(repoIds.map((r) => [r.split(":")[0], { hooks: [], collabs: [] }])), org_hooks: [],
+    repos: repoIds.map((r) => ({ name: r.split(":")[0], hooks: [], collabs: [] })), org_hooks: [],
     started_at: at, failed: null, complete_at: at,
   };
   store.kv.put("gh.reach.seq", 1);

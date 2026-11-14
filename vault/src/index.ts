@@ -33,8 +33,14 @@ export class VaultBox extends DurableObject<Env> {
   run(req: unknown, ...rest: unknown[]) {
     return this.logic().run(req, ...rest);
   }
-  headcount() {
-    return this.logic().headcount();
+  headcount(select?: unknown) {
+    return this.logic().headcount(select);
+  }
+  ghReachNight() {
+    return this.logic().ghReachNight();
+  }
+  ghReachStep(purpose?: unknown) {
+    return this.logic().ghReachStep(purpose);
   }
   ghPreview() {
     return this.logic().ghPreview();
@@ -113,8 +119,17 @@ export default class Vault extends WorkerEntrypoint<Env> {
     return { version: APPROVAL_API_VERSION };
   }
   // The nightly count, called by the front desk's cron (../../src/index.ts scheduled). No tap; reads only.
-  headcount() {
-    return this.box().headcount();
+  // `select` "any": an on-demand count folds in the newest complete reach read instead of the night's (card N2 5fdbf2ce).
+  headcount(select?: unknown) {
+    return this.box().headcount(select);
+  }
+  // The reach read (card N2 5fdbf2ce; rules in vault.ts). ghReachNight: the nightly cron's start-or-continue.
+  // ghReachStep: one slice of the open generation, or ("demand") a new on-demand read. Both return only progress.
+  ghReachNight() {
+    return this.box().ghReachNight();
+  }
+  ghReachStep(purpose?: unknown) {
+    return this.box().ghReachStep(purpose);
   }
   // What job gh.app.baseline would accept, for Ben's approval screen (called at /request). Reads only.
   ghPreview() {
