@@ -628,15 +628,17 @@ test("R28/R39: admission by the tap's own time: a tap whose 20 minutes reach 03:
   await assert.rejects(s.vault.ghReachPreview(), /reach_try_after_0420/);
   s.clock.now = Date.UTC(2026, 10, 14, 4, 0);
   await assert.rejects(s.vault.ghReachPreview(), /reach_try_after_0420/);
-  // 03:19 + 20 min = 03:39: admitted; the night at 03:47 then supersedes it.
-  const ok = setup(2, Date.UTC(2026, 10, 14, 3, 5));
-  await demandAll(ok);
-  ok.clock.now = Date.UTC(2026, 10, 14, 3, 19);
-  assert.equal((await tap(ok)).ok, true);
-  ok.clock.now = NIGHT;
-  const n = await night(ok);
-  assert.equal(n.state, "complete");
-  assert.equal(approvals(ok)[0].state, "superseded");
+  // 03:19 + 20 min = 03:39: admitted. A nightly start before it ends supersedes it; one after its expiry ends it expired.
+  for (const [at, state] of [[Date.UTC(2026, 10, 14, 3, 30), "superseded"], [NIGHT, "expired"]] as const) {
+    const ok = setup(2, Date.UTC(2026, 10, 14, 3, 5));
+    await demandAll(ok);
+    ok.clock.now = Date.UTC(2026, 10, 14, 3, 19);
+    assert.equal((await tap(ok)).ok, true);
+    ok.clock.now = at;
+    assert.equal((await night(ok)).state, "complete");
+    assert.equal(approvals(ok)[0].state, state);
+    assert.equal(ok.store.kv.get("gh.reach.baseline"), undefined);
+  }
 });
 
 test("R40 (6.2): two taps at once -> exactly one approval and one verify read", async () => {

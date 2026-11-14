@@ -42,6 +42,9 @@ export class VaultBox extends DurableObject<Env> {
   ghReachStep(purpose?: unknown) {
     return this.logic().ghReachStep(purpose);
   }
+  ghReachPreview() {
+    return this.logic().ghReachPreview();
+  }
   ghPreview() {
     return this.logic().ghPreview();
   }
@@ -130,6 +133,10 @@ export default class Vault extends WorkerEntrypoint<Env> {
   }
   ghReachStep(purpose?: unknown) {
     return this.box().ghReachStep(purpose);
+  }
+  // What job gh.reach.baseline would accept, for Ben's approval screen (called at /request). Reads storage only.
+  ghReachPreview() {
+    return this.box().ghReachPreview();
   }
   // What job gh.app.baseline would accept, for Ben's approval screen (called at /request). Reads only.
   ghPreview() {
