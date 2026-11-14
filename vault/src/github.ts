@@ -302,6 +302,7 @@ export async function reachRepo(gh: GitHub, r: { name: string; private: boolean 
   return { hooks: hooks.sort(), collabs: people.map((p) => `${r.name}:${p.login}:${p.role_name}`).sort() };
 }
 
+/** The org's own webhooks as sorted hook entries (host and fingerprint only, never the URL). */
 export async function reachOrgHooks(gh: GitHub, key: CryptoKey): Promise<string[]> {
   const out: string[] = [];
   for (const h of await reachPage(gh, `/orgs/${ORG}/hooks`)) out.push(await hookEntry(h, key));
