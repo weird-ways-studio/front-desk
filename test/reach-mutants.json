@@ -402,9 +402,9 @@
  [
   "reach-verify-steps",
   "vault/src/vault.ts",
-  "if (verify && g.rev > Math.ceil(",
-  "if (false && g.rev > Math.ceil(",
-  "rates: at most 12 on-demand steps an hour; verify steps are exempt but capped per approval",
+  "if (!a || (a.attempts ?? 0) >= a.cap) return false;",
+  "if (!a) return false;",
+  "verify cap: five simultaneous steps held at a fetch barrier -> at most ceil(2/18) + 1 = 2 reach GitHub",
   "test/reach.test.ts"
  ],
  [
@@ -476,15 +476,15 @@
   "src/desk.ts",
   "if (state === \"accepted\") return",
   "if (state) return",
-  "R37: a verify read that ended sends Ben exactly one phone line with its final state, and logs it; 'recorded' only when accepted",
+  "R37: each final state the vault keeps is pushed as exactly one phone line, logged, then acknowledged; 'recorded' only when accepted",
   "test/reachdesk.test.ts"
  ],
  [
   "reach-accept-push",
   "src/desk.ts",
-  "await this.hooks.alert?.(\"Front desk: webhook list\", words)",
+  "await this.hooks.alert?.(state ? \"Front desk: webhook list\" : \"Front desk: needs you\", words)",
   "await Promise.resolve(words)",
-  "R37: a verify read that ended sends Ben exactly one phone line with its final state, and logs it; 'recorded' only when accepted",
+  "R37: each final state the vault keeps is pushed as exactly one phone line, logged, then acknowledged; 'recorded' only when accepted",
   "test/reachdesk.test.ts"
  ],
  [
@@ -598,5 +598,133 @@
   "",
   "names: a repo or login outside GitHub's own characters (a ':' could shift fields) -> reach_shape",
   "test/reach.test.ts"
+ ],
+ [
+  "reach-cap-before-call",
+  "vault/src/vault.ts",
+  "this.store.kv.put(key, { ...a, attempts: (a.attempts ?? 0) + 1 });",
+  "",
+  "verify cap: five simultaneous steps held at a fetch barrier -> at most ceil(2/18) + 1 = 2 reach GitHub",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-outbox-written",
+  "vault/src/vault.ts",
+  "    this.store.kv.put(`gh.reach.outbox:${a.id}`, { id: a.id, kind: \"acceptance\", state, ...(reason ? { reason } : {}) });\n",
+  "",
+  "delivery: the reply of the completing step is lost; the next step still delivers 'recorded' once",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-results-expire",
+  "vault/src/vault.ts",
+  "if (a.state !== \"pending\" || this.now() <= a.expires_at) continue;",
+  "continue;",
+  "delivery: the agent stops stepping; after 20 minutes the next scheduled count delivers 'expired' and ends the read",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-results-end-read",
+  "vault/src/vault.ts",
+  "kv.put(\"gh.reach.gen\", { ...g, failed: \"reach_verify_expired\", rev: g.rev + 1 });",
+  "",
+  "delivery: the agent stops stepping; after 20 minutes the next scheduled count delivers 'expired' and ends the read",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-deliver-in-night",
+  "src/desk.ts",
+  "if (!(typeof p.calls === \"number\" && p.calls > DELIVER_MAX_CALLS)) await this.deliverReach(now);",
+  "if (!night && !(typeof p.calls === \"number\" && p.calls > DELIVER_MAX_CALLS)) await this.deliverReach(now);",
+  "delivery: a nightly start replaces an open verify read; the night slice delivers 'superseded'",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-deliver-in-headcount",
+  "src/desk.ts",
+  "    if (!saved) await this.log({ event: \"headcount_run_save_failed\" }, now).catch(() => undefined);\n    await this.deliverReach(now);",
+  "    if (!saved) await this.log({ event: \"headcount_run_save_failed\" }, now).catch(() => undefined);",
+  "delivery: the agent stops stepping; after 20 minutes the next scheduled count delivers 'expired' and ends the read",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-deliver-mark",
+  "src/desk.ts",
+  "if (!(await this.store.get(`reachsent:${id}`))) {",
+  "if (true) {",
+  "delivery is at least once and pushed once: a lost acknowledgement is retried without a second push (6.2)",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-deliver-inflight",
+  "src/desk.ts",
+  "        if (busy.has(id)) continue;\n",
+  "",
+  "delivery is at least once and pushed once: a lost acknowledgement is retried without a second push (6.2)",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-ack",
+  "src/desk.ts",
+  "          await vault.ghReachAck(id);\n",
+  "",
+  "R37: each final state the vault keeps is pushed as exactly one phone line, logged, then acknowledged; 'recorded' only when accepted",
+  "test/reachdesk.test.ts"
+ ],
+ [
+  "reach-ack-vault",
+  "vault/src/vault.ts",
+  "    this.store.kv.put(`gh.reach.outbox:${id}`, null);",
+  "",
+  "delivery: the reply of the completing step is lost; the next step still delivers 'recorded' once",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-probe-401-only",
+  "vault/src/vault.ts",
+  ".then((r) => r.status, () => 0)) === 401;",
+  ".then((r) => r.status, () => 0)) !== 0;",
+  "write probe granted: delete refused, failed or lost -> tap fails, key recorded as unrevoked, pushed once, nightly red",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-probe-recorded",
+  "vault/src/vault.ts",
+  "        this.store.kv.put(`gh.probe.unrevoked:${id}`, { perm, at: this.now(), until });\n",
+  "",
+  "write probe granted: delete refused, failed or lost -> tap fails, key recorded as unrevoked, pushed once, nightly red",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-probe-nightly",
+  "vault/src/vault.ts",
+  "if (this.now() <= u.until + 26 * 3600_000) r.changes.push(`probe_key_unrevoked: ${u.perm}`);",
+  "",
+  "write probe granted: delete refused, failed or lost -> tap fails, key recorded as unrevoked, pushed once, nightly red",
+  "test/reach.test.ts"
+ ],
+ [
+  "reach-deliver-skip-heavy",
+  "src/desk.ts",
+  "if (!(typeof p.calls === \"number\" && p.calls > DELIVER_MAX_CALLS)) await this.deliverReach(now);",
+  "await this.deliverReach(now);",
+  "real runtime budget: 18 repos in one slice, 36 in two, 37 refused; verify completion; the tap; a probe-cleanup failure",
+  "test/reach.workerd.test.ts"
+ ],
+ [
+  "reach-driver-closing-call",
+  "scripts/agent.mjs",
+  "  if (last?.acceptance) print(await step(\"\"));\n",
+  "",
+  "agent.mjs reach: steps until complete, failed, refused or idle; 'demand' only on the first call; a verify read after a tap",
+  "test/reachdesk.test.ts"
+ ],
+ [
+  "reach-driver-demand-first",
+  "scripts/agent.mjs",
+  "i === 0 && demand ?",
+  "demand ?",
+  "agent.mjs reach: steps until complete, failed, refused or idle; 'demand' only on the first call; a verify read after a tap",
+  "test/reachdesk.test.ts"
  ]
 ]

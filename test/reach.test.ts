@@ -644,7 +644,7 @@ test("verify cap: five simultaneous steps held at a fetch barrier -> at most cei
 });
 
 // ---- Codex build r1 #2: the final state of an approval is kept in the vault until the desk delivers it ----
-function withDesk(s: S, o: { loseStep?: number; loseAck?: number } = {}) {
+function withDesk(s: S, o: { loseStep?: number; loseAck?: number; failAck?: number } = {}) {
   const alerts: string[] = [];
   const v = s.vault;
   const vault = {
@@ -656,6 +656,7 @@ function withDesk(s: S, o: { loseStep?: number; loseAck?: number } = {}) {
     ghReachNight: () => v.ghReachNight(),
     ghReachResults: () => v.ghReachResults(),
     ghReachAck: async (id: string) => {
+      if (o.failAck && o.failAck-- > 0) throw new Error("network connection lost before the vault");
       const r = await v.ghReachAck(id);
       if (o.loseAck && o.loseAck-- > 0) throw new Error("network connection lost");
       return r;
@@ -714,6 +715,15 @@ test("delivery is at least once and pushed once: a lost acknowledgement is retri
   await d.desk.reachStep(undefined, s.clock.now);
   assert.equal(d.alerts.length, 1);
   assert.equal((await s.vault.ghReachResults()).length, 0, "the vault acted on the ack before the reply was lost");
+  // The ack never reached the vault: it offers the result again; the desk acknowledges it without a second push.
+  const u = await readDay();
+  assert.equal((await tap(u)).ok, true);
+  const f = withDesk(u, { failAck: 1 });
+  await f.desk.reachStep(undefined, u.clock.now);
+  assert.equal((await u.vault.ghReachResults()).length, 1, "still offered");
+  await f.desk.deliverReach(u.clock.now);
+  assert.equal(f.alerts.length, 1, "pushed once");
+  assert.equal((await u.vault.ghReachResults()).length, 0, "acknowledged on the retry");
   // Two deliveries at once with an undelivered result: one push.
   const t = await readDay();
   assert.equal((await tap(t)).ok, true);
